@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.18"
+local VERSION = "9.19"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -6612,6 +6612,20 @@ local function captureOriginIfNeeded()
 	local char = LocalPlayer.Character
 	local root = char and char:FindFirstChild("HumanoidRootPart")
 	if not root then return end
+
+	-- ห้ามจำพิกัดในเมือง (Z > -250) เป็นจุดฟาร์มเด็ดขาด ป้องกัน Origin ปนเปื้อน
+	if root.Position.Z > -250 then return end
+
+	-- ห้ามจำพิกัดหน้าเสาวาร์ป (ระยะ <= 35 studs จากเสาใดๆ) เป็นจุดฟาร์ม
+	local warpPillarsFolder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("WarpPillars")
+	if warpPillarsFolder then
+		for _, p in ipairs(warpPillarsFolder:GetChildren()) do
+			if (p:GetPivot().Position - root.Position).Magnitude <= 35.0 then
+				return
+			end
+		end
+	end
+
 	if HUB.OriginCFrame == nil then
 		HUB.OriginCFrame = root.CFrame
 		-- หากจุดเริ่มต้นอยู่ในโซนล่ามอนสเตอร์นอกเมือง (Z < -300) ให้ถือว่าต้องกลับมาเปิด Auto Play ฟาร์มต่อเสมอ
@@ -6773,31 +6787,44 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn)
 		-- ลำดับ 3: อยู่ในทุ่งมอนสเตอร์ลึกๆ ที่ไม่มีเสาวาร์ปในระยะเดินถึง -> ร่าย HomeWarp กลับเมืองหลวง
 		if updateStatusFn then updateStatusFn("สถานะ: วาร์ปเข้าเมืองเพื่อต่อเสาวาร์ป...") end
 
-		-- เช็คคูลดาวน์ HomeWarp หากมีเศษคูลดาวน์สั้นๆ (<= 5 วิ) ให้รอให้พร้อมก่อน
+		-- เช็คคูลดาวน์ HomeWarp หากมีเศษคูลดาวน์สั้นๆ (<= 12 วิ) ให้รอให้พร้อมก่อน
 		local readyAt = tonumber(LocalPlayer:GetAttribute("HomeWarpReadyAt")) or 0
 		local cdLeft = math.max(0, math.ceil(readyAt - workspace:GetServerTimeNow()))
-		if cdLeft > 0 and cdLeft <= 5 then
-			task.wait(cdLeft + 0.1)
+		if cdLeft > 0 and cdLeft <= 12 then
+			if updateStatusFn then
+				updateStatusFn(string.format("สถานะ: รอ HomeWarp คูลดาวน์อีก %d วิ...", cdLeft))
+			end
+			local cdT0 = os.clock()
+			while (os.clock() - cdT0 < (cdLeft + 0.2)) and not (shouldAbortFn and shouldAbortFn()) do
+				task.wait(0.2)
+			end
+			cdLeft = 0
 		end
 
-		if root then root.Anchored = true end
-		local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
-		if homeWarp then
-			homeWarp:FireServer("start", "merchant")
-		else
-			local LumiMenuToggle = LocalPlayer:FindFirstChild("LumiMenuToggle")
-			if LumiMenuToggle then pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end) end
+		local reachedTown = false
+		if cdLeft == 0 and not (shouldAbortFn and shouldAbortFn()) then
+			if root then root.Anchored = true end
+			local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
+			if homeWarp then
+				homeWarp:FireServer("start", "merchant")
+			else
+				local LumiMenuToggle = LocalPlayer:FindFirstChild("LumiMenuToggle")
+				if LumiMenuToggle then pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end) end
+			end
+			local t0 = os.clock()
+			while os.clock() - t0 < 8.0 and not (shouldAbortFn and shouldAbortFn()) do
+				task.wait(0.1)
+				char = LocalPlayer.Character
+				root = char and char:FindFirstChild("HumanoidRootPart")
+				if root and root.Position.Z > -200 then
+					reachedTown = true
+					break
+				end
+			end
+			if root then root.Anchored = false end
 		end
-		local t0 = os.clock()
-		while os.clock() - t0 < 8.0 and not (shouldAbortFn and shouldAbortFn()) do
-			task.wait(0.1)
-			char = LocalPlayer.Character
-			root = char and char:FindFirstChild("HumanoidRootPart")
-			if root and root.Position.Z > -200 then break end
-		end
-		if root then root.Anchored = false end
 
-		if townPillar then
+		if reachedTown and townPillar then
 			currentNearPillar = townPillar
 		end
 	end
@@ -6806,7 +6833,7 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn)
 	root = char and char:FindFirstChild("HumanoidRootPart")
 	if not root then return false end
 
-	-- วาร์ปไปยัง returnPillarId (ถ้ายังไม่ได้อยู่ที่นั่น)
+	-- วาร์ปไปยัง returnPillarId (ถ้ายังไม่ได้อยู่ที่นั่น และมีเสาต้นทางที่ถูกต้อง)
 	if currentNearPillar and returnPillarId then
 		if updateStatusFn then
 			updateStatusFn(string.format("สถานะ: วาร์ปไปยังเสา %s...", tostring(returnPillarId)))
@@ -6823,6 +6850,11 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn)
 	local postWarpDist = (root.Position - originPos).Magnitude
 	if postWarpDist > 500.0 then
 		warn(string.format("[Hunting Together Hub] ReturnToOrigin: ยังอยู่ห่างจากเป้าหมาย %.1f studs (ต่างโซน) — ยกเลิกการวิ่งชนกำแพง", postWarpDist))
+		-- Self-Healing: เคลียร์ Origin ที่เป็นไปไม่ได้ทิ้ง และเปิด Auto Play ในโซนปัจจุบันทันที ป้องกันยืนนิ่ง
+		clearOrigin()
+		if root.Position.Z <= -300 and HUB.EnsureGameAutoActive then
+			HUB.EnsureGameAutoActive(5, 0.3)
+		end
 		return false
 	end
 
@@ -6853,6 +6885,14 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn)
 		end
 		clearOrigin()
 		return true
+	end
+
+	-- Self-Healing Fallback: ถ้าเดินไม่ถึงใน 45s หรือหลงทาง แต่ตัวละครอยู่ในโซนมอนสเตอร์แล้ว ให้เปิด Auto Play และเคลียร์ Origin เพื่อไม่ให้ยืนแข็งทื่อ
+	if root and root.Position.Z <= -300 then
+		clearOrigin()
+		if HUB.EnsureGameAutoActive then
+			HUB.EnsureGameAutoActive(5, 0.3)
+		end
 	end
 
 	return false
@@ -7486,19 +7526,20 @@ do
 
 	local function cancelAutoSellRoutine()
 		_cancelSellRoutine = true
-		if _isSellingRoutine then
-			_isSellingRoutine = false
+		_isSellingRoutine = false
 		HUB.IsSellingRoutineActive = false
-			pcall(function()
-				local char = LocalPlayer.Character
-				local hum = char and char:FindFirstChildOfClass("Humanoid")
-				if hum then hum:Move(Vector3.zero, false) end
-				setSprinting(false)
-			end)
-			warn("[Hunting Together Hub] Auto Sell: ยกเลิกลูปขายของตามคำสั่งผู้ใช้")
-			if not HUB.Config.autoSell and not HUB.Config.autoFarmBoss then
-				clearOrigin()
-			end
+		HUB.SellRoutineStartTime = nil
+		pcall(function()
+			local char = LocalPlayer.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if root then root.Anchored = false end
+			if hum then hum:Move(Vector3.zero, false) end
+			setSprinting(false)
+		end)
+		warn("[Hunting Together Hub] Auto Sell: ยกเลิกลูปขายของ")
+		if not HUB.Config.autoSell and not HUB.Config.autoFarmBoss then
+			clearOrigin()
 		end
 	end
 	HUB.CancelAutoSellRoutine = cancelAutoSellRoutine
@@ -7513,6 +7554,7 @@ do
 		_isSellingRoutine = true
 		_cancelSellRoutine = false
 		HUB.IsSellingRoutineActive = true
+		HUB.SellRoutineStartTime = os.clock()
 
 		local success, err = pcall(function()
 			local function shouldAbort()
@@ -7539,37 +7581,78 @@ do
 
 			if shouldAbort() then return end
 
-			-- 2. ร่ายวาร์ปไปหน้า Merchant (เฉพาะเมื่ออยู่นอกเมือง Z <= -200)
+			-- 2. เดินทางกลับไปที่ร้าน Merchant (เฉพาะเมื่ออยู่นอกเมือง Z <= -200)
 			if not alreadyInTown then
-				if root then root.Anchored = true end
-				local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
-				if homeWarp then
-					homeWarp:FireServer("start", "merchant")
-				elseif LumiMenuToggle then
-					pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end)
+				local reachedTown = false
+
+				-- 2.1 ตรวจสอบคูลดาวน์ HomeWarp
+				local readyAt = tonumber(LocalPlayer:GetAttribute("HomeWarpReadyAt")) or 0
+				local cdLeft = math.max(0, math.ceil(readyAt - workspace:GetServerTimeNow()))
+
+				-- ถ้าติดคูลดาวน์สั้นๆ (<= 12 วินาที) ให้รอจนพร้อม
+				if cdLeft > 0 and cdLeft <= 12 then
+					if HUB.UI.SellStatusLabel then
+						HUB.UI.SellStatusLabel.Text = string.format("สถานะ: กระเป๋าเต็ม — รอ HomeWarp อีก %d วิ...", cdLeft)
+					end
+					local cdWaitT0 = os.clock()
+					while (os.clock() - cdWaitT0 < (cdLeft + 0.2)) and not shouldAbort() do
+						task.wait(0.2)
+					end
+					cdLeft = 0
 				end
 
-				-- รอ Cast 5 วินาที + เช็คยืนยันว่าเข้าสู่เขตเมืองแล้วจริง (Position.Z > -200)
-				local reachedTown = false
-				local t0 = os.clock()
-				while os.clock() - t0 < 8 and not shouldAbort() do
-					task.wait(0.1)
-					char = LocalPlayer.Character
-					root = char and char:FindFirstChild("HumanoidRootPart")
-					hum = char and char:FindFirstChildOfClass("Humanoid")
-					if not root or not hum or hum.Health <= 0 then break end
+				-- ถ้าไม่มีคูลดาวน์ ให้ยิง HomeWarp
+				if cdLeft == 0 and not shouldAbort() then
+					if root then root.Anchored = true end
+					local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
+					if homeWarp then
+						homeWarp:FireServer("start", "merchant")
+					elseif LumiMenuToggle then
+						pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end)
+					end
 
-					if root.Position.Z > -200 then
-						reachedTown = true
-						break
+					-- รอ Cast 5 วินาที + เช็คยืนยันว่าเข้าสู่เขตเมืองแล้วจริง (Position.Z > -200)
+					local t0 = os.clock()
+					while os.clock() - t0 < 8 and not shouldAbort() do
+						task.wait(0.1)
+						char = LocalPlayer.Character
+						root = char and char:FindFirstChild("HumanoidRootPart")
+						hum = char and char:FindFirstChildOfClass("Humanoid")
+						if not root or not hum or hum.Health <= 0 then break end
+
+						if root.Position.Z > -200 then
+							reachedTown = true
+							break
+						end
+					end
+					if root then root.Anchored = false end
+				end
+
+				-- 2.2 ถ้า HomeWarp ไม่สำเร็จหรือติดคูลดาวน์นาน (> 12 วิ) ให้ตรวจหาเสาวาร์ปใกล้ตัวเพื่อวาร์ปเข้าเมือง (Town Warp: 0 Silver, 0 Cooldown)
+				if not reachedTown and not shouldAbort() then
+					local localPillar = getNearbyBossPillar(root.Position)
+					if localPillar then
+						if HUB.UI.SellStatusLabel then
+							HUB.UI.SellStatusLabel.Text = "สถานะ: ใช้เสาวาร์ปใกล้เคียงเพื่อเดินทางเข้าเมือง (Zero Cooldown)..."
+						end
+						local okWarp = executePillarWarp(localPillar, "Town", shouldAbort)
+						if okWarp then
+							char = LocalPlayer.Character
+							root = char and char:FindFirstChild("HumanoidRootPart")
+							if root and root.Position.Z > -200 then
+								reachedTown = true
+							end
+						end
 					end
 				end
-				if root then root.Anchored = false end
 
 				if shouldAbort() or not root or not hum or hum.Health <= 0 then return end
 
 				if not reachedTown then
-					warn("[Hunting Together Hub] Auto Sell: วาร์ปเข้าเมืองไม่สำเร็จ — ยกเลิกรูทีน")
+					warn("[Hunting Together Hub] Auto Sell: วาร์ปเข้าเมืองไม่สำเร็จ — เลื่อนรอบการขายและเปิด Auto Play ต่อ")
+					if HUB.EnsureGameAutoActive and root.Position.Z <= -300 then
+						HUB.EnsureGameAutoActive(4, 0.3)
+					end
 					return
 				end
 
@@ -7669,6 +7752,16 @@ do
 						shopSellMany:FireServer(sellList)
 						task.wait(0.25)
 					end
+					HUB.AllItemsProtectedAlert = false
+				elseif #sellList == 0 then
+					local curStats = getBagStats()
+					local curThresh = HUB.Config.autoSellThresholdPct or 85
+					if curStats.pct >= curThresh or curStats.isFull then
+						HUB.AllItemsProtectedAlert = true
+						if HUB.UI.SellStatusLabel then
+							HUB.UI.SellStatusLabel.Text = string.format("สถานะ: กระเป๋า %d%% แต่ทุกชิ้นถูกล็อค/ป้องกัน (ไม่มีของขาย)", curStats.pct)
+						end
+					end
 				end
 			end
 
@@ -7681,6 +7774,7 @@ do
 				end
 				_isSellingRoutine = false
 				HUB.IsSellingRoutineActive = false
+				HUB.SellRoutineStartTime = nil
 				task.spawn(function()
 					task.wait(0.2)
 					if HUB.RunAutoBossRoutine then HUB.RunAutoBossRoutine() end
@@ -7699,6 +7793,7 @@ do
 
 		_isSellingRoutine = false
 		HUB.IsSellingRoutineActive = false
+		HUB.SellRoutineStartTime = nil
 		if HUB.RefreshSellStatusLabel then
 			HUB.RefreshSellStatusLabel()
 		end
@@ -7709,6 +7804,11 @@ do
 		if not HUB.UI.SellStatusLabel then return end
 		if customText then
 			HUB.UI.SellStatusLabel.Text = customText
+			return
+		end
+		if HUB.AllItemsProtectedAlert then
+			local stats = getBagStats()
+			HUB.UI.SellStatusLabel.Text = string.format("สถานะ: กระเป๋า %d%% แต่ทุกชิ้นถูกล็อค/ป้องกัน (ไม่มีของขาย)", stats.pct)
 			return
 		end
 		local stats = getBagStats()
@@ -7729,8 +7829,10 @@ do
 	end
 
 	-- Event-driven reactive watcher: ซิงค์ % กระเป๋าและตรวจเช็ค Auto Sell ทันทีแบบ Real-time เมื่อความจุกระเป๋าเปลี่ยน
+	local _lastProtectedAlertTime = 0
 	local function checkBagAndSellIfNeeded()
 		if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+		HUB.AllItemsProtectedAlert = false -- มีการเปลี่ยนแปลงสล็อตในกระเป๋า รีเซ็ต alert
 		if not _isSellingRoutine then
 			refreshSellStatusLabel()
 		end
@@ -7751,10 +7853,15 @@ do
 		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
 			task.wait(2.5)
 			if HUB.Config.autoSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
-				local stats = getBagStats()
-				local threshold = HUB.Config.autoSellThresholdPct or 85
-				if stats.pct >= threshold or (threshold == 100 and stats.isFull) then
-					task.spawn(runAutoSellRoutine)
+				if HUB.AllItemsProtectedAlert and (os.clock() - _lastProtectedAlertTime < 45.0) then
+					-- ข้ามการสแปมรูทีนถ้าไอเทมทั้งหมดล็อคอยู่แล้ว และยังไม่ถึงรอบตรวจซ้ำ 45s
+				else
+					local stats = getBagStats()
+					local threshold = HUB.Config.autoSellThresholdPct or 85
+					if stats.pct >= threshold or (threshold == 100 and stats.isFull) then
+						_lastProtectedAlertTime = os.clock()
+						task.spawn(runAutoSellRoutine)
+					end
 				end
 			end
 		end
@@ -7974,6 +8081,7 @@ do
 		_isBossRoutine = true
 		_cancelBossRoutine = false
 		HUB.IsBossRoutineActive = true
+		HUB.BossRoutineStartTime = os.clock()
 
 		local success, err = pcall(function()
 			local function shouldAbort()
@@ -8052,37 +8160,68 @@ do
 							HUB.DisableGameAutoPlay()
 						end
 
-						-- เช็คคูลดาวน์ HomeWarp หากมีเศษคูลดาวน์สั้นๆ (<= 5 วิ) ให้รอให้พร้อมก่อน
+						-- เช็คคูลดาวน์ HomeWarp หากมีเศษคูลดาวน์สั้นๆ (<= 12 วิ) ให้รอให้พร้อมก่อน
 						local readyAt = tonumber(LocalPlayer:GetAttribute("HomeWarpReadyAt")) or 0
 						local cdLeft = math.max(0, math.ceil(readyAt - workspace:GetServerTimeNow()))
-						if cdLeft > 0 and cdLeft <= 5 then
-							task.wait(cdLeft + 0.1)
-						end
-
-						if root then root.Anchored = true end
-						local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
-						if homeWarp then
-							homeWarp:FireServer("start", "merchant")
-						elseif LumiMenuToggle then
-							pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end)
+						if cdLeft > 0 and cdLeft <= 12 then
+							if HUB.UI.BossStatusLabel then
+								HUB.UI.BossStatusLabel.Text = string.format("สถานะ: รอ HomeWarp อีก %d วิ เพื่อไปล่า %s...", cdLeft, targetBoss.name)
+							end
+							local cdWaitT0 = os.clock()
+							while (os.clock() - cdWaitT0 < (cdLeft + 0.2)) and not shouldAbort() do
+								task.wait(0.2)
+							end
+							cdLeft = 0
 						end
 
 						local reachedTown = false
-						local t0 = os.clock()
-						while os.clock() - t0 < 8.0 and not shouldAbort() do
-							task.wait(0.1)
-							char = LocalPlayer.Character
-							root = char and char:FindFirstChild("HumanoidRootPart")
-							hum = char and char:FindFirstChildOfClass("Humanoid")
-							if not root or not hum or hum.Health <= 0 then break end
+						if cdLeft == 0 and not shouldAbort() then
+							if root then root.Anchored = true end
+							local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
+							if homeWarp then
+								homeWarp:FireServer("start", "merchant")
+							elseif LumiMenuToggle then
+								pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end)
+							end
 
-							if root.Position.Z > -200 then
-								reachedTown = true
-								break
+							local t0 = os.clock()
+							while os.clock() - t0 < 8.0 and not shouldAbort() do
+								task.wait(0.1)
+								char = LocalPlayer.Character
+								root = char and char:FindFirstChild("HumanoidRootPart")
+								hum = char and char:FindFirstChildOfClass("Humanoid")
+								if not root or not hum or hum.Health <= 0 then break end
+
+								if root.Position.Z > -200 then
+									reachedTown = true
+									break
+								end
+							end
+							if root then root.Anchored = false end
+						end
+
+						-- หาก HomeWarp ติดคูลดาวน์นานหรือเฟล ให้ลองเช็คเสาวาร์ปใกล้เคียงเพื่อวาร์ปไปเมือง
+						if not reachedTown and not shouldAbort() then
+							local fallbackPillar = getNearbyBossPillar(root.Position)
+							if fallbackPillar then
+								local okPillar = executePillarWarp(fallbackPillar, "Town", shouldAbort)
+								if okPillar then
+									char = LocalPlayer.Character
+									root = char and char:FindFirstChild("HumanoidRootPart")
+									if root and root.Position.Z > -200 then
+										reachedTown = true
+									end
+								end
 							end
 						end
-						if root then root.Anchored = false end
-						if not reachedTown or shouldAbort() then return end
+
+						if not reachedTown or shouldAbort() then
+							warn("[Hunting Together Hub] Auto Boss: วาร์ปเข้าเมืองไม่สำเร็จ — คืนค่า Auto Play")
+							if root and root.Position.Z <= -300 and HUB.EnsureGameAutoActive then
+								HUB.EnsureGameAutoActive(4, 0.3)
+							end
+							return
+						end
 
 						-- รอ WarpLandClient ปล่อย Anchored และ RequestStreamAroundAsync รอบเสาเมืองหลวง
 						local tWarpDone = os.clock()
@@ -8094,7 +8233,7 @@ do
 						end)
 						task.wait(0.15)
 
-						if townPillar then
+						if reachedTown and townPillar then
 							currentNearPillar = townPillar
 						end
 					end
@@ -8415,6 +8554,7 @@ do
 
 		_isBossRoutine = false
 		HUB.IsBossRoutineActive = false
+		HUB.BossRoutineStartTime = nil
 		if HUB.UI.BossStatusLabel then
 			if HUB.Config.autoFarmBoss then
 				HUB.UI.BossStatusLabel.Text = "สถานะ: พร้อมทำงาน · สแตนด์บายรอบอสเกิด..."
@@ -8429,6 +8569,7 @@ do
 		_cancelBossRoutine = true
 		_isBossRoutine = false
 		HUB.IsBossRoutineActive = false
+		HUB.BossRoutineStartTime = nil
 		if not HUB.Config.autoSell and not HUB.Config.autoFarmBoss then
 			clearOrigin()
 		end
@@ -8471,6 +8612,64 @@ do
 				local candidate = getNextAliveSelectedBoss()
 				if candidate and not HUB.IsSellingRoutineActive then
 					task.spawn(runAutoBossRoutine)
+				end
+			end
+		end
+	end)
+
+	-- 9.27 Self-Healing Watchdog (ทุก 5 วินาที): ตรวจจับและปลดล็อค Flag / Routine ที่ค้างเกินเวลาแบบอัตโนมัติ
+	task.spawn(function()
+		local _stuckBossCount = 0
+		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
+			task.wait(5.0)
+			local now = os.clock()
+
+			-- 1. Boss Routine Watchdog: หากรูทีนล่าบอสค้างเกิน 240 วินาที ให้สั่ง Force-Reset ทันที
+			if _isBossRoutine or HUB.IsBossRoutineActive then
+				if HUB.BossRoutineStartTime and (now - HUB.BossRoutineStartTime > 240.0) then
+					warn("[Hunting Together Hub] Watchdog: Auto Boss ค้างเกิน 240s — ปลดล็อคสถานะอัตโนมัติ")
+					if HUB.CancelAutoBossRoutine then pcall(HUB.CancelAutoBossRoutine) end
+					_isBossRoutine = false
+					HUB.IsBossRoutineActive = false
+					HUB.Navigating = false
+					HUB.BossRoutineStartTime = nil
+				end
+			else
+				HUB.BossRoutineStartTime = nil
+			end
+
+			-- 2. Sell Routine Watchdog: หากรูทีนขายของค้างเกิน 90 วินาที ให้สั่ง Force-Reset ทันที
+			if HUB.IsSellingRoutineActive then
+				if HUB.SellRoutineStartTime and (now - HUB.SellRoutineStartTime > 90.0) then
+					warn("[Hunting Together Hub] Watchdog: Auto Sell ค้างเกิน 90s — ปลดล็อคสถานะอัตโนมัติ")
+					if HUB.CancelAutoSellRoutine then pcall(HUB.CancelAutoSellRoutine) end
+					HUB.IsSellingRoutineActive = false
+					HUB.Navigating = false
+					HUB.SellRoutineStartTime = nil
+				end
+			else
+				HUB.SellRoutineStartTime = nil
+			end
+
+			-- 3. Monster Zone Idle Self-Healing: ยืนนิ่งในทุ่งมอนสเตอร์ (Z <= -300) โดยไม่ได้ติดรูทีนใดๆ แต่ Auto Play ปิดอยู่
+			if not _isBossRoutine and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.Navigating and not HUB.Dodging then
+				local ch = LocalPlayer.Character
+				local rt = ch and ch:FindFirstChild("HumanoidRootPart")
+				local hm = ch and ch:FindFirstChildOfClass("Humanoid")
+				if rt and hm and hm.Health > 0 and rt.Position.Z <= -300 then
+					if not HUB.UserDisabledAuto and not HUB.IsGameAutoActive() and HUB.Config.autoResumeGamePlay ~= false then
+						_stuckBossCount = _stuckBossCount + 1
+						if _stuckBossCount >= 3 then -- ยืนนิ่งเกิน 15 วินาที
+							_stuckBossCount = 0
+							if HUB.EnsureGameAutoActive then
+								HUB.EnsureGameAutoActive(4, 0.3)
+							end
+						end
+					else
+						_stuckBossCount = 0
+					end
+				else
+					_stuckBossCount = 0
 				end
 			end
 		end
@@ -9242,19 +9441,46 @@ do
 	end)
 end
 
--- ===== 9.5 Auto Resume Game Play Worker (Startup & Rejoin Auto-Execute Resilience) =====
+-- ===== 9.5 Auto Resume Game Play Worker (Startup & Rejoin Auto-Execute Resilience & Respawn Lifecycle) =====
 do
 	-- ป้องกัน CombatClient สั่งปิด Auto Play ตอนตัวละครเกิดใหม่ (RespawnKeepBot)
 	pcall(function()
 		LocalPlayer:SetAttribute("RespawnKeepBot", true)
 	end)
 
-	-- User Shutoff Guard: หาก Hub เคยเปิด Auto Play ให้ แล้วผู้ใช้กดปิดด้วยตนเอง (ไม่ใช่บอทสั่งพักชั่วคราวเพื่อเดิน/วาร์ป) จะไม่เปิดอัตโนมัติซ้ำอีกในรอบ execute นี้
+	local function onCharacterDied()
+		HUB.CharacterDying = true
+		-- ยกเลิกลูปรูทีนที่กำลังทำงานอยู่ทันที ป้องกันไม่ให้เธรดค้างบนร่างที่ตาย
+		if HUB.CancelAutoBossRoutine then pcall(HUB.CancelAutoBossRoutine) end
+		if HUB.CancelAutoSellRoutine then pcall(HUB.CancelAutoSellRoutine) end
+		HUB.Navigating = false
+		HUB.Dodging = false
+	end
+
+	local function hookHumanoid(char)
+		if not char then return end
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			HUB:AddConnection(hum.Died:Connect(onCharacterDied))
+		end
+	end
+
+	if LocalPlayer.Character then
+		hookHumanoid(LocalPlayer.Character)
+	end
+
+	-- User Shutoff Guard: หาก Hub เคยเปิด Auto Play ให้ แล้วผู้ใช้กดปิดด้วยตนเอง จะไม่เปิดอัตโนมัติซ้ำอีก
+	-- แต่ถ้าปิดเพราะตัวละครตาย หรือเลือดหมด จะไม่นับว่าผู้ใช้สั่งปิดเองเด็ดขาด 100%
 	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("AutoOn"):Connect(function()
 		if LocalPlayer:GetAttribute("AutoOn") ~= true then
+			if HUB.CharacterDying then return end
+			local ch = LocalPlayer.Character
+			local h = ch and ch:FindFirstChildOfClass("Humanoid")
+			if not h or h.Health <= 0 then return end
+
 			if HUB.BotTurnedOnAuto and not HUB.BotPausingAuto and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.Navigating then
 				HUB.UserDisabledAuto = true
-				print("[Hunting Together Hub] ผู้ใช้กดปิด Auto Play ด้วยตนเอง — งดการเปิดอัตโนมัติซ้ำในรอบ execute นี้")
+				print("[Hunting Together Hub] ผู้ใช้กดปิด Auto Play ด้วยตนเอง — งดการเปิดอัตโนมัติซ้ำจนกว่าจะกดเปิดในเมนู Hub หรือ execute ใหม่")
 				if HUB.UI.AutoResumeStatusLabel then
 					HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: ผู้ใช้กดปิด Auto Play (งดเปิดซ้ำ)"
 				end
@@ -9307,25 +9533,57 @@ do
 		end
 	end)
 
-	-- เมื่อตัวละครเกิดใหม่ (Respawn) สแตมป์ RespawnKeepBot และเปิด Auto Play ต่อเมื่อพบมอนสเตอร์
-	HUB:AddConnection(LocalPlayer.CharacterAdded:Connect(function()
+	-- เมื่อตัวละครเกิดใหม่ (Respawn): Lifecycle Self-Healing Engine กู้คืนสถานะทั้งหมด
+	HUB:AddConnection(LocalPlayer.CharacterAdded:Connect(function(newChar)
+		HUB.CharacterDying = false
+		HUB.UserDisabledAuto = false -- ปลดล็อค False UserDisabledAuto จากจังหวะตาย 100%
+		HUB.Navigating = false
+		HUB.Dodging = false
+		if HUB.CancelAutoBossRoutine then pcall(HUB.CancelAutoBossRoutine) end
+		if HUB.CancelAutoSellRoutine then pcall(HUB.CancelAutoSellRoutine) end
+
 		pcall(function()
 			LocalPlayer:SetAttribute("RespawnKeepBot", true)
+			local root = newChar:WaitForChild("HumanoidRootPart", 5)
+			if root then root.Anchored = false end
 		end)
-		if not HUB.Alive or HUB.Config.autoResumeGamePlay == false or HUB.UserDisabledAuto then return end
+		hookHumanoid(newChar)
+
+		if not HUB.Alive or HUB.Config.autoResumeGamePlay == false then return end
 
 		task.delay(2.5, function()
-			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN or HUB.UserDisabledAuto then return end
-			if HUB.Config.autoResumeGamePlay ~= false and not HUB.IsGameAutoActive() then
-				if isMonsterWithinRadius(30) then
-					local ok = HUB.EnsureGameAutoActive(4, 0.4)
-					if ok then
-						HUB.BotTurnedOnAuto = true
-						print("[Hunting Together Hub] ตัวละครเกิดใหม่และพบมอนสเตอร์ — สั่งเปิดใช้งาน Auto Play ต่อเนื่องเรียบร้อย")
-						if HUB.UI.AutoResumeStatusLabel then
-							HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: เปิด Auto Play หลังเกิดใหม่ (พบมอนในระยะ 30s) ⚔️"
-						end
+			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+			local ch = LocalPlayer.Character
+			local root = ch and ch:FindFirstChild("HumanoidRootPart")
+			if not root then return end
+
+			-- กรณีเกิดในเมือง (Z > -200) แต่มี Origin จุดฟาร์มมอนสเตอร์เดิมที่ยังค้างอยู่ (Z <= -300)
+			if root.Position.Z > -200 and HUB.OriginCFrame and HUB.OriginCFrame.Position.Z <= -300 then
+				task.spawn(function()
+					if HUB.ReturnToOrigin then
+						HUB.ReturnToOrigin(nil, function(txt)
+							if HUB.UI.AutoResumeStatusLabel then
+								HUB.UI.AutoResumeStatusLabel.Text = txt
+							end
+						end)
 					end
+				end)
+				return
+			end
+
+			-- ถ้ามีมอนสเตอร์ใกล้ตัว หรืออยู่ในโซนมอนสเตอร์ ให้เปิด Auto Play ทันที
+			if isMonsterWithinRadius(30) or root.Position.Z <= -300 then
+				local ok = HUB.EnsureGameAutoActive(5, 0.3)
+				if ok then
+					HUB.BotTurnedOnAuto = true
+					print("[Hunting Together Hub] ตัวละครเกิดใหม่ — สั่งเปิดใช้งาน Auto Play ต่อเนื่องเรียบร้อย")
+					if HUB.UI.AutoResumeStatusLabel then
+						HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: เปิด Auto Play หลังเกิดใหม่สำเร็จ ⚔️"
+					end
+				end
+			else
+				if HUB.UI.AutoResumeStatusLabel and not HUB.BotTurnedOnAuto then
+					HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: เกิดใหม่ที่เมือง (รอคำสั่งหรือเดินทางไปจุดฟาร์ม)"
 				end
 			end
 		end)
