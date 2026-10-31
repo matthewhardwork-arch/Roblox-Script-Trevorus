@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.18)
+-- Hunting Together Hub (v9.28)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.19"
+local VERSION = "9.28"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -250,9 +250,21 @@ local HUB = {
 			Gold = true,
 			Silver = true,
 		},
+		autoLockGameTiers = {
+			[1] = false,
+			[2] = false,
+			[3] = false,
+			[4] = false,
+			[5] = true,
+			[6] = true,
+		},
 		autoLockEquipRules = {},
+		autoSalvage = false,
+		autoSalvageThresholdPct = 85,
 		autoSell = false,
 		autoSellThresholdPct = 85,
+		autoSellJunk = true,
+		autoSellGear = true,
 		autoFarmBoss = false,
 		farmBossList = {
 			Boss01 = false,
@@ -717,9 +729,14 @@ local function saveConfig()
 		autoLock = HUB.Config.autoLock,
 		autoLockTiers = HUB.Config.autoLockTiers,
 		autoLockStars = HUB.Config.autoLockStars,
+		autoLockGameTiers = HUB.Config.autoLockGameTiers,
 		autoLockEquipRules = HUB.Config.autoLockEquipRules,
+		autoSalvage = HUB.Config.autoSalvage,
+		autoSalvageThresholdPct = HUB.Config.autoSalvageThresholdPct,
 		autoSell = HUB.Config.autoSell,
 		autoSellThresholdPct = HUB.Config.autoSellThresholdPct,
+		autoSellJunk = (HUB.Config.autoSellJunk ~= false),
+		autoSellGear = (HUB.Config.autoSellGear ~= false),
 		autoFarmBoss = HUB.Config.autoFarmBoss,
 		farmBossList = HUB.Config.farmBossList,
 		autoResumeGamePlay = (HUB.Config.autoResumeGamePlay ~= false),
@@ -767,8 +784,25 @@ local function loadConfig()
 						HUB.Config.autoLockStars[s] = v
 					end
 				end
+				if type(data.autoLockGameTiers) == "table" then
+					for t, v in pairs(data.autoLockGameTiers) do
+						local tNum = tonumber(t)
+						if tNum then
+							HUB.Config.autoLockGameTiers[tNum] = (v == true)
+						end
+					end
+				end
 				if type(data.autoLockEquipRules) == "table" then
 					HUB.Config.autoLockEquipRules = data.autoLockEquipRules
+					-- Migration for WeaponPhys -> WeaponPhysMelee / WeaponPhysRanged
+					if HUB.Config.autoLockEquipRules["WeaponPhys"] then
+						if not HUB.Config.autoLockEquipRules["WeaponPhysMelee"] then
+							HUB.Config.autoLockEquipRules["WeaponPhysMelee"] = HUB.Config.autoLockEquipRules["WeaponPhys"]
+						end
+						if not HUB.Config.autoLockEquipRules["WeaponPhysRanged"] then
+							HUB.Config.autoLockEquipRules["WeaponPhysRanged"] = HUB.Config.autoLockEquipRules["WeaponPhys"]
+						end
+					end
 					for _, r in pairs(HUB.Config.autoLockEquipRules) do
 						if type(r) == "table" then
 							if type(r.wantedSpecials) ~= "table" then
@@ -788,8 +822,12 @@ local function loadConfig()
 						end
 					end
 				end
+				if data.autoSalvage ~= nil then HUB.Config.autoSalvage = data.autoSalvage end
+				if data.autoSalvageThresholdPct ~= nil then HUB.Config.autoSalvageThresholdPct = tonumber(data.autoSalvageThresholdPct) or 85 end
 				if data.autoSell ~= nil then HUB.Config.autoSell = data.autoSell end
 				if data.autoSellThresholdPct ~= nil then HUB.Config.autoSellThresholdPct = tonumber(data.autoSellThresholdPct) or 85 end
+				if data.autoSellJunk ~= nil then HUB.Config.autoSellJunk = data.autoSellJunk end
+				if data.autoSellGear ~= nil then HUB.Config.autoSellGear = data.autoSellGear end
 				if data.autoFarmBoss ~= nil then HUB.Config.autoFarmBoss = data.autoFarmBoss end
 				if type(data.farmBossList) == "table" then
 					for k, v in pairs(data.farmBossList) do
@@ -799,8 +837,10 @@ local function loadConfig()
 				if data.autoResumeGamePlay ~= nil then HUB.Config.autoResumeGamePlay = data.autoResumeGamePlay end
 				if data.autoStartGame ~= nil then HUB.Config.autoStartGame = data.autoStartGame end
 				if data.maxLootBoxMiniboss ~= nil then HUB.Config.maxLootBoxMiniboss = tonumber(data.maxLootBoxMiniboss) or 1 end
-				if data.bossPreSpawnThreshold ~= nil and tonumber(data.bossPreSpawnThreshold) ~= 10 then
-					HUB.Config.bossPreSpawnThreshold = tonumber(data.bossPreSpawnThreshold)
+				if data.bossPreSpawnThreshold ~= nil then
+					local bSec = tonumber(data.bossPreSpawnThreshold) or 15
+					bSec = math.clamp(math.floor(bSec / 5 + 0.5) * 5, 5, 60)
+					HUB.Config.bossPreSpawnThreshold = bSec
 				else
 					HUB.Config.bossPreSpawnThreshold = 15
 				end
@@ -836,8 +876,10 @@ local function loadConfig()
 					else
 						HUB.Config.iconPos = { ScaleX = 0, OffsetX = 346, ScaleY = 0, OffsetY = 10 }
 					end
-				elseif k == "bossPreSpawnThreshold" and (v == 10 or v == nil) then
-					HUB.Config.bossPreSpawnThreshold = 15
+				elseif k == "bossPreSpawnThreshold" then
+					local bSec = tonumber(v) or 15
+					bSec = math.clamp(math.floor(bSec / 5 + 0.5) * 5, 5, 60)
+					HUB.Config.bossPreSpawnThreshold = bSec
 				else
 					HUB.Config[k] = v
 				end
@@ -852,8 +894,10 @@ loadConfig()
 do
 	local RS = game:GetService("ReplicatedStorage")
 	local Shared = RS:WaitForChild("Shared", 30)
-	local GearData = Shared and Shared:FindFirstChild("GearData") and require(Shared.GearData)
-	local GearUtil = Shared and Shared:FindFirstChild("GearUtil") and require(Shared.GearUtil)
+	local gdMod = Shared and (Shared:FindFirstChild("GearData") or Shared:WaitForChild("GearData", 15))
+	local guMod = Shared and (Shared:FindFirstChild("GearUtil") or Shared:WaitForChild("GearUtil", 15))
+	local GearData = gdMod and require(gdMod)
+	local GearUtil = guMod and require(guMod)
 	HUB.GearData = GearData
 	HUB.GearUtil = GearUtil
 
@@ -948,6 +992,14 @@ do
 	end
 
 	function ItemTier.EvaluateGear(ref, rawGear)
+		if (not GearData or not GearUtil) and Shared then
+			if not GearData and Shared:FindFirstChild("GearData") then
+				pcall(function() GearData = require(Shared.GearData); HUB.GearData = GearData end)
+			end
+			if not GearUtil and Shared:FindFirstChild("GearUtil") then
+				pcall(function() GearUtil = require(Shared.GearUtil); HUB.GearUtil = GearUtil end)
+			end
+		end
 		if not GearData or not GearUtil or type(rawGear) ~= "table" then return nil end
 		local resolved = GearUtil.Resolve(ref, { [ref] = rawGear })
 		if not resolved then return nil end
@@ -2559,15 +2611,20 @@ do
 		spring:Play()
 	end))
 
-	-- ---------- 7.2 Main Window (780 x 470) ----------
+	-- ---------- 7.2 Main Window (780 x 470 · Scaled 1.2x => 936 x 564) ----------
 	local mainWindow = Instance.new("Frame")
 	mainWindow.Name = "MainWindow"
 	mainWindow.Size = UDim2.new(0, 780, 0, 470)
-	mainWindow.Position = UDim2.new(0.5, -390, 0.5, -235)
+	mainWindow.Position = UDim2.new(0.5, -468, 0.5, -282)
 	mainWindow.BackgroundTransparency = 1
 	mainWindow.Visible = true
 	mainWindow.Parent = screenGui
 	HUB.UI.MainWindow = mainWindow
+
+	local mainScale = Instance.new("UIScale")
+	mainScale.Name = "HubScale"
+	mainScale.Scale = 1.2
+	mainScale.Parent = mainWindow
 
 	local brickSkin = Instance.new("Frame")
 	brickSkin.Name = "BrickSkin"
@@ -2957,24 +3014,38 @@ do
 	tbCorner.CornerRadius = UDim.new(0, 4)
 	tbCorner.Parent = tabBar
 
-	local tabFarmBtn = Instance.new("TextButton")
-	tabFarmBtn.Name = "TabFarm"
-	tabFarmBtn.Size = UDim2.new(0.5, -3, 1, -4)
-	tabFarmBtn.Position = UDim2.new(0, 2, 0, 2)
-	tabFarmBtn.BackgroundColor3 = THEME.TabActive
-	tabFarmBtn.Text = "🌾 Farm & Loot"
-	tabFarmBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	tabFarmBtn.TextSize = 13
-	applyFont(tabFarmBtn, true)
-	tabFarmBtn.Parent = tabBar
-	local tfCorner = Instance.new("UICorner")
-	tfCorner.CornerRadius = UDim.new(0, 3)
-	tfCorner.Parent = tabFarmBtn
+	local tabCombatBtn = Instance.new("TextButton")
+	tabCombatBtn.Name = "TabCombat"
+	tabCombatBtn.Size = UDim2.new(1/3, -4, 1, -4)
+	tabCombatBtn.Position = UDim2.new(0, 2, 0, 2)
+	tabCombatBtn.BackgroundColor3 = THEME.TabActive
+	tabCombatBtn.Text = "⚔️ Combat"
+	tabCombatBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	tabCombatBtn.TextSize = 13
+	applyFont(tabCombatBtn, true)
+	tabCombatBtn.Parent = tabBar
+	local tcCorner = Instance.new("UICorner")
+	tcCorner.CornerRadius = UDim.new(0, 3)
+	tcCorner.Parent = tabCombatBtn
+
+	local tabItemBtn = Instance.new("TextButton")
+	tabItemBtn.Name = "TabItem"
+	tabItemBtn.Size = UDim2.new(1/3, -4, 1, -4)
+	tabItemBtn.Position = UDim2.new(1/3, 2, 0, 2)
+	tabItemBtn.BackgroundColor3 = THEME.TabInactive
+	tabItemBtn.Text = "🎒 Item"
+	tabItemBtn.TextColor3 = THEME.TextDark
+	tabItemBtn.TextSize = 13
+	applyFont(tabItemBtn, true)
+	tabItemBtn.Parent = tabBar
+	local tiCorner = Instance.new("UICorner")
+	tiCorner.CornerRadius = UDim.new(0, 3)
+	tiCorner.Parent = tabItemBtn
 
 	local tabSettingsBtn = Instance.new("TextButton")
 	tabSettingsBtn.Name = "TabSettings"
-	tabSettingsBtn.Size = UDim2.new(0.5, -3, 1, -4)
-	tabSettingsBtn.Position = UDim2.new(0.5, 1, 0, 2)
+	tabSettingsBtn.Size = UDim2.new(1/3, -4, 1, -4)
+	tabSettingsBtn.Position = UDim2.new(2/3, 2, 0, 2)
 	tabSettingsBtn.BackgroundColor3 = THEME.TabInactive
 	tabSettingsBtn.Text = "⚙️ Settings"
 	tabSettingsBtn.TextColor3 = THEME.TextDark
@@ -3013,35 +3084,43 @@ do
 		return scroll
 	end
 
-	local scrollFarm = createScrollContainer("ScrollFarm")
+	local scrollCombat = createScrollContainer("ScrollCombat")
+	local scrollItem = createScrollContainer("ScrollItem")
+	scrollItem.Visible = false
 	local scrollSettings = createScrollContainer("ScrollSettings")
 	scrollSettings.Visible = false
 
-	local function selectTab(isFarm)
-		if isFarm then
-			scrollFarm.Visible = true
-			scrollSettings.Visible = false
-			tabFarmBtn.BackgroundColor3 = THEME.TabActive
-			tabFarmBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-			tabSettingsBtn.BackgroundColor3 = THEME.TabInactive
-			tabSettingsBtn.TextColor3 = THEME.TextDark
-		else
-			scrollFarm.Visible = false
-			scrollSettings.Visible = true
-			tabSettingsBtn.BackgroundColor3 = THEME.TabActive
-			tabSettingsBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-			tabFarmBtn.BackgroundColor3 = THEME.TabInactive
-			tabFarmBtn.TextColor3 = THEME.TextDark
-		end
-	end
+	local function selectTab(activeTab)
+		local isCombat = (activeTab == "Combat" or activeTab == true)
+		local isItem = (activeTab == "Item")
+		local isSettings = (activeTab == "Settings" or activeTab == false)
 
-	HUB:AddConnection(tabFarmBtn.MouseButton1Click:Connect(function() selectTab(true) end))
-	HUB:AddConnection(tabSettingsBtn.MouseButton1Click:Connect(function() selectTab(false) end))
+		scrollCombat.Visible = isCombat
+		scrollItem.Visible = isItem
+		scrollSettings.Visible = isSettings
+
+		tabCombatBtn.BackgroundColor3 = isCombat and THEME.TabActive or THEME.TabInactive
+		tabCombatBtn.TextColor3 = isCombat and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+
+		tabItemBtn.BackgroundColor3 = isItem and THEME.TabActive or THEME.TabInactive
+		tabItemBtn.TextColor3 = isItem and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+
+		tabSettingsBtn.BackgroundColor3 = isSettings and THEME.TabActive or THEME.TabInactive
+		tabSettingsBtn.TextColor3 = isSettings and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+	end
+	HUB.SelectTab = selectTab
+
+	HUB:AddConnection(tabCombatBtn.MouseButton1Click:Connect(function() selectTab("Combat") end))
+	HUB:AddConnection(tabItemBtn.MouseButton1Click:Connect(function() selectTab("Item") end))
+	HUB:AddConnection(tabSettingsBtn.MouseButton1Click:Connect(function() selectTab("Settings") end))
 
 	-- Helper สำหรับสร้าง Toggle Card พร้อมปุ่ม Action เพิ่มเติมหรือแถบตั้งค่าขยายในตัว
+	local cardOrderCount = 0
 	local function createCard(parentScroll, titleText, descText, initialVal, onToggle, extraBtnData, settingPanelBuilder, customGearAction)
+		cardOrderCount = cardOrderCount + 1
 		local card = Instance.new("Frame")
 		card.Name = "Card_" .. titleText:gsub("%s+", "")
+		card.LayoutOrder = cardOrderCount
 		card.Size = UDim2.new(1, 0, 0, 74)
 		card.BackgroundColor3 = Color3.fromRGB(246, 240, 228)
 		card.BorderSizePixel = 0
@@ -3255,9 +3334,9 @@ do
 		return card, cStatus
 	end
 
-	-- ---------- 7.5 Cards ในแท็บ Farm & Loot ----------
+	-- ---------- 7.5 Cards ในแท็บ Combat ----------
 	local _, dodgeStatus = createCard(
-		scrollFarm,
+		scrollCombat,
 		"Auto Dodge (หลบวงแดง & เข้าโซนเขียว)",
 		"สปริ้นต์หลบวงแดงอัตโนมัติ และสปริ้นต์ตลอดเวลาเมื่อ Auto Play เล็งเป้ามอนสเตอร์ (Stamina Sprint)",
 		HUB.Config.autoDodge,
@@ -3459,7 +3538,7 @@ do
 	HUB.UI.DodgeStatusLabel = dodgeStatus
 
 	local _, boxStatus = createCard(
-		scrollFarm,
+		scrollItem,
 		"Auto Open LootBox (วิ่งไปเปิดและกลับที่เดิม)",
 		"วิ่งไปเปิดกล่องสมบัติในระยะฟาร์มของเกม แล้ววิ่งกลับมายังจุดฟาร์มเดิมอัตโนมัติ",
 		HUB.Config.autoOpenBox,
@@ -3544,7 +3623,7 @@ do
 	HUB.UI.BoxStatusLabel = boxStatus
 
 	local _, claimStatus = createCard(
-		scrollFarm,
+		scrollItem,
 		"Auto Claim Rewards (ตรวจจับและเคลมอัตโนมัติ)",
 		"ตรวจจับแบบ Real-Time และเคลมทันทีเมื่อมีของรางวัลให้รับ (Daily, Mailbox, Battle Pass, Playtime, Ach)",
 		HUB.Config.autoClaim,
@@ -3570,9 +3649,9 @@ do
 	)
 	HUB.UI.ClaimStatusLabel = claimStatus
 
-	-- ---------- 7.5.4 Card ในแท็บ Farm & Loot: Item Tier Ranking (SS - F Overlay) ----------
+	-- ---------- 7.5.4 Card ในแท็บ Item: Item Tier Ranking (SS - F Overlay) ----------
 	local _, tierStatus = createCard(
-		scrollFarm,
+		scrollItem,
 		"Item Tier Ranking (SS - F Overlay)",
 		"คัดแยกเกรดไอเทมตามค่าพลัง สเตตัสตรงสาย และชุดเซ็ต พร้อมแสดง Badge มุมซ้ายบนในกระเป๋า",
 		HUB.Config.itemTierBadges,
@@ -3645,9 +3724,9 @@ do
 				Sub = "กลุ่ม: RingMatk · แหวนเวทย์ / INT / SP",
 				SampleKey = "Items/ring_water_t5",
 				FallbackIcon = "rbxassetid://105824855649695",
-				Specials = { "CRIT", "Cooldown", "MatkPercent", "CastSpeed", "ASPD" },
-				Pool = { "INT", "AGI", "DEX", "LUK", "SP" },
-				ForbiddenCandidates = { "STR", "VIT", "DEF", "HP", "FLEE", "MDEF" }
+				Specials = { "CRIT", "Cooldown", "MatkPercent", "CastSpeed", "ASPD", "SkillSingle", "SkillAoe" },
+				Pool = { "INT", "AGI", "DEX", "LUK", "SP", "MATK", "DropPct", "ExpPct" },
+				ForbiddenCandidates = { "STR", "VIT", "DEF", "HP", "FLEE", "MDEF", "MeleeDmg", "RangedDmg" }
 			},
 			{
 				Id = "RingAtk",
@@ -3655,19 +3734,29 @@ do
 				Sub = "กลุ่ม: RingAtk · แหวนกายภาพ / STR / โจมตีเร็ว",
 				SampleKey = "Items/ring_fire_t5",
 				FallbackIcon = "rbxassetid://139585878328077",
-				Specials = { "ASPD", "CRIT", "Cooldown" },
-				Pool = { "STR", "AGI", "DEX", "LUK", "SP" },
+				Specials = { "ASPD", "CRIT", "Cooldown", "CastSpeed", "SkillSingle", "SkillAoe" },
+				Pool = { "STR", "AGI", "DEX", "LUK", "SP", "ATK", "MeleeDmg", "RangedDmg", "DropPct", "ExpPct" },
 				ForbiddenCandidates = { "INT", "VIT", "DEF", "HP", "FLEE", "MDEF" }
 			},
 			{
-				Id = "WeaponPhys",
-				Name = "⚔️ อาวุธกาย (Phys Weapon)",
-				Sub = "กลุ่ม: WeaponPhys · ดาบ / ขวาน / ธนู",
+				Id = "WeaponPhysMelee",
+				Name = "⚔️ อาวุธกายประชิด (Melee Phys)",
+				Sub = "กลุ่ม: ดาบ / ขวาน / มีด / คาตานะ",
 				SampleKey = "Items/sword_t5",
 				FallbackIcon = "rbxassetid://88552333464833",
-				Specials = { "CRIT", "AtkPercent", "Pierce", "ASPD" },
-				Pool = { "STR", "AGI", "DEX", "LUK" },
-				ForbiddenCandidates = { "INT", "SP", "VIT", "DEF", "HP" }
+				Specials = { "CRIT", "AtkPercent", "AtkMatkPercent", "Pierce", "ASPD", "CritDmg", "SkillSingle", "SkillAoe" },
+				Pool = { "STR", "AGI", "DEX", "LUK", "MeleeDmg", "ATK", "DropPct", "ExpPct" },
+				ForbiddenCandidates = { "INT", "SP", "VIT", "DEF", "HP", "MATK", "RangedDmg", "MPierce" }
+			},
+			{
+				Id = "WeaponPhysRanged",
+				Name = "🏹 อาวุธกายระยะไกล (Ranged Phys)",
+				Sub = "กลุ่ม: ธนู (Bow)",
+				SampleKey = "Items/bow_t5",
+				FallbackIcon = "rbxassetid://95385333161493",
+				Specials = { "CRIT", "AtkPercent", "AtkMatkPercent", "Pierce", "ASPD", "CritDmg", "SkillSingle", "SkillAoe" },
+				Pool = { "DEX", "AGI", "STR", "LUK", "RangedDmg", "ATK", "DropPct", "ExpPct" },
+				ForbiddenCandidates = { "INT", "SP", "VIT", "DEF", "HP", "MATK", "MeleeDmg", "MPierce" }
 			},
 			{
 				Id = "WeaponMagic",
@@ -3675,9 +3764,9 @@ do
 				Sub = "กลุ่ม: WeaponMagic · คทา / คัมภีร์เวทย์",
 				SampleKey = "Items/rod_t5",
 				FallbackIcon = "rbxassetid://97000273852760",
-				Specials = { "CRIT", "MatkPercent", "MPierce", "Cooldown" },
-				Pool = { "INT", "DEX", "LUK", "SP" },
-				ForbiddenCandidates = { "STR", "AGI", "VIT", "DEF", "HP" }
+				Specials = { "CRIT", "MatkPercent", "AtkMatkPercent", "MPierce", "Cooldown", "CastSpeed", "CritDmg", "SkillSingle", "SkillAoe" },
+				Pool = { "INT", "DEX", "LUK", "SP", "MATK", "DropPct", "ExpPct" },
+				ForbiddenCandidates = { "STR", "AGI", "VIT", "DEF", "HP", "MeleeDmg", "RangedDmg", "Pierce" }
 			},
 			{
 				Id = "WeaponFlask",
@@ -3685,9 +3774,9 @@ do
 				Sub = "กลุ่ม: WeaponFlask · ขวดปรุงยานักเล่นแร่แปรธาตุ",
 				SampleKey = "Items/flask_t5",
 				FallbackIcon = "rbxassetid://135145414807744",
-				Specials = { "CRIT", "MatkPercent", "MPierce", "Cooldown", "ASPD" },
-				Pool = { "INT", "AGI", "DEX", "LUK", "SP" },
-				ForbiddenCandidates = { "STR", "VIT", "DEF", "HP" }
+				Specials = { "CRIT", "MatkPercent", "AtkMatkPercent", "MPierce", "Cooldown", "ASPD", "CritDmg", "SkillSingle", "SkillAoe" },
+				Pool = { "INT", "AGI", "DEX", "LUK", "SP", "ATK", "MATK", "DropPct", "ExpPct" },
+				ForbiddenCandidates = { "STR", "VIT", "DEF", "HP", "MeleeDmg", "RangedDmg" }
 			},
 			{
 				Id = "HeadTop",
@@ -3695,8 +3784,8 @@ do
 				Sub = "กลุ่ม: HeadTop · หมวกเกราะป้องกัน",
 				SampleKey = "Items/helm_t5",
 				FallbackIcon = "rbxassetid://94616329517195",
-				Specials = { "HpPercent", "PotionPct" },
-				Pool = { "HP", "VIT", "DEF", "FLEE" },
+				Specials = { "HpPercent", "PotionPct", "DmgReduce" },
+				Pool = { "HP", "VIT", "DEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
 				ForbiddenCandidates = { "SP", "INT", "STR", "MDEF" }
 			},
 			{
@@ -3705,8 +3794,8 @@ do
 				Sub = "กลุ่ม: HeadMid · หน้ากากและแว่นตา",
 				SampleKey = "Items/mask_t5",
 				FallbackIcon = "rbxassetid://74422487789148",
-				Specials = { "SpPercent", "SpCost" },
-				Pool = { "HP", "VIT", "DEF", "MDEF", "SP", "FLEE" },
+				Specials = { "SpPercent", "SpCost", "DmgReduce" },
+				Pool = { "HP", "VIT", "DEF", "MDEF", "SP", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
 				ForbiddenCandidates = { "STR", "AGI", "INT", "LUK" }
 			},
 			{
@@ -3715,8 +3804,8 @@ do
 				Sub = "กลุ่ม: Body · เสื้อเกราะลำตัว",
 				SampleKey = "Items/armor_t5",
 				FallbackIcon = "rbxassetid://87889334606143",
-				Specials = { "HpPercent", "DefPercent" },
-				Pool = { "HP", "VIT", "DEF", "FLEE" },
+				Specials = { "HpPercent", "DefPercent", "DmgReduce" },
+				Pool = { "HP", "VIT", "DEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
 				ForbiddenCandidates = { "SP", "INT", "STR", "MDEF" }
 			},
 			{
@@ -3725,8 +3814,8 @@ do
 				Sub = "กลุ่ม: Garment · ผ้าคลุมหลัง",
 				SampleKey = "Items/cloak_t5",
 				FallbackIcon = "rbxassetid://119982170018269",
-				Specials = { "DmgReduce", "HpRegenMax", "SpRegenPercent" },
-				Pool = { "HP", "VIT", "DEF", "FLEE" },
+				Specials = { "DmgReduce", "HpRegenMax", "SpRegenPercent", "DefPercent", "Speed" },
+				Pool = { "HP", "VIT", "DEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
 				ForbiddenCandidates = { "STR", "INT", "DEX", "LUK" }
 			},
 			{
@@ -3735,8 +3824,8 @@ do
 				Sub = "กลุ่ม: Shoes · รองเท้าเดินไว",
 				SampleKey = "Items/boots_t5",
 				FallbackIcon = "rbxassetid://125143879461934",
-				Specials = { "Speed", "DmgReduce" },
-				Pool = { "HP", "VIT", "DEF", "FLEE" },
+				Specials = { "Speed", "DmgReduce", "DefPercent", "HpPercent" },
+				Pool = { "HP", "VIT", "DEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
 				ForbiddenCandidates = { "SP", "INT", "STR", "MDEF" }
 			}
 		}
@@ -3758,7 +3847,21 @@ do
 			DmgReduce = "Dmg Red (ลดดาเมจ)",
 			HpRegenMax = "HP Regen (ฟื้นเลือด)",
 			SpRegenPercent = "SP Regen (ฟื้นมานา)",
-			Speed = "Speed (วิ่งไว)"
+			Speed = "Speed (วิ่งไว)",
+			-- New T6 / Endgame Options
+			AtkMatkPercent = "ATK&MATK% (กาย+เวทย์)",
+			CritDmg = "Crit DMG% (แรงคริ)",
+			SkillSingle = "Single Skill% (สกิลเดี่ยว)",
+			SkillAoe = "AoE Skill% (สกิลหมู่)",
+			MeleeDmg = "Melee DMG% (ดาเมจประชิด)",
+			RangedDmg = "Ranged DMG% (ดาเมจไกล)",
+			ATK = "ATK (พลังโจมตี)",
+			MATK = "MATK (พลังเวทย์)",
+			DropPct = "Drop% (อัตราดรอป)",
+			ExpPct = "EXP% (โบนัส EXP)",
+			SpeedR = "Move Speed% (วิ่งไว)",
+			SkillTaken = "Skill Resist% (กันสกิล)",
+			HitTaken = "Hit Resist% (กันตีปกติ)",
 		}
 
 		local STAT_COLORS = {
@@ -3773,6 +3876,19 @@ do
 			DEF = Color3.fromRGB(120, 120, 140),
 			MDEF= Color3.fromRGB(90, 140, 160),
 			FLEE= Color3.fromRGB(50, 170, 140),
+			ATK = Color3.fromRGB(220, 90, 40),
+			MATK= Color3.fromRGB(40, 140, 240),
+			MeleeDmg = Color3.fromRGB(220, 90, 40),
+			RangedDmg = Color3.fromRGB(230, 170, 30),
+			DropPct = Color3.fromRGB(240, 200, 30),
+			ExpPct = Color3.fromRGB(50, 200, 120),
+			SpeedR = Color3.fromRGB(40, 180, 200),
+			SkillTaken = Color3.fromRGB(80, 120, 220),
+			HitTaken = Color3.fromRGB(120, 140, 160),
+			AtkMatkPercent = Color3.fromRGB(210, 60, 60),
+			CritDmg = Color3.fromRGB(220, 140, 20),
+			SkillSingle = Color3.fromRGB(180, 50, 220),
+			SkillAoe = Color3.fromRGB(220, 50, 180),
 		}
 
 		local modalHolder = Instance.new("Frame")
@@ -3805,6 +3921,11 @@ do
 		dialog.ClipsDescendants = true
 		dialog.ZIndex = 61
 		dialog.Parent = modalHolder
+
+		local dScale = Instance.new("UIScale")
+		dScale.Name = "ModalScale"
+		dScale.Scale = 1.2
+		dScale.Parent = dialog
 
 		local dCorner = Instance.new("UICorner")
 		dCorner.CornerRadius = UDim.new(0, 8)
@@ -4316,6 +4437,102 @@ do
 						if not HUB.Config.autoLockStars then HUB.Config.autoLockStars = {} end
 						HUB.Config.autoLockStars[sDef.Key] = not HUB.Config.autoLockStars[sDef.Key]
 						refreshStarBtn()
+						if HUB.Config.autoSave then saveConfig() end
+						if HUB.Config.autoLock and HUB.RunAutoLockCheck then task.spawn(HUB.RunAutoLockCheck) end
+					end))
+				end
+
+				-- Section 3: Game Tiers (Tier I - VI: ขาว, เขียว, ฟ้า, ม่วง, ทอง, แดง)
+				local gtSec = Instance.new("Frame")
+				gtSec.Name = "GameTierSection"
+				gtSec.LayoutOrder = 4
+				gtSec.Size = UDim2.new(1, 0, 0, 72)
+				gtSec.BackgroundColor3 = Color3.fromRGB(242, 236, 222)
+				gtSec.BorderSizePixel = 0
+				gtSec.ZIndex = 65
+				gtSec.Parent = rightScroll
+				local gtCorner = Instance.new("UICorner")
+				gtCorner.CornerRadius = UDim.new(0, 6)
+				gtCorner.Parent = gtSec
+
+				local gtTitle = Instance.new("TextLabel")
+				gtTitle.Name = "Title"
+				gtTitle.Size = UDim2.new(1, -16, 0, 18)
+				gtTitle.Position = UDim2.new(0, 8, 0, 6)
+				gtTitle.BackgroundTransparency = 1
+				gtTitle.Text = "เลือกระดับ Tier ในเกมที่ต้องการล็อค (ขาว/เขียว/ฟ้า/ม่วง/ทอง/แดง):"
+				gtTitle.TextColor3 = THEME.TextDark
+				gtTitle.TextSize = 12
+				gtTitle.TextXAlignment = Enum.TextXAlignment.Left
+				applyFont(gtTitle, true)
+				gtTitle.ZIndex = 66
+				gtTitle.Parent = gtSec
+
+				local gtRow = Instance.new("Frame")
+				gtRow.Name = "GameTierRow"
+				gtRow.Size = UDim2.new(1, -16, 0, 28)
+				gtRow.Position = UDim2.new(0, 8, 0, 28)
+				gtRow.BackgroundTransparency = 1
+				gtRow.ZIndex = 66
+				gtRow.Parent = gtSec
+
+				local gtrLayout = Instance.new("UIListLayout")
+				gtrLayout.FillDirection = Enum.FillDirection.Horizontal
+				gtrLayout.Padding = UDim.new(0, 6)
+				gtrLayout.SortOrder = Enum.SortOrder.LayoutOrder
+				gtrLayout.Parent = gtRow
+
+				local gameTierDefs = {
+					{ Tier = 1, Label = "I (ขาว)",   Color = Color3.fromRGB(120, 128, 142) },
+					{ Tier = 2, Label = "II (เขียว)", Color = Color3.fromRGB(47, 143, 62) },
+					{ Tier = 3, Label = "III (ฟ้า)",  Color = Color3.fromRGB(42, 111, 214) },
+					{ Tier = 4, Label = "IV (ม่วง)", Color = Color3.fromRGB(122, 69, 201) },
+					{ Tier = 5, Label = "V (ทอง)",  Color = Color3.fromRGB(217, 120, 26) },
+					{ Tier = 6, Label = "VI (แดง)",  Color = Color3.fromRGB(201, 42, 54) },
+				}
+
+				for idx, gtDef in ipairs(gameTierDefs) do
+					local b = Instance.new("TextButton")
+					b.Name = "Btn_GameTier_" .. gtDef.Tier
+					b.LayoutOrder = idx
+					b.Size = UDim2.new(0, 66, 0, 26)
+					b.BorderSizePixel = 0
+					b.Text = gtDef.Label
+					b.TextSize = 11
+					b.TextColor3 = Color3.fromRGB(255, 255, 255)
+					applyFont(b, true)
+					b.ZIndex = 67
+					b.Parent = gtRow
+
+					local bc = Instance.new("UICorner")
+					bc.CornerRadius = UDim.new(0, 4)
+					bc.Parent = b
+
+					local bs = Instance.new("UIStroke")
+					bs.Thickness = 1.2
+					bs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+					bs.Parent = b
+
+					local function refreshGameTierBtn()
+						local active = (HUB.Config.autoLockGameTiers and (HUB.Config.autoLockGameTiers[gtDef.Tier] == true or HUB.Config.autoLockGameTiers[tostring(gtDef.Tier)] == true))
+						b.TextColor3 = Color3.fromRGB(255, 255, 255)
+						b.TextStrokeTransparency = 1
+						if active then
+							b.BackgroundColor3 = gtDef.Color
+							bs.Color = gtDef.Color
+						else
+							b.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
+							b.TextColor3 = Color3.fromRGB(150, 160, 175)
+							bs.Color = Color3.fromRGB(50, 60, 80)
+						end
+					end
+					refreshGameTierBtn()
+
+					table.insert(detailConns, b.MouseButton1Click:Connect(function()
+						if not HUB.Config.autoLockGameTiers then HUB.Config.autoLockGameTiers = {} end
+						local cur = (HUB.Config.autoLockGameTiers[gtDef.Tier] == true or HUB.Config.autoLockGameTiers[tostring(gtDef.Tier)] == true)
+						HUB.Config.autoLockGameTiers[gtDef.Tier] = not cur
+						refreshGameTierBtn()
 						if HUB.Config.autoSave then saveConfig() end
 						if HUB.Config.autoLock and HUB.RunAutoLockCheck then task.spawn(HUB.RunAutoLockCheck) end
 					end))
@@ -5058,9 +5275,9 @@ do
 		end
 	end
 
-	-- ---------- 7.5.5 Card ในแท็บ Farm & Loot: Auto Lock Item (คัดแยกล็อคของอัตโนมัติ) ----------
+	-- ---------- 7.5.5 Card ในแท็บ Item: Auto Lock Item (คัดแยกล็อคของอัตโนมัติ) ----------
 	local _, lockStatus = createCard(
-		scrollFarm,
+		scrollItem,
 		"Auto Lock Item (คัดแยกล็อคของอัตโนมัติ)",
 		"ตรวจสอบของในกระเป๋าและล็อคอัตโนมัติตามเกรด/ออปชันอุปกรณ์ที่เลือก (คลิก ⚙️ เพื่อเปิดหน้าต่างตั้งค่า)",
 		HUB.Config.autoLock,
@@ -5302,28 +5519,146 @@ do
 	)
 	HUB.UI.LockStatusLabel = lockStatus
 
-	-- ---------- 7.5.6 Card ในแท็บ Farm & Loot: Auto Sell (วาร์ปขายขยะ & กลับมาฟาร์ม) ----------
+	-- ---------- 7.5.6 Card ในแท็บ Item: Auto Salvage (ย่อยอุปกรณ์ที่ไม่ได้ล็อคอัตโนมัติ) ----------
+	local _, salvageStatus = createCard(
+		scrollItem,
+		"Auto Salvage (ย่อยอุปกรณ์ที่ไม่ได้ล็อค)",
+		"ย่อยอุปกรณ์ Tier 1-5 ที่ไม่ได้ล็อคทันทีเมื่อกระเป๋าถึง % ที่ตั้งไว้ ทำงานได้ทุกที่ในโลก ไม่ต้องวาร์ปกลับเมือง",
+		HUB.Config.autoSalvage,
+		function(enabled, label)
+			HUB.Config.autoSalvage = enabled
+			local stats = getBagStats()
+			local threshold = HUB.Config.autoSalvageThresholdPct or 85
+			if enabled then
+				label.Text = string.format("สถานะ: เปิดใช้งาน · ย่อยเมื่อเต็ม >= %d%% (ปัจจุบัน: %d%% [%d/%d])", threshold, stats.pct, stats.used, stats.max)
+				if stats.pct >= threshold or (threshold == 100 and stats.isFull) then
+					if HUB.RunAutoSalvageRoutine then task.spawn(HUB.RunAutoSalvageRoutine) end
+				end
+			else
+				label.Text = string.format("สถานะ: ปิดใช้งาน (ความจุกระเป๋า: %d%% [%d/%d])", stats.pct, stats.used, stats.max)
+			end
+			if HUB.Config.autoSave then saveConfig() end
+		end,
+		nil,
+		function(subPanel)
+			local subTitle = Instance.new("TextLabel")
+			subTitle.Name = "SubTitle"
+			subTitle.Size = UDim2.new(1, -16, 0, 16)
+			subTitle.Position = UDim2.new(0, 8, 0, 4)
+			subTitle.BackgroundTransparency = 1
+			subTitle.Text = "ย่อยอุปกรณ์เมื่อกระเป๋าเต็มถึง (คลิกเลือก %):"
+			subTitle.TextColor3 = THEME.TextSub
+			subTitle.TextSize = 11
+			subTitle.TextXAlignment = Enum.TextXAlignment.Left
+			applyFont(subTitle, false)
+			subTitle.Parent = subPanel
+
+			local btnRow = Instance.new("Frame")
+			btnRow.Name = "PctBtnRow"
+			btnRow.Size = UDim2.new(1, -16, 0, 20)
+			btnRow.Position = UDim2.new(0, 8, 0, 22)
+			btnRow.BackgroundTransparency = 1
+			btnRow.Parent = subPanel
+
+			local rowLayout = Instance.new("UIListLayout")
+			rowLayout.SortOrder = Enum.SortOrder.LayoutOrder
+			rowLayout.FillDirection = Enum.FillDirection.Horizontal
+			rowLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+			rowLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+			rowLayout.Padding = UDim.new(0, 5)
+			rowLayout.Parent = btnRow
+
+			local presets = { 70, 80, 85, 90, 95, 100 }
+			local pctBtns = {}
+
+			local function refreshAllSalvagePctBtns()
+				local currentThresh = HUB.Config.autoSalvageThresholdPct or 85
+				for val, b in pairs(pctBtns) do
+					local bs = b:FindFirstChildOfClass("UIStroke")
+					b.TextColor3 = Color3.fromRGB(255, 255, 255)
+					if val == currentThresh then
+						b.BackgroundColor3 = THEME.BtnGreen
+						if bs then bs.Color = THEME.BtnGreenStroke end
+					else
+						b.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
+						if bs then bs.Color = Color3.fromRGB(50, 60, 80) end
+					end
+				end
+				if HUB.UI.SalvageStatusLabel and HUB.Config.autoSalvage then
+					local stats = getBagStats()
+					HUB.UI.SalvageStatusLabel.Text = string.format("สถานะ: เปิดใช้งาน · ย่อยเมื่อเต็ม >= %d%% (ปัจจุบัน: %d%% [%d/%d])", currentThresh, stats.pct, stats.used, stats.max)
+				end
+			end
+
+			for idx, val in ipairs(presets) do
+				local b = Instance.new("TextButton")
+				b.Name = "Btn_" .. val
+				b.LayoutOrder = idx
+				b.Size = UDim2.new(0, 42, 0, 20)
+				b.BorderSizePixel = 0
+				b.Text = val .. "%"
+				b.TextSize = 11
+				b.TextColor3 = Color3.fromRGB(255, 255, 255)
+				applyFont(b, true)
+				b.Parent = btnRow
+
+				local bc = Instance.new("UICorner")
+				bc.CornerRadius = UDim.new(0, 4)
+				bc.Parent = b
+
+				local bs = Instance.new("UIStroke")
+				bs.Thickness = 1.2
+				bs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+				bs.Parent = b
+
+				pctBtns[val] = b
+
+				HUB:AddConnection(b.MouseButton1Click:Connect(function()
+					HUB.Config.autoSalvageThresholdPct = val
+					refreshAllSalvagePctBtns()
+					if HUB.Config.autoSave then saveConfig() end
+					if HUB.Config.autoSalvage then
+						local stats = getBagStats()
+						if stats.pct >= val or (val == 100 and stats.isFull) then
+							if HUB.RunAutoSalvageRoutine then task.spawn(HUB.RunAutoSalvageRoutine) end
+						end
+					end
+				end))
+			end
+			refreshAllSalvagePctBtns()
+		end
+	)
+	HUB.UI.SalvageStatusLabel = salvageStatus
+
+	-- ---------- 7.5.7 Card ในแท็บ Item: Auto Sell (วาร์ปขายขยะ & กลับมาฟาร์ม) ----------
 	local _, sellStatus = createCard(
-		scrollFarm,
+		scrollItem,
 		"Auto Sell (วาร์ปขายขยะ & กลับมาฟาร์ม)",
 		"วาร์ปกลับเมืองไปขายของที่ Merchant เมื่อกระเป๋าเต็มตาม % ที่ตั้งไว้ แล้ววาร์ปกลับมาฟาร์มต่ออัตโนมัติ",
 		HUB.Config.autoSell,
 		function(enabled, label)
 			HUB.Config.autoSell = enabled
-			local stats = getBagStats()
-			local threshold = HUB.Config.autoSellThresholdPct or 85
 			if enabled then
-				label.Text = string.format("สถานะ: เปิดใช้งาน · ขายเมื่อเต็ม >= %d%% (ปัจจุบัน: %d%% [%d/%d])", threshold, stats.pct, stats.used, stats.max)
-				if stats.pct >= threshold or (threshold == 100 and stats.isFull) then
+				if HUB.RefreshSellStatusLabel then
+					HUB.RefreshSellStatusLabel()
+				else
+					local stats = getBagStats()
+					local threshold = HUB.Config.autoSellThresholdPct or 85
+					label.Text = string.format("สถานะ: เปิดใช้งาน · ขายเมื่อเต็ม >= %d%% (ปัจจุบัน: %d%% [%d/%d])", threshold, stats.pct, stats.used, stats.max)
+				end
+				if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded() then
 					if HUB.RunAutoSellRoutine then task.spawn(HUB.RunAutoSellRoutine) end
 				end
 			else
+				local stats = getBagStats()
 				label.Text = string.format("สถานะ: ปิดใช้งาน (ความจุกระเป๋า: %d%% [%d/%d])", stats.pct, stats.used, stats.max)
 				if HUB.CancelAutoSellRoutine then HUB.CancelAutoSellRoutine() end
 			end
 		end,
 		nil,
-		function(subPanel)
+		function(subPanel, card, cStatus, setExpandHeight)
+			if setExpandHeight then setExpandHeight(92, 172) end
+
 			local subTitle = Instance.new("TextLabel")
 			subTitle.Name = "SubTitle"
 			subTitle.Size = UDim2.new(1, -16, 0, 16)
@@ -5367,9 +5702,8 @@ do
 						if bs then bs.Color = Color3.fromRGB(50, 60, 80) end
 					end
 				end
-				if HUB.UI.SellStatusLabel and HUB.Config.autoSell then
-					local stats = getBagStats()
-					HUB.UI.SellStatusLabel.Text = string.format("สถานะ: เปิดใช้งาน · ขายเมื่อเต็ม >= %d%% (ปัจจุบัน: %d%% [%d/%d])", currentThresh, stats.pct, stats.used, stats.max)
+				if HUB.RefreshSellStatusLabel then
+					HUB.RefreshSellStatusLabel()
 				end
 			end
 
@@ -5400,22 +5734,109 @@ do
 					HUB.Config.autoSellThresholdPct = val
 					refreshAllPctBtns()
 					if HUB.Config.autoSave then saveConfig() end
-					if HUB.Config.autoSell then
-						local stats = getBagStats()
-						if stats.pct >= val or (val == 100 and stats.isFull) then
-							if HUB.RunAutoSellRoutine then task.spawn(HUB.RunAutoSellRoutine) end
-						end
+					if HUB.Config.autoSell and HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded() then
+						if HUB.RunAutoSellRoutine then task.spawn(HUB.RunAutoSellRoutine) end
 					end
 				end))
 			end
+
+			-- ส่วนที่ 2: เลือกประเภทที่ต้องการขาย (ขยะ / อุปกรณ์)
+			local typeTitle = Instance.new("TextLabel")
+			typeTitle.Name = "TypeTitle"
+			typeTitle.Size = UDim2.new(1, -16, 0, 16)
+			typeTitle.Position = UDim2.new(0, 8, 0, 46)
+			typeTitle.BackgroundTransparency = 1
+			typeTitle.Text = "เลือกประเภทที่ต้องการขาย (คลิกเปิด/ปิด):"
+			typeTitle.TextColor3 = THEME.TextSub
+			typeTitle.TextSize = 11
+			typeTitle.TextXAlignment = Enum.TextXAlignment.Left
+			applyFont(typeTitle, false)
+			typeTitle.Parent = subPanel
+
+			local typeBtnRow = Instance.new("Frame")
+			typeBtnRow.Name = "TypeBtnRow"
+			typeBtnRow.Size = UDim2.new(1, -16, 0, 22)
+			typeBtnRow.Position = UDim2.new(0, 8, 0, 64)
+			typeBtnRow.BackgroundTransparency = 1
+			typeBtnRow.Parent = subPanel
+
+			local typeLayout = Instance.new("UIListLayout")
+			typeLayout.SortOrder = Enum.SortOrder.LayoutOrder
+			typeLayout.FillDirection = Enum.FillDirection.Horizontal
+			typeLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+			typeLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+			typeLayout.Padding = UDim.new(0, 8)
+			typeLayout.Parent = typeBtnRow
+
+			local function createTypeToggle(btnName, textOn, textOff, getConfigVal, setConfigVal)
+				local b = Instance.new("TextButton")
+				b.Name = btnName
+				b.Size = UDim2.new(0, 126, 0, 22)
+				b.BorderSizePixel = 0
+				b.TextSize = 11
+				applyFont(b, true)
+				b.Parent = typeBtnRow
+
+				local bc = Instance.new("UICorner")
+				bc.CornerRadius = UDim.new(0, 4)
+				bc.Parent = b
+
+				local bs = Instance.new("UIStroke")
+				bs.Thickness = 1.2
+				bs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+				bs.Parent = b
+
+				local function refresh()
+					local val = getConfigVal()
+					if val then
+						b.Text = textOn
+						b.BackgroundColor3 = THEME.BtnGreen
+						b.TextColor3 = Color3.fromRGB(255, 255, 255)
+						bs.Color = THEME.BtnGreenStroke
+					else
+						b.Text = textOff
+						b.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
+						b.TextColor3 = Color3.fromRGB(150, 160, 175)
+						bs.Color = Color3.fromRGB(50, 60, 80)
+					end
+				end
+
+				HUB:AddConnection(b.MouseButton1Click:Connect(function()
+					local cur = getConfigVal()
+					setConfigVal(not cur)
+					refresh()
+					if HUB.RefreshSellStatusLabel then HUB.RefreshSellStatusLabel() end
+					if HUB.Config.autoSave then saveConfig() end
+				end))
+
+				refresh()
+				return refresh
+			end
+
+			local refreshJunkBtn = createTypeToggle(
+				"Btn_SellJunk",
+				"🗑️ ขายขยะ: ON",
+				"🗑️ ขายขยะ: OFF",
+				function() return HUB.Config.autoSellJunk ~= false end,
+				function(v) HUB.Config.autoSellJunk = v end
+			)
+
+			local refreshGearBtn = createTypeToggle(
+				"Btn_SellGear",
+				"⚔️ ขายอุปกรณ์: ON",
+				"⚔️ ขายอุปกรณ์: OFF",
+				function() return HUB.Config.autoSellGear ~= false end,
+				function(v) HUB.Config.autoSellGear = v end
+			)
+
 			refreshAllPctBtns()
 		end
 	)
 	HUB.UI.SellStatusLabel = sellStatus
 
-	-- ---------- 7.5.7 Card ในแท็บ Farm & Loot: Auto Farm Boss (ล่าบอสอัตโนมัติ & วาร์ปกลับจุดเดิม) ----------
+	-- ---------- 7.5.8 Card ในแท็บ Combat: Auto Farm Boss (ล่าบอสอัตโนมัติ & วาร์ปกลับจุดเดิม) ----------
 	local _, bossStatus = createCard(
-		scrollFarm,
+		scrollCombat,
 		"Auto Farm Boss (ล่าบอสอัตโนมัติเมื่อเกิด)",
 		"ตรวจจับบอสเกิด วาร์ปเสาไปสู้ด้วย Auto Play + Smart Dodge และวาร์ปกลับจุดเดิมเมื่อเสร็จ",
 		HUB.Config.autoFarmBoss,
@@ -5432,7 +5853,7 @@ do
 		end,
 		nil,
 		function(subPanel, card, cStatus, setExpandHeight)
-			if setExpandHeight then setExpandHeight(194, 278) end
+			if setExpandHeight then setExpandHeight(274, 358) end
 
 			local subTitle = Instance.new("TextLabel")
 			subTitle.Name = "SubTitle"
@@ -5605,6 +6026,93 @@ do
 				HUB:AddConnection(nameBtn.MouseButton1Click:Connect(onToggleBoss))
 			end
 
+			-- ส่วนที่ 2: เลือกระยะเวลารอบอสล่วงหน้า (5 วิ ถึง 60 วิ ทีละ 5 วิ — 12 ปุ่มตรงตัว)
+			local sbTitle = Instance.new("TextLabel")
+			sbTitle.Name = "StandbyTitle"
+			sbTitle.Size = UDim2.new(1, -16, 0, 18)
+			sbTitle.Position = UDim2.new(0, 8, 0, 194)
+			sbTitle.BackgroundTransparency = 1
+			sbTitle.Text = "⏱️ เดินทางไปรอก่อนบอสเกิด (คลิกเลือกเวลา):"
+			sbTitle.TextColor3 = Color3.fromRGB(255, 220, 100)
+			sbTitle.TextSize = 12
+			sbTitle.TextXAlignment = Enum.TextXAlignment.Left
+			applyFont(sbTitle, true)
+			sbTitle.Parent = subPanel
+
+			local standbyBtnMap = {}
+			local function refreshStandbyBtns()
+				local cur = HUB.Config.bossPreSpawnThreshold or 15
+				for val, btn in pairs(standbyBtnMap) do
+					local bs = btn:FindFirstChildOfClass("UIStroke")
+					if val == cur then
+						btn.BackgroundColor3 = THEME.BtnGreen
+						btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+						if bs then bs.Color = THEME.BtnGreenStroke end
+					else
+						btn.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
+						btn.TextColor3 = Color3.fromRGB(200, 215, 235)
+						if bs then bs.Color = Color3.fromRGB(50, 60, 80) end
+					end
+				end
+			end
+
+			local rowsData = {
+				{ y = 216, vals = { 5, 10, 15, 20, 25, 30 } },
+				{ y = 242, vals = { 35, 40, 45, 50, 55, 60 } },
+			}
+
+			for rIdx, rInfo in ipairs(rowsData) do
+				local rFrame = Instance.new("Frame")
+				rFrame.Name = "StandbyRow" .. rIdx
+				rFrame.Size = UDim2.new(1, -16, 0, 22)
+				rFrame.Position = UDim2.new(0, 8, 0, rInfo.y)
+				rFrame.BackgroundTransparency = 1
+				rFrame.Parent = subPanel
+
+				local rLayout = Instance.new("UIListLayout")
+				rLayout.FillDirection = Enum.FillDirection.Horizontal
+				rLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+				rLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+				rLayout.SortOrder = Enum.SortOrder.LayoutOrder
+				rLayout.Padding = UDim.new(0, 6)
+				rLayout.Parent = rFrame
+
+				for idx, secVal in ipairs(rInfo.vals) do
+					local b = Instance.new("TextButton")
+					b.Name = "Btn_" .. secVal
+					b.LayoutOrder = idx
+					b.Size = UDim2.new(1/6, -5, 1, 0)
+					b.BorderSizePixel = 0
+					b.Text = secVal .. " วิ"
+					b.TextSize = 11
+					b.TextColor3 = Color3.fromRGB(255, 255, 255)
+					applyFont(b, true)
+					b.Parent = rFrame
+
+					local bc = Instance.new("UICorner")
+					bc.CornerRadius = UDim.new(0, 4)
+					bc.Parent = b
+
+					local bs = Instance.new("UIStroke")
+					bs.Thickness = 1.2
+					bs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+					bs.Parent = b
+
+					standbyBtnMap[secVal] = b
+
+					HUB:AddConnection(b.MouseButton1Click:Connect(function()
+						HUB.Config.bossPreSpawnThreshold = secVal
+						refreshStandbyBtns()
+						if HUB.Config.autoSave then saveConfig() end
+						if HUB.Config.autoFarmBoss and HUB.CheckAndTriggerAutoBoss then
+							task.spawn(HUB.CheckAndTriggerAutoBoss)
+						end
+					end))
+				end
+			end
+
+			refreshStandbyBtns()
+
 			local function updateBadges()
 				local myLevel = LocalPlayer:GetAttribute("Level") or 1
 				for _, w in pairs(bossWidgets) do
@@ -5725,7 +6233,9 @@ do
 	end
 	HUB.SetMinimized = setMinimized
 	HUB.UI.MainWindow = mainWindow
-	HUB.UI.ScrollFarm = scrollFarm
+	HUB.UI.ScrollCombat = scrollCombat
+	HUB.UI.ScrollItem = scrollItem
+	HUB.UI.ScrollFarm = scrollCombat
 	HUB.UI.ScrollSettings = scrollSettings
 
 	HUB:AddConnection(minBtn.MouseButton1Click:Connect(function()
@@ -5869,7 +6379,7 @@ local function countActiveMinibosses(farmRadius)
 
 			if isBossType then
 				local hum = m:FindFirstChildOfClass("Humanoid")
-				local hp = m:GetAttribute("HP") or (hum and hum.Health) or 0
+				local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
 				if hp > 0 then
 					local mPos = m.PrimaryPart and m.PrimaryPart.Position or (m:GetPivot() and m:GetPivot().Position)
 					if mPos then
@@ -5935,7 +6445,7 @@ local function isMonsterWithinRadius(radius)
 	for _, m in ipairs(monsters) do
 		if m:IsA("Model") and m.Parent then
 			local hum = m:FindFirstChildOfClass("Humanoid")
-			local hp = m:GetAttribute("HP") or (hum and hum.Health) or 0
+			local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
 			if hp > 0 then
 				local mPos = m.PrimaryPart and m.PrimaryPart.Position or (m:GetPivot() and m:GetPivot().Position)
 				if mPos and (mPos - root.Position).Magnitude <= radius then
@@ -6180,16 +6690,71 @@ local function navigatePath(goalPos, options)
 			end
 		end
 
-		-- ขั้นที่ 4: Bridge Waypoint Check (กรณีเดินทางข้ามระหว่าง Field15 และ Boss05 ผ่านคอขวดสะพานตรงกลาง X = 0)
-		if (groundFrom.Z > -4380 and groundTo.Z < -4410) or (groundFrom.Z < -4410 and groundTo.Z > -4380) then
-			local bridgeMid = Vector3.new(0, 281.5, -4400)
-			local p1 = createAndRun(groundFrom, bridgeMid)
-			local p2 = createAndRun(bridgeMid, groundTo)
-			if p1 and p2 then
-				local combined = {}
-				for _, wp in ipairs(p1) do table.insert(combined, wp) end
-				for i = 2, #p2 do table.insert(combined, p2[i]) end
-				return combined
+		-- ขั้นที่ 4: Bridge/Stairs Waypoint Check (หาบันไดและสะพานที่เชื่อมระหว่างพื้นที่ เพื่อเดินข้ามโซนผ่านบันได)
+		local bf = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("BlockFields")
+		if bf and math.abs(groundFrom.Z - groundTo.Z) >= 60.0 then
+			local bridges = {}
+			for _, field in ipairs(bf:GetChildren()) do
+				local b = field:FindFirstChild("Bridge")
+				if b then
+					local p = b:GetPivot().Position
+					if p.Z < -100 then
+						table.insert(bridges, { z = p.Z, y = p.Y })
+					end
+				end
+			end
+			table.sort(bridges, function(a, b) return a.z < b.z end)
+
+			local activePortals = { groundFrom }
+			local walkingNorth = (groundFrom.Z < groundTo.Z)
+
+			if walkingNorth then
+				for _, b in ipairs(bridges) do
+					if b.z > (groundFrom.Z + 25.0) and b.z < (groundTo.Z - 25.0) then
+						local top = snapToGround(Vector3.new(0, b.y + 5.0, b.z), b.y)
+						local bottom = snapToGround(Vector3.new(0, b.y - 15.0, b.z + 55.0), b.y)
+						table.insert(activePortals, top)
+						table.insert(activePortals, bottom)
+					end
+				end
+			else
+				for i = #bridges, 1, -1 do
+					local b = bridges[i]
+					if b.z < (groundFrom.Z - 25.0) and b.z > (groundTo.Z + 25.0) then
+						local bottom = snapToGround(Vector3.new(0, b.y - 15.0, b.z + 55.0), b.y)
+						local top = snapToGround(Vector3.new(0, b.y + 5.0, b.z), b.y)
+						table.insert(activePortals, bottom)
+						table.insert(activePortals, top)
+					end
+				end
+			end
+			table.insert(activePortals, groundTo)
+
+			if #activePortals > 2 then
+				local chainedWaypoints = {}
+				for s = 1, #activePortals - 1 do
+					local pA = activePortals[s]
+					local pB = activePortals[s + 1]
+					local segWps = createAndRun(pA, pB)
+					if segWps and #segWps > 0 then
+						for i = (s == 1 and 1 or 2), #segWps do
+							table.insert(chainedWaypoints, segWps[i])
+						end
+					else
+						-- Fallback บนตัวบันได/สะพาน (Linear bridge interpolation ตามแนว X = 0)
+						local d = (pB - pA).Magnitude
+						local steps = math.max(1, math.floor(d / 6.0))
+						for step = 1, steps do
+							local alpha = step / steps
+							local mid = pA:Lerp(pB, alpha)
+							table.insert(chainedWaypoints, { Position = mid, Action = Enum.PathWaypointAction.Walk })
+						end
+					end
+				end
+
+				if #chainedWaypoints > 0 then
+					return chainedWaypoints
+				end
 			end
 		end
 
@@ -6513,9 +7078,10 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 			local approachDir = (flatDist > 0.5) and Vector3.new(root.Position.X - piv.X, 0, root.Position.Z - piv.Z).Unit or Vector3.new(0, 0, -1)
 			local standY = (currentWarpId == "Town") and 4.25 or (piv.Y + 2.0)
 			local standPos = Vector3.new(piv.X + approachDir.X * 4.2, standY, piv.Z + approachDir.Z * 4.2)
+			local walkTimeout = (attempt == 1) and math.max(25.0, math.ceil(flatDist / 12.0) + 15.0) or 8.0
 			navigatePath(standPos, {
 				stopDistance = 3.0,
-				timeout = (attempt == 1) and 18.0 or 6.5,
+				timeout = walkTimeout,
 				sprint = true,
 				shouldAbort = shouldAbortFn,
 				customReached = function(curPos)
@@ -6695,6 +7261,31 @@ local function getNearbyBossPillar(pos)
 	return nil, math.huge, nil
 end
 HUB.GetNearbyBossPillar = getNearbyBossPillar
+
+local function getNearestUnlockedPillar(pos)
+	if not pos then return nil, math.huge end
+	local warpPillarsFolder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("WarpPillars")
+	if not warpPillarsFolder then return nil, math.huge end
+	local unlockedStr = LocalPlayer:GetAttribute("WarpPillars") or ""
+	local unlockedSet = { Town = true }
+	for pId in string.gmatch(unlockedStr, "([^,]+)") do
+		unlockedSet[pId] = true
+	end
+
+	local nearestP, minD = nil, math.huge
+	for _, p in ipairs(warpPillarsFolder:GetChildren()) do
+		local warpId = p:GetAttribute("WarpId") or string.gsub(p.Name, "^WarpPillar_", "")
+		if unlockedSet[warpId] == true then
+			local d = (p:GetPivot().Position - pos).Magnitude
+			if d < minD then
+				minD = d
+				nearestP = p
+			end
+		end
+	end
+	return nearestP, minD
+end
+HUB.GetNearestUnlockedPillar = getNearestUnlockedPillar
 
 local function returnToOrigin(shouldAbortFn, updateStatusFn)
 	local char = LocalPlayer.Character
@@ -7036,6 +7627,9 @@ task.spawn(function()
 									if prompt.Parent then prompt:InputHoldEnd() end
 								end)
 							end
+							if not openBox and remotes then
+								openBox = remotes:FindFirstChild("OpenLootBox")
+							end
 							if openBox then
 								pcall(function() openBox:FireServer(targetBox) end)
 							end
@@ -7064,6 +7658,9 @@ task.spawn(function()
 
 							-- สั่งดูดไอเทมที่ดรอปจากกล่อง
 							task.wait(0.12)
+							if not pickup and remotes then
+								pickup = remotes:FindFirstChild("PickupDrop")
+							end
 							if pickup then
 								pcall(function() pickup:FireServer(true) end)
 							end
@@ -7429,7 +8026,7 @@ do
 end
 
 -- =========================================================================
--- 9.25 Auto Lock & Auto Sell Workers (Event-Driven, Zero Heavy Scan)
+-- 9.28 Auto Lock & Auto Sell Workers (Event-Driven, Zero Heavy Scan)
 -- =========================================================================
 do
 	local _lastLockScan = 0
@@ -7440,16 +8037,66 @@ do
 		local eval = HUB.ItemTier and HUB.ItemTier.EvaluateGear and HUB.ItemTier.EvaluateGear(id, data)
 		if not eval then return false end
 
-		-- ด่านที่ 1: ตรวจสอบเงื่อนไขหลัก (Grade & Star Pre-requisite Gate)
-		local matchTier = (eval.Grade and wantTiers[eval.Grade] == true)
-		local matchStar = (eval.Star and wantStars[eval.Star] == true)
-		local passMain = (matchTier or matchStar)
-		if not passMain then return false end
+		-- ด่านที่ 1: ตรวจสอบเงื่อนไขหลัก (Grade & Star & GameTier Pre-requisite Gate จากแท็บ ⭐ เกรด & ระดับดาว)
+		local wantGameTiers = HUB.Config.autoLockGameTiers or {}
+		local resolved = eval.Resolved or (GearUtil and GearUtil.Resolve and GearUtil.Resolve(id, { [id] = data }))
+		local itemTier = tonumber(data.T) or (eval and tonumber(eval.Tier)) or (resolved and tonumber(resolved.Tier))
+
+		-- 1.1 ตรวจสอบระดับ Tier ในเกม (I - VI)
+		local hasGameTierFilter = false
+		for _, v in pairs(wantGameTiers) do
+			if v == true then hasGameTierFilter = true break end
+		end
+		if hasGameTierFilter then
+			local matchGameTier = false
+			if itemTier and (wantGameTiers[itemTier] == true or wantGameTiers[tostring(itemTier)] == true) then
+				matchGameTier = true
+			end
+			if not matchGameTier then
+				return false -- ตกเกณฑ์ระดับ Tier ในเกมทันที (เช่น ไม่ได้เลือก Tier I-IV แต่ไอเทมเป็น Tier I-IV)
+			end
+		end
+
+		-- 1.2 ตรวจสอบเกรด Tierlist (F..SS) และระดับดาว (Silver, Gold, Rainbow)
+		local hasGradeFilter = false
+		for _, v in pairs(wantTiers or {}) do
+			if v == true then hasGradeFilter = true break end
+		end
+		local hasStarFilter = false
+		for _, v in pairs(wantStars or {}) do
+			if v == true then hasStarFilter = true break end
+		end
+
+		if hasGradeFilter or hasStarFilter then
+			local matchGrade = (eval.Grade and wantTiers and wantTiers[eval.Grade] == true)
+			local matchStar = (eval.Star and wantStars and wantStars[eval.Star] == true)
+			local passQuality = false
+			if hasGradeFilter and hasStarFilter then
+				passQuality = (matchGrade or matchStar)
+			elseif hasGradeFilter then
+				passQuality = matchGrade
+			elseif hasStarFilter then
+				passQuality = matchStar
+			end
+			if not passQuality then
+				return false -- ตกเกณฑ์เกรดหรือระดับดาวที่กำหนดไว้ในแท็บหลัก
+			end
+		elseif not hasGameTierFilter then
+			-- ไม่ได้เลือกเงื่อนไขใดๆ ในแท็บ ⭐ เกรด & ระดับดาว เลย = ไม่ล็อค
+			return false
+		end
 
 		-- ตรวจสอบเงื่อนไขเฉพาะหมวดหมู่อุปกรณ์
-		local resolved = eval.Resolved or (GearUtil and GearUtil.Resolve and GearUtil.Resolve(id, { [id] = data }))
 		local grp = (resolved and GearData and type(GearData.GroupOf) == "function" and GearData.GroupOf(resolved))
-		local rule = grp and equipRules[grp]
+		if grp == "WeaponPhys" then
+			local idLower = string.lower(id or "")
+			if (resolved and (resolved.SubKind == "bow" or resolved.WeaponType == "bow")) or idLower:find("bow") then
+				grp = "WeaponPhysRanged"
+			else
+				grp = "WeaponPhysMelee"
+			end
+		end
+		local rule = grp and equipRules and equipRules[grp]
 
 		-- ถ้าไม่ได้เปิดใช้งานเงื่อนไขเฉพาะหมวดหมู่นี้ = ไม่กรองออปชันพิเศษ (ล็อคตามเกณฑ์เกรด/ดาวหลักทันที)
 		if not rule or rule.enabled ~= true then
@@ -7568,6 +8215,190 @@ do
 		end)
 	end))
 
+	-- -------------------- Auto Salvage Worker --------------------
+	local _isSalvagingRoutine = false
+	local _lastSalvageTime = 0
+
+	local function refreshSalvageStatusLabel(customText)
+		if not HUB.UI.SalvageStatusLabel then return end
+		if customText then
+			HUB.UI.SalvageStatusLabel.Text = customText
+			return
+		end
+		local stats = getBagStats()
+		local thresh = HUB.Config.autoSalvageThresholdPct or 85
+		if HUB.Config.autoSalvage then
+			HUB.UI.SalvageStatusLabel.Text = string.format("สถานะ: พร้อมทำงาน · ย่อยเมื่อเต็ม >= %d%% (ปัจจุบัน: %d%% [%d/%d])", thresh, stats.pct, stats.used, stats.max)
+		else
+			HUB.UI.SalvageStatusLabel.Text = string.format("สถานะ: ปิดใช้งาน (ความจุกระเป๋า: %d%% [%d/%d])", stats.pct, stats.used, stats.max)
+		end
+	end
+	HUB.RefreshSalvageStatusLabel = refreshSalvageStatusLabel
+
+	-- ปิดหน้าต่าง "Salvage Complete" (คลิกปุ่ม OK / KitButton) อัตโนมัติหลังย่อยของ
+	local function dismissSalvageResultModal()
+		pcall(function()
+			local salvageGui = PlayerGui:FindFirstChild("LumiSalvageResult")
+			if not salvageGui then return end
+			local holder = salvageGui:FindFirstChild("Holder")
+			if not holder then return end
+			local popupLayer = holder:FindFirstChild("PopupLayer")
+			if not popupLayer then return end
+			local miniWindow = popupLayer:FindFirstChild("MiniWindow")
+			local body = miniWindow and miniWindow:FindFirstChild("Body")
+			local kitBtn = body and body:FindFirstChild("KitButton")
+			if kitBtn then
+				local FIRESIGNAL = rawget(EXEC.env, "firesignal")
+				if type(FIRESIGNAL) == "function" then
+					pcall(FIRESIGNAL, kitBtn.MouseButton1Click)
+				end
+				for _, conn in ipairs(getconnections(kitBtn.MouseButton1Click)) do
+					pcall(function() conn:Fire() end)
+				end
+			end
+			-- Fallback: ยิง connection ของ PopupLayer หากมีอยู่
+			if holder:FindFirstChild("PopupLayer") then
+				for _, conn in ipairs(getconnections(popupLayer.MouseButton1Click)) do
+					pcall(function() conn:Fire() end)
+				end
+			end
+		end)
+	end
+
+	-- Reactive Listener: ตรวจจับและปิดหน้าต่าง Salvage Complete ทันทีที่ PopupLayer ถูกสร้างขึ้นมา
+	pcall(function()
+		local salvageGui = PlayerGui:WaitForChild("LumiSalvageResult", 10)
+		if salvageGui then
+			local holder = salvageGui:WaitForChild("Holder", 5)
+			if holder then
+				HUB:AddConnection(holder.ChildAdded:Connect(function(child)
+					if child.Name == "PopupLayer" then
+						task.wait(0.08)
+						dismissSalvageResultModal()
+					end
+				end))
+			end
+		end
+	end)
+
+	local function runAutoSalvageRoutine()
+		if _isSalvagingRoutine or not HUB.Alive or not HUB.Config.autoSalvage or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+		_isSalvagingRoutine = true
+		HUB.IsSalvagingRoutineActive = true
+
+		local ok, err = pcall(function()
+			-- 1. Safety Pre-Lock Gate: ตรวจสอบและล็อคไอเทมใหม่ตามเงื่อนไข Auto-Lock ก่อนเสมอ
+			if HUB.Config.autoLock and runAutoLockCheck then
+				local lockedAny, lockCount = runAutoLockCheck()
+				if lockedAny and lockCount > 0 then
+					task.wait(0.2)
+				end
+			end
+
+			-- 2. ดึงข้อมูลกระเป๋าและไอเทมปัจจุบัน
+			local rawGear = LocalPlayer:GetAttribute("GearJson") or "{}"
+			local rawLocks = LocalPlayer:GetAttribute("LocksJson") or "{}"
+			local rawEquip = LocalPlayer:GetAttribute("EquipJson") or "{}"
+			local ok1, gearJson = pcall(HttpService.JSONDecode, HttpService, rawGear)
+			local ok2, locksJson = pcall(HttpService.JSONDecode, HttpService, rawLocks)
+			local ok3, equipJson = pcall(HttpService.JSONDecode, HttpService, rawEquip)
+
+			if not (ok1 and ok2 and type(gearJson) == "table" and type(locksJson) == "table") then
+				return
+			end
+
+			local equippedSet = {}
+			local wepId = LocalPlayer:GetAttribute("WeaponId")
+			if type(wepId) == "string" and wepId ~= "" then
+				equippedSet[wepId] = true
+			end
+			if ok3 and type(equipJson) == "table" then
+				for _, eqId in pairs(equipJson) do
+					if type(eqId) == "string" and eqId ~= "" then
+						equippedSet[eqId] = true
+					end
+				end
+			end
+
+			local wantTiers = HUB.Config.autoLockTiers or {}
+			local wantStars = HUB.Config.autoLockStars or {}
+			local equipRules = HUB.Config.autoLockEquipRules or {}
+			local GearData = HUB.GearData
+			local GearUtil = HUB.GearUtil
+			local specKeys = (GearData and GearData.SpecialKeys) or {}
+
+			local salvageList = {}
+			for id, data in pairs(gearJson) do
+				if type(data) == "table" and not locksJson[id] and not equippedSet[id] then
+					-- ดึงระดับ Tier ของไอเทม (ตัวเกมอนุญาตเฉพาะ Tier 1-5)
+					local tier = tonumber(data.T)
+					if not tier and GearUtil and GearUtil.Resolve then
+						local resolved = GearUtil.Resolve(id, { [id] = data })
+						tier = resolved and tonumber(resolved.Tier)
+					end
+
+					if tier and tier >= 1 and tier <= 5 then
+						local isProtected = false
+						if HUB.Config.autoLock and shouldItemBeLocked(id, data, wantTiers, wantStars, equipRules, specKeys, GearData, GearUtil) then
+							isProtected = true
+						end
+						if not isProtected then
+							table.insert(salvageList, id)
+						end
+					end
+				end
+			end
+
+			if #salvageList > 0 then
+				local rem = ReplicatedStorage:FindFirstChild("Remotes")
+				local bagSalvage = rem and rem:FindFirstChild("BagSalvage")
+				if bagSalvage then
+					bagSalvage:FireServer(salvageList)
+					warn(string.format("[Hunting Together Hub] Auto Salvage: ส่งคำสั่งย่อยอุปกรณ์ %d ชิ้น สำเร็จ!", #salvageList))
+					_lastSalvageTime = os.clock()
+
+					-- ปิดหน้าต่างผลลัพธ์ Salvage Complete (ปุ่ม OK) อัตโนมัติทันที
+					task.spawn(function()
+						local t0 = os.clock()
+						while os.clock() - t0 < 2.0 and HUB.Alive do
+							dismissSalvageResultModal()
+							local salvageGui = PlayerGui:FindFirstChild("LumiSalvageResult")
+							local holder = salvageGui and salvageGui:FindFirstChild("Holder")
+							if not (holder and holder:FindFirstChild("PopupLayer")) then
+								if os.clock() - t0 > 0.3 then break end
+							end
+							task.wait(0.1)
+						end
+					end)
+
+					task.wait(0.3)
+					local curStats = getBagStats()
+					if HUB.UI.SalvageStatusLabel then
+						HUB.UI.SalvageStatusLabel.Text = string.format("สถานะ: ย่อยสำเร็จ %d ชิ้น (กระเป๋า: %d%% [%d/%d])", #salvageList, curStats.pct, curStats.used, curStats.max)
+					end
+				end
+			else
+				local curStats = getBagStats()
+				if HUB.UI.SalvageStatusLabel then
+					HUB.UI.SalvageStatusLabel.Text = string.format("สถานะ: กระเป๋า %d%% แต่ไม่มีอุปกรณ์ T1-5 ที่ย่อยได้ (ล็อค/สวม/T6)", curStats.pct)
+				end
+			end
+		end)
+
+		if not ok and err then
+			warn("[Hunting Together Hub] Auto Salvage Routine Error: " .. tostring(err))
+		end
+
+		_isSalvagingRoutine = false
+		HUB.IsSalvagingRoutineActive = false
+		task.delay(3.0, function()
+			if not _isSalvagingRoutine then
+				refreshSalvageStatusLabel()
+			end
+		end)
+	end
+	HUB.RunAutoSalvageRoutine = runAutoSalvageRoutine
+
 	-- -------------------- Auto Sell Worker --------------------
 	local _isSellingRoutine = false
 	local _cancelSellRoutine = false
@@ -7599,6 +8430,23 @@ do
 		local root = char and char:FindFirstChild("HumanoidRootPart")
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if not root or not hum or hum.Health <= 0 then return end
+
+		-- 0. Salvage Pre-Check Gate: หากเปิด Auto Salvage ให้ย่อยอุปกรณ์กลางจุดฟาร์มก่อนเสมอ (Location-Independent)
+		if HUB.Config.autoSalvage and runAutoSalvageRoutine and not _isSalvagingRoutine and not HUB.IsSalvagingRoutineActive then
+			if HUB.UI.SellStatusLabel then
+				HUB.UI.SellStatusLabel.Text = "สถานะ: ย่อยอุปกรณ์เบื้องหลังก่อนวาร์ป..."
+			end
+			runAutoSalvageRoutine()
+			task.wait(0.4)
+			-- ตรวจสอบความจุกระเป๋าใหม่หลังย่อย: หากพื้นที่ว่างพอแล้ว ไม่จำเป็นต้องวาร์ปไปร้านค้า
+			if not HUB.IsAutoSellNeeded() then
+				local afterStats = getBagStats()
+				if HUB.UI.SellStatusLabel then
+					HUB.UI.SellStatusLabel.Text = string.format("สถานะ: ย่อยอุปกรณ์สำเร็จ กระเป๋าว่างแล้ว (%d%%) · ข้ามการวาร์ปขาย", afterStats.pct)
+				end
+				return
+			end
+		end
 
 		_isSellingRoutine = true
 		_cancelSellRoutine = false
@@ -7738,77 +8586,82 @@ do
 
 			local rem = ReplicatedStorage:FindFirstChild("Remotes")
 
-			-- ขาย Junk ทั้งหมด
-			local shopSellJunk = rem and rem:FindFirstChild("ShopSellJunk")
-			if shopSellJunk and not shouldAbort() then
-				shopSellJunk:FireServer()
-				task.wait(0.15)
+			-- ขาย Junk ทั้งหมด (ตาม config autoSellJunk)
+			if HUB.Config.autoSellJunk ~= false then
+				local shopSellJunk = rem and rem:FindFirstChild("ShopSellJunk")
+				if shopSellJunk and not shouldAbort() then
+					shopSellJunk:FireServer()
+					task.wait(0.15)
+				end
 			end
 
 			if shouldAbort() then return end
 
-			-- ตรวจสอบและล็อคไอเทมใหม่ก่อนขายเสมอ (Safety Pre-Lock Gate)
-			if HUB.Config.autoLock and runAutoLockCheck then
-				local lockedAny, lockCount = runAutoLockCheck()
-				if lockedAny and lockCount > 0 then
-					task.wait(0.35)
-				end
-			end
-
-			-- ขายอุปกรณ์ทั้งหมดที่ไม่ได้ล็อคและไม่ได้สวมใส่ (ข้ามหน้าต่างกดค้าง ValuableConfirm ของ Client ได้โดยตรง 100%)
-			local rawGear = LocalPlayer:GetAttribute("GearJson") or "{}"
-			local rawLocks = LocalPlayer:GetAttribute("LocksJson") or "{}"
-			local rawEquip = LocalPlayer:GetAttribute("EquipJson") or "{}"
-			local ok1, gearJson = pcall(HttpService.JSONDecode, HttpService, rawGear)
-			local ok2, locksJson = pcall(HttpService.JSONDecode, HttpService, rawLocks)
-			local ok3, equipJson = pcall(HttpService.JSONDecode, HttpService, rawEquip)
-			if ok1 and ok2 and type(gearJson) == "table" and type(locksJson) == "table" then
-				local equippedSet = {}
-				local wepId = LocalPlayer:GetAttribute("WeaponId")
-				if type(wepId) == "string" and wepId ~= "" then
-					equippedSet[wepId] = true
-				end
-				if ok3 and type(equipJson) == "table" then
-					for _, eqId in pairs(equipJson) do
-						if type(eqId) == "string" and eqId ~= "" then
-							equippedSet[eqId] = true
-						end
+			-- ขายอุปกรณ์ทั้งหมดที่ไม่ได้ล็อคและไม่ได้สวมใส่ (ตาม config autoSellGear)
+			if HUB.Config.autoSellGear ~= false then
+				-- ตรวจสอบและล็อคไอเทมใหม่ก่อนขายเสมอ (Safety Pre-Lock Gate)
+				if HUB.Config.autoLock and runAutoLockCheck then
+					local lockedAny, lockCount = runAutoLockCheck()
+					if lockedAny and lockCount > 0 then
+						task.wait(0.35)
 					end
 				end
 
-				local wantTiers = HUB.Config.autoLockTiers or {}
-				local wantStars = HUB.Config.autoLockStars or {}
-				local equipRules = HUB.Config.autoLockEquipRules or {}
-				local GearData = HUB.GearData
-				local GearUtil = HUB.GearUtil
-				local specKeys = (GearData and GearData.SpecialKeys) or {}
+				-- ขายอุปกรณ์ทั้งหมดที่ไม่ได้ล็อคและไม่ได้สวมใส่ (ข้ามหน้าต่างกดค้าง ValuableConfirm ของ Client ได้โดยตรง 100%)
+				local rawGear = LocalPlayer:GetAttribute("GearJson") or "{}"
+				local rawLocks = LocalPlayer:GetAttribute("LocksJson") or "{}"
+				local rawEquip = LocalPlayer:GetAttribute("EquipJson") or "{}"
+				local ok1, gearJson = pcall(HttpService.JSONDecode, HttpService, rawGear)
+				local ok2, locksJson = pcall(HttpService.JSONDecode, HttpService, rawLocks)
+				local ok3, equipJson = pcall(HttpService.JSONDecode, HttpService, rawEquip)
+				if ok1 and ok2 and type(gearJson) == "table" and type(locksJson) == "table" then
+					local equippedSet = {}
+					local wepId = LocalPlayer:GetAttribute("WeaponId")
+					if type(wepId) == "string" and wepId ~= "" then
+						equippedSet[wepId] = true
+					end
+					if ok3 and type(equipJson) == "table" then
+						for _, eqId in pairs(equipJson) do
+							if type(eqId) == "string" and eqId ~= "" then
+								equippedSet[eqId] = true
+							end
+						end
+					end
 
-				local sellList = {}
-				for id, data in pairs(gearJson) do
-					if not locksJson[id] and not equippedSet[id] then
-						local isProtected = false
-						if HUB.Config.autoLock and shouldItemBeLocked(id, data, wantTiers, wantStars, equipRules, specKeys, GearData, GearUtil) then
-							isProtected = true
-						end
-						if not isProtected then
-							table.insert(sellList, {id, 1})
+					local wantTiers = HUB.Config.autoLockTiers or {}
+					local wantStars = HUB.Config.autoLockStars or {}
+					local equipRules = HUB.Config.autoLockEquipRules or {}
+					local GearData = HUB.GearData
+					local GearUtil = HUB.GearUtil
+					local specKeys = (GearData and GearData.SpecialKeys) or {}
+
+					local sellList = {}
+					for id, data in pairs(gearJson) do
+						if not locksJson[id] and not equippedSet[id] then
+							local isProtected = false
+							if HUB.Config.autoLock and shouldItemBeLocked(id, data, wantTiers, wantStars, equipRules, specKeys, GearData, GearUtil) then
+								isProtected = true
+							end
+							if not isProtected then
+								table.insert(sellList, {id, 1})
+							end
 						end
 					end
-				end
-				if #sellList > 0 and not shouldAbort() then
-					local shopSellMany = rem and rem:FindFirstChild("ShopSellMany")
-					if shopSellMany then
-						shopSellMany:FireServer(sellList)
-						task.wait(0.25)
-					end
-					HUB.AllItemsProtectedAlert = false
-				elseif #sellList == 0 then
-					local curStats = getBagStats()
-					local curThresh = HUB.Config.autoSellThresholdPct or 85
-					if curStats.pct >= curThresh or curStats.isFull then
-						HUB.AllItemsProtectedAlert = true
-						if HUB.UI.SellStatusLabel then
-							HUB.UI.SellStatusLabel.Text = string.format("สถานะ: กระเป๋า %d%% แต่ทุกชิ้นถูกล็อค/ป้องกัน (ไม่มีของขาย)", curStats.pct)
+					if #sellList > 0 and not shouldAbort() then
+						local shopSellMany = rem and rem:FindFirstChild("ShopSellMany")
+						if shopSellMany then
+							shopSellMany:FireServer(sellList)
+							task.wait(0.25)
+						end
+						HUB.AllItemsProtectedAlert = false
+					elseif #sellList == 0 then
+						local curStats = getBagStats()
+						local curThresh = HUB.Config.autoSellThresholdPct or 85
+						if curStats.pct >= curThresh or curStats.isFull then
+							HUB.AllItemsProtectedAlert = true
+							if HUB.UI.SellStatusLabel then
+								HUB.UI.SellStatusLabel.Text = string.format("สถานะ: กระเป๋า %d%% แต่ทุกชิ้นถูกล็อค/ป้องกัน (ไม่มีของขาย)", curStats.pct)
+							end
 						end
 					end
 				end
@@ -7863,7 +8716,17 @@ do
 		local stats = getBagStats()
 		local thresh = HUB.Config.autoSellThresholdPct or 85
 		if HUB.Config.autoSell then
-			HUB.UI.SellStatusLabel.Text = string.format("สถานะ: พร้อมทำงาน · ขายเมื่อเต็ม >= %d%% (ปัจจุบัน: %d%% [%d/%d])", thresh, stats.pct, stats.used, stats.max)
+			if HUB.Config.autoSellJunk == false and HUB.Config.autoSellGear == false then
+				HUB.UI.SellStatusLabel.Text = string.format("สถานะ: เปิดใช้งาน แต่ปิดทั้งขยะและอุปกรณ์ (เลือกอย่างน้อย 1 อย่าง) [%d%%]", stats.pct)
+			else
+				local typeStr = "ขยะ+อุปกรณ์"
+				if HUB.Config.autoSellJunk ~= false and HUB.Config.autoSellGear == false then
+					typeStr = "ขยะ"
+				elseif HUB.Config.autoSellJunk == false and HUB.Config.autoSellGear ~= false then
+					typeStr = "อุปกรณ์"
+				end
+				HUB.UI.SellStatusLabel.Text = string.format("สถานะ: พร้อมทำงาน · ขาย%sเมื่อ >= %d%% (ปัจจุบัน: %d%% [%d/%d])", typeStr, thresh, stats.pct, stats.used, stats.max)
+			end
 		else
 			HUB.UI.SellStatusLabel.Text = string.format("สถานะ: ปิดใช้งาน (ความจุกระเป๋า: %d%% [%d/%d])", stats.pct, stats.used, stats.max)
 		end
@@ -7872,45 +8735,66 @@ do
 
 	HUB.IsAutoSellNeeded = function()
 		if not HUB.Config.autoSell then return false end
+		if HUB.Config.autoSellJunk == false and HUB.Config.autoSellGear == false then return false end
 		local stats = getBagStats()
 		local threshold = HUB.Config.autoSellThresholdPct or 85
 		return (stats.pct >= threshold or (threshold == 100 and stats.isFull))
 	end
 
-	-- Event-driven reactive watcher: ซิงค์ % กระเป๋าและตรวจเช็ค Auto Sell ทันทีแบบ Real-time เมื่อความจุกระเป๋าเปลี่ยน
+	-- Event-driven reactive watcher: ซิงค์ % กระเป๋าและตรวจเช็ค Auto Salvage / Auto Sell ทันทีแบบ Real-time
 	local _lastProtectedAlertTime = 0
-	local function checkBagAndSellIfNeeded()
+	local function checkBagAndProcessLoot()
 		if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
 		HUB.AllItemsProtectedAlert = false -- มีการเปลี่ยนแปลงสล็อตในกระเป๋า รีเซ็ต alert
 		if not _isSellingRoutine then
 			refreshSellStatusLabel()
 		end
-		if HUB.Config.autoSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
-			local stats = getBagStats()
-			local threshold = HUB.Config.autoSellThresholdPct or 85
-			if stats.pct >= threshold or (threshold == 100 and stats.isFull) then
-				task.spawn(runAutoSellRoutine)
+		if not _isSalvagingRoutine then
+			refreshSalvageStatusLabel()
+		end
+
+		local stats = getBagStats()
+
+		-- 1. ลำดับที่ 1: ตรวจสอบและรัน Auto Salvage ก่อน (Location-Independent, ทำงานทันทีในเบื้องหลัง ไม่ขัดจังหวะฟาร์ม)
+		if HUB.Config.autoSalvage and not _isSalvagingRoutine and not HUB.IsSalvagingRoutineActive then
+			local salvageThresh = HUB.Config.autoSalvageThresholdPct or 85
+			local sellThresh = HUB.Config.autoSellThresholdPct or 85
+			-- หากเปิด Auto Sell ควบคู่ ให้กระตุ้นการย่อยเมื่อถึงเกณฑ์ใดเกณฑ์หนึ่งที่ต่ำกว่า
+			local triggerSalvage = (stats.pct >= salvageThresh or (salvageThresh == 100 and stats.isFull))
+			if HUB.Config.autoSell and (stats.pct >= sellThresh or (sellThresh == 100 and stats.isFull)) then
+				triggerSalvage = true
 			end
+			if triggerSalvage then
+				task.spawn(function()
+					runAutoSalvageRoutine()
+					-- หลัง Salvage รันเสร็จ ให้ตรวจสอบว่ากระเป๋ายังเกินเกณฑ์ Auto Sell อยู่หรือไม่
+					task.wait(0.5)
+					if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded() and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
+						task.spawn(runAutoSellRoutine)
+					end
+				end)
+				return
+			end
+		end
+
+		-- 2. ลำดับที่ 2: หากไม่ได้เปิด Salvage แต่ถึงเกณฑ์ Auto Sell
+		if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded() and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
+			task.spawn(runAutoSellRoutine)
 		end
 	end
 
-	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("BagSlotsUsed"):Connect(checkBagAndSellIfNeeded))
-	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("BagSlotsMax"):Connect(checkBagAndSellIfNeeded))
+	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("BagSlotsUsed"):Connect(checkBagAndProcessLoot))
+	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("BagSlotsMax"):Connect(checkBagAndProcessLoot))
 
-	-- Periodic Backup Poller (ตรวจเช็คทุก 2.5 วินาที เพื่อการันตี 100% ว่าไม่พลาดการขายแม้กระเป๋าเต็มจนไม่มีสัญญาณยิง)
+	-- Periodic Backup Poller (ตรวจเช็คทุก 2.5 วินาที เพื่อการันตี 100% ว่าไม่พลาดการย่อย/ขายแม้กระเป๋าเต็มจนไม่มีสัญญาณยิง)
 	task.spawn(function()
 		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
 			task.wait(2.5)
-			if HUB.Config.autoSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
+			if not _isSellingRoutine and not HUB.IsSellingRoutineActive and not _isSalvagingRoutine and not HUB.IsSalvagingRoutineActive then
 				if HUB.AllItemsProtectedAlert and (os.clock() - _lastProtectedAlertTime < 45.0) then
 					-- ข้ามการสแปมรูทีนถ้าไอเทมทั้งหมดล็อคอยู่แล้ว และยังไม่ถึงรอบตรวจซ้ำ 45s
 				else
-					local stats = getBagStats()
-					local threshold = HUB.Config.autoSellThresholdPct or 85
-					if stats.pct >= threshold or (threshold == 100 and stats.isFull) then
-						_lastProtectedAlertTime = os.clock()
-						task.spawn(runAutoSellRoutine)
-					end
+					checkBagAndProcessLoot()
 				end
 			end
 		end
@@ -7925,21 +8809,17 @@ do
 		end)
 	end
 
-	if HUB.Config.autoSell then
+	if HUB.Config.autoSalvage or HUB.Config.autoSell then
 		task.delay(4.0, function()
-			if HUB.Alive and HUB.Config.autoSell and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN then
-				local stats = getBagStats()
-				local threshold = HUB.Config.autoSellThresholdPct or 85
-				if stats.pct >= threshold or (threshold == 100 and stats.isFull) then
-					runAutoSellRoutine()
-				end
+			if HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN then
+				checkBagAndProcessLoot()
 			end
 		end)
 	end
 end
 
 -- =========================================================================
--- 9.26 Auto Farm Boss Worker (ล่าบอสอัตโนมัติเมื่อเกิด & วาร์ปต่อเนื่อง & กลับจุดฟาร์มเดิม)
+-- 9.28 Auto Farm Boss Worker (ล่าบอสอัตโนมัติเมื่อเกิด & วาร์ปต่อเนื่อง & กลับจุดฟาร์มเดิม)
 -- =========================================================================
 do
 	local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
@@ -8174,117 +9054,16 @@ do
 
 				-- หากตัวละครไม่ได้อยู่ที่ห้องบอสเป้าหมายอยู่แล้ว (ห่างเกิน 120 studs) จึงต้องเดินทางผ่านเสาวาร์ป
 				if distToTargetArena > 120.0 then
-					local townPillar = warpPillarsFolder and warpPillarsFolder:FindFirstChild("WarpPillar_Town")
-
-					-- หาเสาวาร์ปที่อยู่ใกล้ตัวละครที่สุด
-					local nearestP, minD = nil, math.huge
-					if warpPillarsFolder then
-						for _, p in ipairs(warpPillarsFolder:GetChildren()) do
-							local d = (p:GetPivot().Position - root.Position).Magnitude
-							if d < minD then
-								minD = d
-								nearestP = p
-							end
-						end
-					end
-
-					local bossPillar, distToPillar, nearBossDef = getNearbyBossPillar(root.Position)
-
-					-- 2.1 หากอยู่ในเมืองอยู่แล้ว (Z > -200) ให้ใช้เสาเมืองหลวงได้ทันที
-					if inTown and townPillar then
-						currentNearPillar = townPillar
-					-- 2.2 หากอยู่ในโซนบอส (Boss Chaining หรือบอสเพิ่งถูกฆ่า / ยืนอยู่หน้าเสาบอส <= 240 studs)
-					-- ให้เดินไปใช้เสาบอสนั้นเพื่อวาร์ปไปยังบอสเป้าหมายได้โดยตรง 100% (ไม่ใช้ HomeWarp)
-					elseif bossPillar then
-						currentNearPillar = bossPillar
-					elseif nearestP and minD <= 240.0 and nearestP ~= townPillar and root.Position.Z <= -200 then
+					-- ค้นหาเสาวาร์ปที่ปลดล็อคแล้วที่อยู่ใกล้ตัวละครที่สุดโดยตรง (Direct Nearest Pillar Walk — Zero HomeWarp)
+					local nearestP, minD = getNearestUnlockedPillar(root.Position)
+					if nearestP then
 						currentNearPillar = nearestP
-					else
-						-- 2.3 ฟาร์มอยู่ในโซนปกติที่ไม่มีเสาวาร์ป (ทุ่งมอนสเตอร์) ให้ร่าย HomeWarp กลับเมืองหลวงก่อน 100% แล้วค่อยวิ่งไปเสาเมือง
+						local nearPillarName = nearestP:GetAttribute("WarpId") or nearestP.Name
 						if HUB.UI.BossStatusLabel then
-							HUB.UI.BossStatusLabel.Text = string.format("สถานะ: ฟาร์มในโซนไม่มีเสา — ร่ายวาร์ปกลับเมืองเพื่อใช้เสาไป %s...", targetBoss.name)
+							HUB.UI.BossStatusLabel.Text = string.format("สถานะ: เดินไปเสาวาร์ปใกล้สุด (%s) เพื่อไปล่า %s...", tostring(nearPillarName), targetBoss.name)
 						end
-
-						if HUB.DisableGameAutoPlay then
-							HUB.DisableGameAutoPlay()
-						end
-
-						-- เช็คคูลดาวน์ HomeWarp หากมีเศษคูลดาวน์สั้นๆ (<= 12 วิ) ให้รอให้พร้อมก่อน
-						local readyAt = tonumber(LocalPlayer:GetAttribute("HomeWarpReadyAt")) or 0
-						local cdLeft = math.max(0, math.ceil(readyAt - workspace:GetServerTimeNow()))
-						if cdLeft > 0 and cdLeft <= 12 then
-							if HUB.UI.BossStatusLabel then
-								HUB.UI.BossStatusLabel.Text = string.format("สถานะ: รอ HomeWarp อีก %d วิ เพื่อไปล่า %s...", cdLeft, targetBoss.name)
-							end
-							local cdWaitT0 = os.clock()
-							while (os.clock() - cdWaitT0 < (cdLeft + 0.2)) and not shouldAbort() do
-								task.wait(0.2)
-							end
-							cdLeft = 0
-						end
-
-						local reachedTown = false
-						if cdLeft == 0 and not shouldAbort() then
-							if root then root.Anchored = true end
-							local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
-							if homeWarp then
-								homeWarp:FireServer("start", "merchant")
-							elseif LumiMenuToggle then
-								pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end)
-							end
-
-							local t0 = os.clock()
-							while os.clock() - t0 < 8.0 and not shouldAbort() do
-								task.wait(0.1)
-								char = LocalPlayer.Character
-								root = char and char:FindFirstChild("HumanoidRootPart")
-								hum = char and char:FindFirstChildOfClass("Humanoid")
-								if not root or not hum or hum.Health <= 0 then break end
-
-								if root.Position.Z > -200 then
-									reachedTown = true
-									break
-								end
-							end
-							if root then root.Anchored = false end
-						end
-
-						-- หาก HomeWarp ติดคูลดาวน์นานหรือเฟล ให้ลองเช็คเสาวาร์ปใกล้เคียงเพื่อวาร์ปไปเมือง
-						if not reachedTown and not shouldAbort() then
-							local fallbackPillar = getNearbyBossPillar(root.Position)
-							if fallbackPillar then
-								local okPillar = executePillarWarp(fallbackPillar, "Town", shouldAbort)
-								if okPillar then
-									char = LocalPlayer.Character
-									root = char and char:FindFirstChild("HumanoidRootPart")
-									if root and root.Position.Z > -200 then
-										reachedTown = true
-									end
-								end
-							end
-						end
-
-						if not reachedTown or shouldAbort() then
-							warn("[Hunting Together Hub] Auto Boss: วาร์ปเข้าเมืองไม่สำเร็จ — คืนค่า Auto Play")
-							if root and root.Position.Z <= -300 and HUB.EnsureGameAutoActive then
-								HUB.EnsureGameAutoActive(4, 0.3)
-							end
-							return
-						end
-
-						-- รอ WarpLandClient ปล่อย Anchored และ RequestStreamAroundAsync รอบเสาเมืองหลวง
-						local tWarpDone = os.clock()
-						while (root and root.Anchored and os.clock() - tWarpDone < 1.8) do
-							task.wait(0.08)
-						end
-						pcall(function()
-							LocalPlayer:RequestStreamAroundAsync(root.Position, 3)
-						end)
-						task.wait(0.15)
-
-						if reachedTown and townPillar then
-							currentNearPillar = townPillar
-						end
+					else
+						currentNearPillar = warpPillarsFolder and warpPillarsFolder:FindFirstChild("WarpPillar_Town")
 					end
 
 					if shouldAbort() then return end
@@ -8298,7 +9077,7 @@ do
 						char = LocalPlayer.Character
 						root = char and char:FindFirstChild("HumanoidRootPart")
 						if root then
-							local rePillar = (root.Position.Z > -200 and townPillar) or getNearbyBossPillar(root.Position)
+							local rePillar = getNearestUnlockedPillar(root.Position)
 							if rePillar then
 								if HUB.UI.BossStatusLabel then
 									HUB.UI.BossStatusLabel.Text = string.format("สถานะ: วาร์ปไม่สำเร็จ — กำลังลองใหม่รอบที่ 2 ไปยัง %s...", targetBoss.name)
@@ -8594,7 +9373,19 @@ do
 				end
 			end
 
-			-- 7. ตรวจสอบการส่งไม้ต่อให้ Auto Sell (Smart Handoff) หรือเดินทางกลับจุดเดิม (Return to Origin)
+			-- 7. ตรวจสอบการย่อยอุปกรณ์ (Auto Salvage) หรือส่งไม้ต่อให้ Auto Sell (Smart Handoff)
+			if HUB.Config.autoSalvage and HUB.RunAutoSalvageRoutine then
+				local stats = getBagStats()
+				local sThresh = HUB.Config.autoSalvageThresholdPct or 85
+				if stats.pct >= sThresh or (sThresh == 100 and stats.isFull) then
+					if HUB.UI.BossStatusLabel then
+						HUB.UI.BossStatusLabel.Text = "สถานะ: ปราบครบแล้ว · ย่อยอุปกรณ์เบื้องหลัง..."
+					end
+					HUB.RunAutoSalvageRoutine()
+					task.wait(0.3)
+				end
+			end
+
 			if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded() then
 				if HUB.UI.BossStatusLabel then
 					HUB.UI.BossStatusLabel.Text = "สถานะ: ปราบครบแล้ว · กระเป๋าเต็มเกณฑ์ -> ส่งไม้ต่อให้ Auto Sell"
@@ -8682,7 +9473,7 @@ do
 		end
 	end)
 
-	-- 9.27 Self-Healing Watchdog (ทุก 5 วินาที): ตรวจจับและปลดล็อค Flag / Routine ที่ค้างเกินเวลาแบบอัตโนมัติ
+	-- 9.28 Self-Healing Watchdog (ทุก 5 วินาที): ตรวจจับและปลดล็อค Flag / Routine ที่ค้างเกินเวลาแบบอัตโนมัติ
 	task.spawn(function()
 		local _stuckBossCount = 0
 		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
@@ -9518,6 +10309,7 @@ do
 		-- ยกเลิกลูปรูทีนที่กำลังทำงานอยู่ทันที ป้องกันไม่ให้เธรดค้างบนร่างที่ตาย
 		if HUB.CancelAutoBossRoutine then pcall(HUB.CancelAutoBossRoutine) end
 		if HUB.CancelAutoSellRoutine then pcall(HUB.CancelAutoSellRoutine) end
+		HUB.IsSalvagingRoutineActive = false
 		HUB.Navigating = false
 		HUB.Dodging = false
 	end
@@ -9604,6 +10396,7 @@ do
 		HUB.UserDisabledAuto = false -- ปลดล็อค False UserDisabledAuto จากจังหวะตาย 100%
 		HUB.Navigating = false
 		HUB.Dodging = false
+		HUB.IsSalvagingRoutineActive = false
 		if HUB.CancelAutoBossRoutine then pcall(HUB.CancelAutoBossRoutine) end
 		if HUB.CancelAutoSellRoutine then pcall(HUB.CancelAutoSellRoutine) end
 
