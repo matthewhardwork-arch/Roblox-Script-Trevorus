@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.28)
+-- Hunting Together Hub (v9.29)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.28"
+local VERSION = "9.29"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -2427,6 +2427,117 @@ local function getBagStats()
 end
 HUB.GetBagStats = getBagStats
 
+local function formatComma(n)
+	local s = tostring(math.floor(tonumber(n) or 0))
+	local k
+	while true do
+		s, k = string.gsub(s, "^(-?%d+)(%d%d%d)", "%1,%2")
+		if k == 0 then break end
+	end
+	return s
+end
+HUB.FormatComma = formatComma
+
+local getJunkStats, getSellableGearStats, hasSellableItems
+do
+	local _cachedItemData = nil
+	local _cachedJunkKeep = nil
+	local function getItemData()
+		if _cachedItemData then return _cachedItemData end
+		local sf = ReplicatedStorage:FindFirstChild("Shared")
+		local mod = sf and sf:FindFirstChild("ItemData")
+		if mod then
+			local ok, res = pcall(require, mod)
+			if ok and type(res) == "table" then
+				_cachedItemData = res
+			end
+		end
+		local gcMod = sf and sf:FindFirstChild("GameConfig")
+		if gcMod then
+			local ok, gc = pcall(require, gcMod)
+			if ok and type(gc) == "table" and type(gc.JunkKeep) == "table" then
+				_cachedJunkKeep = gc.JunkKeep
+			end
+		end
+		return _cachedItemData
+	end
+
+	getJunkStats = function()
+		local rawItems = LocalPlayer:GetAttribute("ItemsJson") or "{}"
+		local rawLocks = LocalPlayer:GetAttribute("LocksJson") or "{}"
+		local ok1, itemsJson = pcall(HttpService.JSONDecode, HttpService, rawItems)
+		local ok2, locksJson = pcall(HttpService.JSONDecode, HttpService, rawLocks)
+		if not ok1 or type(itemsJson) ~= "table" then return { count = 0, silver = 0, types = 0 } end
+		if not ok2 or type(locksJson) ~= "table" then locksJson = {} end
+
+		local itemData = getItemData()
+		if not itemData then return { count = 0, silver = 0, types = 0 } end
+		local junkKeep = _cachedJunkKeep or {}
+
+		local totalCount = 0
+		local totalSilver = 0
+		local typesCount = 0
+		for id, count in pairs(itemsJson) do
+			local def = itemData[id]
+			if def and def.Kind == "etc" and (def.Sell or 0) > 0 and not locksJson[id] and not junkKeep[id] then
+				totalCount = totalCount + count
+				totalSilver = totalSilver + (count * (def.Sell or 0))
+				typesCount = typesCount + 1
+			end
+		end
+		return { count = totalCount, silver = totalSilver, types = typesCount }
+	end
+
+	getSellableGearStats = function()
+		local rawGear = LocalPlayer:GetAttribute("GearJson") or "{}"
+		local rawLocks = LocalPlayer:GetAttribute("LocksJson") or "{}"
+		local rawEquip = LocalPlayer:GetAttribute("EquipJson") or "{}"
+		local ok1, gearJson = pcall(HttpService.JSONDecode, HttpService, rawGear)
+		local ok2, locksJson = pcall(HttpService.JSONDecode, HttpService, rawLocks)
+		local ok3, equipJson = pcall(HttpService.JSONDecode, HttpService, rawEquip)
+		if not ok1 or type(gearJson) ~= "table" then return 0 end
+		if not ok2 or type(locksJson) ~= "table" then locksJson = {} end
+		local equippedSet = {}
+		local wepId = LocalPlayer:GetAttribute("WeaponId")
+		if type(wepId) == "string" and wepId ~= "" then equippedSet[wepId] = true end
+		if ok3 and type(equipJson) == "table" then
+			for _, eqId in pairs(equipJson) do
+				if type(eqId) == "string" and eqId ~= "" then equippedSet[eqId] = true end
+			end
+		end
+		local count = 0
+		for gId, _ in pairs(gearJson) do
+			if not locksJson[gId] and not equippedSet[gId] then
+				count = count + 1
+			end
+		end
+		return count
+	end
+
+	hasSellableItems = function()
+		local hasJunk = false
+		local junk = nil
+		if HUB.Config.autoSellJunk ~= false then
+			junk = getJunkStats()
+			if junk.count > 0 then
+				hasJunk = true
+			end
+		end
+		local hasGear = false
+		local gearCount = 0
+		if HUB.Config.autoSellGear ~= false then
+			gearCount = getSellableGearStats()
+			if gearCount > 0 then
+				hasGear = true
+			end
+		end
+		return (hasJunk or hasGear), hasJunk, hasGear, junk, gearCount
+	end
+end
+HUB.GetJunkStats = getJunkStats
+HUB.GetSellableGearStats = getSellableGearStats
+HUB.HasSellableItems = hasSellableItems
+
 -- ===== 7. สร้าง GUI: ScreenGui & Main Window & Tab System =====
 do
 	local targetParent = (gethui and gethui()) or CoreGui or PlayerGui
@@ -3076,7 +3187,7 @@ do
 
 		local pad = Instance.new("UIPadding")
 		pad.PaddingTop = UDim.new(0, 4)
-		pad.PaddingBottom = UDim.new(0, 10)
+		pad.PaddingBottom = UDim.new(0, 36)
 		pad.PaddingLeft = UDim.new(0, 2)
 		pad.PaddingRight = UDim.new(0, 6)
 		pad.Parent = scroll
@@ -5657,7 +5768,7 @@ do
 		end,
 		nil,
 		function(subPanel, card, cStatus, setExpandHeight)
-			if setExpandHeight then setExpandHeight(92, 172) end
+			if setExpandHeight then setExpandHeight(124, 210) end
 
 			local subTitle = Instance.new("TextLabel")
 			subTitle.Name = "SubTitle"
@@ -5828,6 +5939,44 @@ do
 				function() return HUB.Config.autoSellGear ~= false end,
 				function(v) HUB.Config.autoSellGear = v end
 			)
+
+			-- ส่วนที่ 3: ปุ่มสั่งวาร์ปไปขายที่ Merchant ทันที (Manual Action)
+			local btnSellNow = Instance.new("TextButton")
+			btnSellNow.Name = "Btn_SellNow"
+			btnSellNow.Size = UDim2.new(1, -16, 0, 24)
+			btnSellNow.Position = UDim2.new(0, 8, 0, 92)
+			btnSellNow.BackgroundColor3 = Color3.fromRGB(180, 110, 25)
+			btnSellNow.BorderSizePixel = 0
+			btnSellNow.Text = "💰 วาร์ปไปขายที่ Merchant เดี๋ยวนี้ (Manual Sell)"
+			btnSellNow.TextColor3 = Color3.fromRGB(255, 255, 255)
+			btnSellNow.TextSize = 11
+			applyFont(btnSellNow, true)
+			btnSellNow.Parent = subPanel
+
+			local bsnCorner = Instance.new("UICorner")
+			bsnCorner.CornerRadius = UDim.new(0, 4)
+			bsnCorner.Parent = btnSellNow
+
+			local bsnStroke = Instance.new("UIStroke")
+			bsnStroke.Thickness = 1.2
+			bsnStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			bsnStroke.Color = Color3.fromRGB(240, 160, 40)
+			bsnStroke.Parent = btnSellNow
+
+			HUB:AddConnection(btnSellNow.MouseButton1Click:Connect(function()
+				local canSell = hasSellableItems()
+				if not canSell then
+					if HUB.UI.SellStatusLabel then
+						HUB.UI.SellStatusLabel.Text = "สถานะ: ไม่มีไอเทมที่ต้องขาย (ขยะว่าง / ไม่มีอุปกรณ์ไม่ล็อค)"
+					end
+					return
+				end
+				if HUB.RunAutoSellRoutine then
+					task.spawn(function()
+						HUB.RunAutoSellRoutine(true)
+					end)
+				end
+			end))
 
 			refreshAllPctBtns()
 		end
@@ -8026,7 +8175,7 @@ do
 end
 
 -- =========================================================================
--- 9.28 Auto Lock & Auto Sell Workers (Event-Driven, Zero Heavy Scan)
+-- 9.29 Auto Lock & Auto Sell Workers (Event-Driven, Zero Heavy Scan)
 -- =========================================================================
 do
 	local _lastLockScan = 0
@@ -8424,26 +8573,33 @@ do
 	end
 	HUB.CancelAutoSellRoutine = cancelAutoSellRoutine
 
-	local function runAutoSellRoutine()
-		if _isSellingRoutine or not HUB.Alive or not HUB.Config.autoSell or HUB.IsBossRoutineActive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+	local function runAutoSellRoutine(forceRun)
+		if _isSellingRoutine or not HUB.Alive or HUB.IsBossRoutineActive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+		if not forceRun and not HUB.Config.autoSell then return end
 		local char = LocalPlayer.Character
 		local root = char and char:FindFirstChild("HumanoidRootPart")
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if not root or not hum or hum.Health <= 0 then return end
 
 		-- 0. Salvage Pre-Check Gate: หากเปิด Auto Salvage ให้ย่อยอุปกรณ์กลางจุดฟาร์มก่อนเสมอ (Location-Independent)
-		if HUB.Config.autoSalvage and runAutoSalvageRoutine and not _isSalvagingRoutine and not HUB.IsSalvagingRoutineActive then
+		if not forceRun and HUB.Config.autoSalvage and runAutoSalvageRoutine and not _isSalvagingRoutine and not HUB.IsSalvagingRoutineActive then
 			if HUB.UI.SellStatusLabel then
 				HUB.UI.SellStatusLabel.Text = "สถานะ: ย่อยอุปกรณ์เบื้องหลังก่อนวาร์ป..."
 			end
 			runAutoSalvageRoutine()
 			task.wait(0.4)
-			-- ตรวจสอบความจุกระเป๋าใหม่หลังย่อย: หากพื้นที่ว่างพอแล้ว ไม่จำเป็นต้องวาร์ปไปร้านค้า
-			if not HUB.IsAutoSellNeeded() then
+			-- ตรวจสอบว่ายังมีไอเทมที่เข้าเกณฑ์ขายหรือไม่ (Junk หรือ Gear ที่ไม่ได้ย่อย)
+			local canSell = hasSellableItems()
+			if not canSell then
 				local afterStats = getBagStats()
 				if HUB.UI.SellStatusLabel then
-					HUB.UI.SellStatusLabel.Text = string.format("สถานะ: ย่อยอุปกรณ์สำเร็จ กระเป๋าว่างแล้ว (%d%%) · ข้ามการวาร์ปขาย", afterStats.pct)
+					HUB.UI.SellStatusLabel.Text = string.format("สถานะ: ย่อยอุปกรณ์สำเร็จ กระเป๋าว่างแล้ว (%d%%) · ไม่มีของต้องขาย ข้ามการวาร์ป", afterStats.pct)
 				end
+				return
+			end
+		else
+			local canSell = hasSellableItems()
+			if not canSell and not forceRun then
 				return
 			end
 		end
@@ -8571,15 +8727,42 @@ do
 			end
 
 			-- 3. เดินเข้าหาระยะ Merchant ด้วย Pathfinding Navigation (หลบสิ่งกีดขวางในเมือง)
-			local merchantModel = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("NPCs") and workspace.Map.NPCs:FindFirstChild("merchant")
+			local merchantModel = nil
+			local tFind = os.clock()
+			while os.clock() - tFind < 4.0 and not shouldAbort() do
+				merchantModel = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("NPCs") and workspace.Map.NPCs:FindFirstChild("merchant")
+				if merchantModel then break end
+				task.wait(0.2)
+			end
+
 			if merchantModel then
 				local mPos = merchantModel:GetPivot().Position
 				navigatePath(mPos, {
-					stopDistance = 12.0,
-					timeout = 8.0,
+					stopDistance = 10.0,
+					timeout = 10.0,
 					sprint = true,
 					shouldAbort = shouldAbort,
 				})
+			end
+
+			if shouldAbort() then return end
+
+			-- Merchant Proximity Check: ตรวจสอบและขยับเข้าใกล้ Merchant ให้แน่นอน (<= 14 studs)
+			char = LocalPlayer.Character
+			root = char and char:FindFirstChild("HumanoidRootPart")
+			if merchantModel and root then
+				local mPos = merchantModel:GetPivot().Position
+				local distToM = (root.Position - mPos).Magnitude
+				if distToM > 14.0 and not shouldAbort() then
+					hum = char and char:FindFirstChildOfClass("Humanoid")
+					if hum then
+						hum:MoveTo(mPos)
+						local tClose = os.clock()
+						while (root.Position - mPos).Magnitude > 12.0 and os.clock() - tClose < 2.5 and not shouldAbort() do
+							task.wait(0.1)
+						end
+					end
+				end
 			end
 
 			if shouldAbort() then return end
@@ -8590,8 +8773,36 @@ do
 			if HUB.Config.autoSellJunk ~= false then
 				local shopSellJunk = rem and rem:FindFirstChild("ShopSellJunk")
 				if shopSellJunk and not shouldAbort() then
+					local preSilver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
+					local preJunk = getJunkStats()
+
+					if HUB.UI.SellStatusLabel then
+						HUB.UI.SellStatusLabel.Text = string.format("สถานะ: กำลังขาย Junk %s ชิ้น ที่ Merchant...", formatComma(preJunk.count))
+					end
+
 					shopSellJunk:FireServer()
-					task.wait(0.15)
+
+					-- Side-Effect Verification: รอจนกระทั่ง Silver เพิ่มขึ้น หรือจำนวน Junk ลดลง
+					local tWaitSell = os.clock()
+					while os.clock() - tWaitSell < 2.5 and not shouldAbort() do
+						task.wait(0.15)
+						local curSilver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
+						local curJunk = getJunkStats()
+						if curSilver > preSilver or curJunk.count < preJunk.count then
+							break
+						end
+					end
+
+					local postSilver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
+					local postJunk = getJunkStats()
+					local earnedSilver = postSilver - preSilver
+					local soldCount = preJunk.count - postJunk.count
+					if soldCount > 0 or earnedSilver > 0 then
+						if HUB.UI.SellStatusLabel then
+							HUB.UI.SellStatusLabel.Text = string.format("สถานะ: ขาย Junk สำเร็จ (%s ชิ้น · +%s Silver)", formatComma(soldCount), formatComma(earnedSilver))
+						end
+					end
+					task.wait(0.2)
 				end
 			end
 
@@ -8725,7 +8936,12 @@ do
 				elseif HUB.Config.autoSellJunk == false and HUB.Config.autoSellGear ~= false then
 					typeStr = "อุปกรณ์"
 				end
-				HUB.UI.SellStatusLabel.Text = string.format("สถานะ: พร้อมทำงาน · ขาย%sเมื่อ >= %d%% (ปัจจุบัน: %d%% [%d/%d])", typeStr, thresh, stats.pct, stats.used, stats.max)
+				local junk = getJunkStats()
+				local junkStr = ""
+				if HUB.Config.autoSellJunk ~= false and junk.count > 0 then
+					junkStr = string.format(" · ขยะ %s ชิ้น (~%s)", formatComma(junk.count), formatComma(junk.silver))
+				end
+				HUB.UI.SellStatusLabel.Text = string.format("สถานะ: พร้อมทำงาน%s · ขาย%sเมื่อ >= %d%% (ปัจจุบัน: %d%% [%d/%d])", junkStr, typeStr, thresh, stats.pct, stats.used, stats.max)
 			end
 		else
 			HUB.UI.SellStatusLabel.Text = string.format("สถานะ: ปิดใช้งาน (ความจุกระเป๋า: %d%% [%d/%d])", stats.pct, stats.used, stats.max)
@@ -8733,9 +8949,19 @@ do
 	end
 	HUB.RefreshSellStatusLabel = refreshSellStatusLabel
 
-	HUB.IsAutoSellNeeded = function()
+	HUB.IsAutoSellNeeded = function(isTriggerCycle)
 		if not HUB.Config.autoSell then return false end
 		if HUB.Config.autoSellJunk == false and HUB.Config.autoSellGear == false then return false end
+
+		-- ตรวจสอบก่อนว่ามีไอเทมที่ขายได้จริงหรือไม่
+		local canSell = hasSellableItems()
+		if not canSell then return false end
+
+		-- หากอยู่ใน Trigger Cycle (เพิ่งย่อย Salvage จากการที่กระเป๋าถึงเกณฑ์มา)
+		if isTriggerCycle then
+			return true
+		end
+
 		local stats = getBagStats()
 		local threshold = HUB.Config.autoSellThresholdPct or 85
 		return (stats.pct >= threshold or (threshold == 100 and stats.isFull))
@@ -8754,32 +8980,34 @@ do
 		end
 
 		local stats = getBagStats()
+		local salvageThresh = HUB.Config.autoSalvageThresholdPct or 85
+		local sellThresh = HUB.Config.autoSellThresholdPct or 85
+
+		local hitSalvage = HUB.Config.autoSalvage and (stats.pct >= salvageThresh or (salvageThresh == 100 and stats.isFull))
+		local hitSell = HUB.Config.autoSell and (stats.pct >= sellThresh or (sellThresh == 100 and stats.isFull))
 
 		-- 1. ลำดับที่ 1: ตรวจสอบและรัน Auto Salvage ก่อน (Location-Independent, ทำงานทันทีในเบื้องหลัง ไม่ขัดจังหวะฟาร์ม)
-		if HUB.Config.autoSalvage and not _isSalvagingRoutine and not HUB.IsSalvagingRoutineActive then
-			local salvageThresh = HUB.Config.autoSalvageThresholdPct or 85
-			local sellThresh = HUB.Config.autoSellThresholdPct or 85
-			-- หากเปิด Auto Sell ควบคู่ ให้กระตุ้นการย่อยเมื่อถึงเกณฑ์ใดเกณฑ์หนึ่งที่ต่ำกว่า
-			local triggerSalvage = (stats.pct >= salvageThresh or (salvageThresh == 100 and stats.isFull))
-			if HUB.Config.autoSell and (stats.pct >= sellThresh or (sellThresh == 100 and stats.isFull)) then
-				triggerSalvage = true
-			end
-			if triggerSalvage then
-				task.spawn(function()
-					runAutoSalvageRoutine()
-					-- หลัง Salvage รันเสร็จ ให้ตรวจสอบว่ากระเป๋ายังเกินเกณฑ์ Auto Sell อยู่หรือไม่
-					task.wait(0.5)
-					if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded() and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
-						task.spawn(runAutoSellRoutine)
+		if hitSalvage and not _isSalvagingRoutine and not HUB.IsSalvagingRoutineActive then
+			task.spawn(function()
+				runAutoSalvageRoutine()
+				-- หลัง Salvage รันเสร็จ หากถึงเกณฑ์ Auto Sell ด้วย ให้ส่งไม้ต่อให้ Auto Sell ขายขยะ/ของที่เหลือ
+				task.wait(0.5)
+				if hitSell and HUB.Config.autoSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
+					if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded(true) then
+						task.spawn(function()
+							runAutoSellRoutine(true)
+						end)
 					end
-				end)
-				return
-			end
+				end
+			end)
+			return
 		end
 
 		-- 2. ลำดับที่ 2: หากไม่ได้เปิด Salvage แต่ถึงเกณฑ์ Auto Sell
-		if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded() and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
-			task.spawn(runAutoSellRoutine)
+		if hitSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
+			if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded() then
+				task.spawn(runAutoSellRoutine)
+			end
 		end
 	end
 
@@ -8819,7 +9047,7 @@ do
 end
 
 -- =========================================================================
--- 9.28 Auto Farm Boss Worker (ล่าบอสอัตโนมัติเมื่อเกิด & วาร์ปต่อเนื่อง & กลับจุดฟาร์มเดิม)
+-- 9.29 Auto Farm Boss Worker (ล่าบอสอัตโนมัติเมื่อเกิด & วาร์ปต่อเนื่อง & กลับจุดฟาร์มเดิม)
 -- =========================================================================
 do
 	local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
@@ -9473,7 +9701,7 @@ do
 		end
 	end)
 
-	-- 9.28 Self-Healing Watchdog (ทุก 5 วินาที): ตรวจจับและปลดล็อค Flag / Routine ที่ค้างเกินเวลาแบบอัตโนมัติ
+	-- 9.29 Self-Healing Watchdog (ทุก 5 วินาที): ตรวจจับและปลดล็อค Flag / Routine ที่ค้างเกินเวลาแบบอัตโนมัติ
 	task.spawn(function()
 		local _stuckBossCount = 0
 		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
