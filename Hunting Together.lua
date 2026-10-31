@@ -6439,7 +6439,6 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 	if not nearPillar or not targetPillarId then return false end
 	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
 	local pillarWarp = remotes and remotes:FindFirstChild("PillarWarp")
-	local pillarOpen = remotes and remotes:FindFirstChild("PillarOpen")
 	if not pillarWarp then return false end
 
 	local char = LocalPlayer.Character
@@ -6462,61 +6461,92 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 		end
 	end
 
+	-- 0.1 PRE-FLIGHT VALIDATION: ตรวจสอบความถูกต้องของเสาปลายทางก่อนเริ่มเดิน
+	-- 0.1.1 ตรวจสอบว่าเสาปลายทางถูกปลดล็อคแล้วจริงหรือไม่
+	if targetPillarId ~= "Town" then
+		local unlockedStr = LocalPlayer:GetAttribute("WarpPillars") or ""
+		local isUnlocked = false
+		for pId in string.gmatch(unlockedStr, "([^,]+)") do
+			if pId == targetPillarId then
+				isUnlocked = true
+				break
+			end
+		end
+		if not isUnlocked then
+			warn(string.format("[Hunting Together Hub] Pillar Warp: เสาปลายทาง %s ยังไม่ถูกปลดล็อค — ยกเลิกการวาร์ป", tostring(targetPillarId)))
+			return false
+		end
+	end
+
+	-- 0.1.2 ตรวจสอบ Silver ว่าพอจ่ายค่าวาร์ปหรือไม่
+	local cost = (targetPillarId ~= "Town" and tonumber((string.match(targetPillarId, "(%d+)$"))) or 0) * 1000
+	local silver = LocalPlayer:GetAttribute("Silver") or 0
+	if cost > 0 and silver < cost then
+		warn(string.format("[Hunting Together Hub] Pillar Warp: Silver ไม่พอวาร์ปไป %s (ต้องการ %d, มี %d) — ยกเลิก", tostring(targetPillarId), cost, silver))
+		return false
+	end
+
 	-- 0.5 ปิด Auto Play และล้างเป้าก่อนเดินเข้าหาเสา 100% เพื่อไม่ให้ CombatClient ดึงตัวละครกลับไปตีมอนสเตอร์
 	if HUB.DisableGameAutoPlay then
 		HUB.DisableGameAutoPlay()
 	end
 
-	-- 1. เข้าประชิดหน้าเสาในจุดพื้นราบที่เดินถึงได้จริง (ห่างจากแกนเสา ~4.2 studs ด้านที่ตัวละครวิ่งเข้ามา อยู่ในระยะ ProximityPrompt 12 studs แน่นอน)
-	local piv = nearPillar:GetPivot().Position
-	local flatToChar = Vector3.new(root.Position.X - piv.X, 0, root.Position.Z - piv.Z)
-	if flatToChar.Magnitude > 7.5 then
-		local approachDir = (flatToChar.Magnitude > 0.5) and flatToChar.Unit or Vector3.new(0, 0, -1)
-		local standY = (currentWarpId == "Town") and 4.25 or (piv.Y + 2.0)
-		local standPos = Vector3.new(piv.X + approachDir.X * 4.2, standY, piv.Z + approachDir.Z * 4.2)
-		navigatePath(standPos, {
-			stopDistance = 3.0,
-			timeout = 18.0,
-			sprint = true,
-			shouldAbort = shouldAbortFn,
-			customReached = function(curPos)
-				return Vector3.new(curPos.X - piv.X, 0, curPos.Z - piv.Z).Magnitude <= 7.5
-			end,
-		})
-	end
-
-	-- 2. หยุดความเร็วกายภาพตัวละครให้สนิท 100% (AssemblyLinearVelocity = 0) ป้องกัน Desync / Rubber-band
-	char = LocalPlayer.Character
-	root = char and char:FindFirstChild("HumanoidRootPart")
-	hum = char and char:FindFirstChildOfClass("Humanoid")
-	if not root or not hum or hum.Health <= 0 then return false end
-
-	setSprinting(false)
-	pcall(function()
-		hum:Move(Vector3.zero, false)
-		hum:MoveTo(root.Position)
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.AssemblyAngularVelocity = Vector3.zero
-	end)
-	task.wait(0.2)
-
 	local fpp = EXEC.fireproximityprompt or rawget(getgenv(), "fireproximityprompt")
 	local warpedOk = false
 	local startRootPos = root.Position
+	local MAX_WARP_ATTEMPTS = 3
 
-	for attempt = 1, 2 do
+	for attempt = 1, MAX_WARP_ATTEMPTS do
 		if shouldAbortFn and shouldAbortFn() then break end
 
-		-- เช็ค Silver และคำนวณราคาล่วงหน้าเพื่อป้องกัน Silver Drain
+		char = LocalPlayer.Character
+		root = char and char:FindFirstChild("HumanoidRootPart")
+		hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not root or not hum or hum.Health <= 0 then return false end
+
+		-- 1. เข้าประชิดหน้าเสา (ห่างจากแกนเสา ~4.2 studs ในระยะ ProximityPrompt 12 studs เสมอ)
+		-- หากเป็นการ Retry รอบที่ 2-3 หรือตัวละครถูกมอนสเตอร์ชนกระเด็น ให้เดินกลับมาแนบเสาใหม่เสมอ
+		local piv = nearPillar:GetPivot().Position
+		local flatDist = Vector3.new(root.Position.X - piv.X, 0, root.Position.Z - piv.Z).Magnitude
+		if flatDist > 6.8 or attempt > 1 then
+			if HUB.DisableGameAutoPlay then HUB.DisableGameAutoPlay() end
+			local approachDir = (flatDist > 0.5) and Vector3.new(root.Position.X - piv.X, 0, root.Position.Z - piv.Z).Unit or Vector3.new(0, 0, -1)
+			local standY = (currentWarpId == "Town") and 4.25 or (piv.Y + 2.0)
+			local standPos = Vector3.new(piv.X + approachDir.X * 4.2, standY, piv.Z + approachDir.Z * 4.2)
+			navigatePath(standPos, {
+				stopDistance = 3.0,
+				timeout = (attempt == 1) and 18.0 or 6.5,
+				sprint = true,
+				shouldAbort = shouldAbortFn,
+				customReached = function(curPos)
+					return Vector3.new(curPos.X - piv.X, 0, curPos.Z - piv.Z).Magnitude <= 6.8
+				end,
+			})
+			char = LocalPlayer.Character
+			root = char and char:FindFirstChild("HumanoidRootPart")
+			hum = char and char:FindFirstChildOfClass("Humanoid")
+			if not root or not hum or hum.Health <= 0 then return false end
+		end
+
+		-- 2. หยุดความเร็วกายภาพตัวละครให้สนิท 100% (AssemblyLinearVelocity = 0) ป้องกัน Desync / Rubber-band
+		setSprinting(false)
+		pcall(function()
+			hum:Move(Vector3.zero, false)
+			hum:MoveTo(root.Position)
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end)
+		task.wait(0.2)
+
+		-- เช็ค Silver ก่อน เพื่อตรวจสอบผลกระทบจริง
 		local silverBefore = LocalPlayer:GetAttribute("Silver") or 0
-		local cost = (targetPillarId ~= "Town" and tonumber((string.match(targetPillarId, "(%d+)$"))) or 0) * 1000
 
 		-- กระตุ้น ProximityPrompt
 		local prompt = nearPillar:FindFirstChildWhichIsA("ProximityPrompt", true)
 		if prompt and type(fpp) == "function" then
 			pcall(fpp, prompt, 0)
 		end
-		task.wait(0.25)
+		task.wait(0.2)
 
 		-- ส่งคำสั่งวาร์ปไปยังเซิร์ฟเวอร์
 		pillarWarp:FireServer(targetPillarId)
@@ -6528,9 +6558,9 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 			if wpGui then wpGui.Enabled = false end
 		end)
 
-		-- รอการเทเลพอร์ตทางกายภาพ (สูงสุด 5.0 วินาที)
+		-- รอการเทเลพอร์ตทางกายภาพ (สูงสุด 4.5 วินาที)
 		local wT0 = os.clock()
-		while os.clock() - wT0 < 5.0 and not (shouldAbortFn and shouldAbortFn()) do
+		while os.clock() - wT0 < 4.5 and not (shouldAbortFn and shouldAbortFn()) do
 			task.wait(0.1)
 			char = LocalPlayer.Character
 			root = char and char:FindFirstChild("HumanoidRootPart")
@@ -6562,7 +6592,7 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 		-- หากยังไม่วาร์ป แต่เงิน Silver ถูกหักไปแล้ว แสดงว่า Server กำลังประมวลผล / กำลัง Replicate
 		local silverNow = LocalPlayer:GetAttribute("Silver") or 0
 		if cost > 0 and (silverBefore - silverNow >= cost) then
-			-- เงินลดแล้ว! ห้ามยิงคำสั่งซ้ำเด็ดขาด รออีก 2.5 วินาที
+			-- เงินลดแล้ว! ห้ามยิงคำสั่งซ้ำเด็ดขาด รอ replicate อีก 2.5 วินาที
 			local extraWait = os.clock()
 			while os.clock() - extraWait < 2.5 and not (shouldAbortFn and shouldAbortFn()) do
 				task.wait(0.1)
@@ -6581,10 +6611,14 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 					end
 				end
 			end
-			break -- ป้องกันการเสียเงินซ้ำ
+			if warpedOk then break end
+			break -- ป้องกันการเสียเงินซ้ำเด็ดขาด
 		end
 
-		task.wait(0.3)
+		if attempt < MAX_WARP_ATTEMPTS then
+			warn(string.format("[Hunting Together Hub] Pillar Warp: วาร์ปไปเสา %s ล้มเหลว (รอบที่ %d/%d) — กำลัง Re-approach และลองใหม่...", tostring(targetPillarId), attempt, MAX_WARP_ATTEMPTS))
+			task.wait(0.4)
+		end
 	end
 
 	if warpedOk then
@@ -6838,7 +6872,22 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn)
 		if updateStatusFn then
 			updateStatusFn(string.format("สถานะ: วาร์ปไปยังเสา %s...", tostring(returnPillarId)))
 		end
-		executePillarWarp(currentNearPillar, returnPillarId, shouldAbortFn)
+		local okWarp = executePillarWarp(currentNearPillar, returnPillarId, shouldAbortFn)
+		-- Caller-Level Smart Retry: หากวาร์ปกลับจุดฟาร์มไม่สำเร็จ ให้ค้นหาเสาใกล้ตัวใหม่และลองอีกครั้ง
+		if not okWarp and not (shouldAbortFn and shouldAbortFn()) then
+			task.wait(0.4)
+			char = LocalPlayer.Character
+			root = char and char:FindFirstChild("HumanoidRootPart")
+			if root then
+				local retryPillar = (root.Position.Z > -200 and townPillar) or getNearbyBossPillar(root.Position)
+				if retryPillar then
+					if updateStatusFn then
+						updateStatusFn(string.format("สถานะ: วาร์ปไม่สำเร็จ — กำลังลองใหม่ไปยังเสา %s...", tostring(returnPillarId)))
+					end
+					executePillarWarp(retryPillar, returnPillarId, shouldAbortFn)
+				end
+			end
+		end
 	end
 
 	char = LocalPlayer.Character
@@ -8242,6 +8291,22 @@ do
 
 					-- 3. สั่งวาร์ปไปยังเสาของเป้าหมาย (targetBoss.pillarId) พร้อม Synchronization & Silver Guard
 					local warpedToBoss = executePillarWarp(currentNearPillar, targetBoss.pillarId, shouldAbort)
+
+					-- Caller-Level Smart Retry: หากวาร์ปไปหาบอสไม่สำเร็จ ให้ Re-check เสาและลองใหม่อีก 1 รอบ
+					if not warpedToBoss and not shouldAbort() then
+						task.wait(0.4)
+						char = LocalPlayer.Character
+						root = char and char:FindFirstChild("HumanoidRootPart")
+						if root then
+							local rePillar = (root.Position.Z > -200 and townPillar) or getNearbyBossPillar(root.Position)
+							if rePillar then
+								if HUB.UI.BossStatusLabel then
+									HUB.UI.BossStatusLabel.Text = string.format("สถานะ: วาร์ปไม่สำเร็จ — กำลังลองใหม่รอบที่ 2 ไปยัง %s...", targetBoss.name)
+								end
+								warpedToBoss = executePillarWarp(rePillar, targetBoss.pillarId, shouldAbort)
+							end
+						end
+					end
 
 					if not warpedToBoss then
 						if HUB.UI.BossStatusLabel then
