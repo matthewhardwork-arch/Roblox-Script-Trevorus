@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.34)
+-- Hunting Together Hub (v9.35)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.34"
+local VERSION = "9.35"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -10088,6 +10088,7 @@ do
 	local currentEscapePos = nil
 	local currentEscapeWaypoints = nil
 	local currentEscapeWpIndex = 1
+	local currentSafeZone = nil
 
 	-- ดึงค่าระยะเผื่อพ้นขอบวงแดง (Buffer) ที่ผู้ใช้ตั้งค่าไว้ในแท็บ Settings แบบ Realtime
 	local function getDodgeBuffer()
@@ -10620,42 +10621,64 @@ do
 			if not isBound then
 				isBound = true
 				pcall(RunService.BindToRenderStep, RunService, BIND_NAME, Enum.RenderPriority.Character.Value + 10, function()
-					if HUB.Dodging and currentEscapePos then
+					if HUB.Dodging then
 						local ch = LocalPlayer.Character
 						local r = ch and ch:FindFirstChild("HumanoidRootPart")
 						local h = ch and ch:FindFirstChildOfClass("Humanoid")
 						if r and h and h.Health > 0 then
-							if currentEscapeWaypoints and #currentEscapeWaypoints > 0 then
-								local curWp = currentEscapeWaypoints[currentEscapeWpIndex]
-								while curWp do
-									local distToWp = Vector3.new(curWp.Position.X - r.Position.X, 0, curWp.Position.Z - r.Position.Z).Magnitude
-									if distToWp < 2.5 and currentEscapeWpIndex < #currentEscapeWaypoints then
-										currentEscapeWpIndex = currentEscapeWpIndex + 1
-										curWp = currentEscapeWaypoints[currentEscapeWpIndex]
-										if curWp and curWp.Action == Enum.PathWaypointAction.Jump then
-											h.Jump = true
-										end
+							-- กรณีที่ 1: มี Safe Zone (Green Show) บังคับอยู่ในพื้นที่สีเขียวเท่านั้น (Strict Containment Guard)
+							if currentSafeZone and currentSafeZone.Center then
+								local toCenter = Vector3.new(currentSafeZone.Center.X - r.Position.X, 0, currentSafeZone.Center.Z - r.Position.Z)
+								local cDist = toCenter.Magnitude
+								local maxInnerRad = (currentSafeZone.Radius or 9.0) * 0.70
+								if cDist > maxInnerRad then
+									-- กำลังอยู่หรือเคลื่อนที่ออกนอกโซนเขียว: สั่งดึงกลับเข้าหาศูนย์กลางโซนเขียวทันที
+									local moveDir = (toCenter.Magnitude > 0.05) and toCenter.Unit or Vector3.zero
+									local whisker = getWhiskerAvoidance(r.Position, moveDir)
+									if whisker.Magnitude > 0.1 then
+										h:Move((moveDir + whisker * 0.8).Unit, false)
 									else
-										break
+										h:Move(moveDir, false)
+									end
+								else
+									-- ปักหลักอยู่ภายในพื้นที่สีเขียวอย่างปลอดภัยแล้ว: ล็อคการเคลื่อนที่ (Move Vector3.zero) ห้ามเกมพาเดินออก
+									h:Move(Vector3.zero, false)
+								end
+
+							-- กรณีที่ 2: สปริ้นต์หลบวงแดงหรือเคลื่อนที่ตาม Waypoints ปกติ
+							elseif currentEscapePos then
+								if currentEscapeWaypoints and #currentEscapeWaypoints > 0 then
+									local curWp = currentEscapeWaypoints[currentEscapeWpIndex]
+									while curWp do
+										local distToWp = Vector3.new(curWp.Position.X - r.Position.X, 0, curWp.Position.Z - r.Position.Z).Magnitude
+										if distToWp < 2.5 and currentEscapeWpIndex < #currentEscapeWaypoints then
+											currentEscapeWpIndex = currentEscapeWpIndex + 1
+											curWp = currentEscapeWaypoints[currentEscapeWpIndex]
+											if curWp and curWp.Action == Enum.PathWaypointAction.Jump then
+												h.Jump = true
+											end
+										else
+											break
+										end
+									end
+									if currentEscapeWaypoints[currentEscapeWpIndex] then
+										currentEscapePos = currentEscapeWaypoints[currentEscapeWpIndex].Position
 									end
 								end
-								if currentEscapeWaypoints[currentEscapeWpIndex] then
-									currentEscapePos = currentEscapeWaypoints[currentEscapeWpIndex].Position
-								end
-							end
 
-							local toDest = Vector3.new(currentEscapePos.X - r.Position.X, 0, currentEscapePos.Z - r.Position.Z)
-							if toDest.Magnitude > 1.0 then
-								local moveDir = toDest.Unit
-								local whisker = getWhiskerAvoidance(r.Position, moveDir)
-								if whisker.Magnitude > 0.1 then
-									local steer = (moveDir + whisker * 0.8).Unit
-									h:Move(steer, false)
+								local toDest = Vector3.new(currentEscapePos.X - r.Position.X, 0, currentEscapePos.Z - r.Position.Z)
+								if toDest.Magnitude > 1.0 then
+									local moveDir = toDest.Unit
+									local whisker = getWhiskerAvoidance(r.Position, moveDir)
+									if whisker.Magnitude > 0.1 then
+										local steer = (moveDir + whisker * 0.8).Unit
+										h:Move(steer, false)
+									else
+										h:Move(moveDir, false)
+									end
 								else
-									h:Move(moveDir, false)
+									h:Move(Vector3.zero, false)
 								end
-							else
-								h:Move(Vector3.zero, false)
 							end
 						end
 					end
@@ -10668,6 +10691,7 @@ do
 				isDodging = false
 				HUB.Dodging = false
 				didDodgeCount = false
+				currentSafeZone = nil
 				currentEscapePos = nil
 				currentEscapeWaypoints = nil
 				currentEscapeWpIndex = 1
@@ -10739,7 +10763,7 @@ do
 					else
 						for _, z in ipairs(info.zones) do
 							if z.Safe and z.Center then
-								if (z.Center - root.Position).Magnitude <= 85 then
+								if (z.Center - root.Position).Magnitude <= 130 then
 									table.insert(allSafeZones, {
 										Center = z.Center,
 										Radius = z.Radius or 9
@@ -10799,12 +10823,13 @@ do
 					for _, part in ipairs(bossFxFolder:GetChildren()) do
 						if part:IsA("BasePart") then
 							local dist = (part.Position - root.Position).Magnitude
-							if dist <= 85 and part.Transparency < 0.85 then
+							if dist <= 130 and part.Transparency < 0.85 then
 								local c = part.Color
 								local maxSize = math.max(part.Size.X, part.Size.Z)
-								if maxSize <= 90 then
+								if maxSize <= 120 then
 									-- Green Show (Safe Zone)
-									if c.G > 0.6 and c.R < 0.4 then
+									-- ตรวจจับสีเขียวเด่นชัด (c.G > 0.55 และ c.G > c.R * 1.3) หรือ (c.G > 0.65 และ c.R < 0.45)
+									if ((c.G > 0.55 and c.G > c.R * 1.3) or (c.G > 0.65 and c.R < 0.45)) and not part:IsA("WedgePart") then
 										local alreadyKnown = false
 										for _, sz in ipairs(allSafeZones) do
 											if (sz.Center - part.Position).Magnitude < 4.0 then
@@ -10813,9 +10838,11 @@ do
 											end
 										end
 										if not alreadyKnown then
+											local pRad = math.max(8.0, math.max(part.Size.X, part.Size.Y, part.Size.Z) / 2)
 											table.insert(allSafeZones, {
 												Center = part.Position,
-												Radius = math.max(part.Size.Y, part.Size.Z) / 2
+												Radius = pRad,
+												Part = part
 											})
 										end
 									-- Red Show (Danger Zone)
@@ -10931,14 +10958,14 @@ do
 					dodgeStuckAccumTime = 0
 				end
 
-				-- กรณี 1: มี Safe Zone (Green Show) อยู่ใกล้ตัว (<= 85 studs)
+				-- กรณี 1: มี Safe Zone (Green Show) บังคับต้องเข้าไปอยู่ในพื้นที่สีเขียวเท่านั้น (Mandatory Containment)
 				if (HUB.Config.dodgeGreenZones ~= false) and #allSafeZones > 0 then
 					local bestSafe = nil
 					local bestDist = math.huge
 					for _, sz in ipairs(allSafeZones) do
 						if sz.Center then
 							local d = (root.Position - sz.Center).Magnitude
-							if d < bestDist and d <= 85 then
+							if d < bestDist and d <= 130 then
 								bestDist = d
 								bestSafe = sz
 							end
@@ -10947,45 +10974,78 @@ do
 
 					if bestSafe then
 						local distToSafe = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(bestSafe.Center.X, 0, bestSafe.Center.Z)).Magnitude
-						local safeRad = bestSafe.Radius or 9
+						local safeRad = math.max(7.0, bestSafe.Radius or 9.0)
+						local innerSafeRad = safeRad * 0.70
 
-						if distToSafe > (safeRad * 0.7) then
-							isDodging = true
-							HUB.Dodging = true
+						isDodging = true
+						HUB.Dodging = true
+						currentSafeZone = bestSafe
+
+						if distToSafe > innerSafeRad then
+							-- ตัวละครยังอยู่นอกโซนเขียว: มุ่งหน้าเข้าสู่ศูนย์กลางพื้นที่สีเขียวทันที
 							currentEscapePos = bestSafe.Center
 							if not didDodgeCount then
 								HUB.Stats.dodgesPerformed = HUB.Stats.dodgesPerformed + 1
 								didDodgeCount = true
 							end
 
+							-- ตรวจสอบว่าเส้นทางตรงไปยังโซนเขียวติดสิ่งกีดขวางหรือไม่
+							local pathClear = isPathClear(root.Position, bestSafe.Center, char)
+							local targetMovePos = bestSafe.Center
+							if not pathClear then
+								-- มีสิ่งกีดขวาง: ใช้ PathfindingService เพื่อคำนวณ Waypoints อ้อมสิ่งกีดขวางเข้าโซนเขียว
+								if not currentEscapeWaypoints or #currentEscapeWaypoints == 0 then
+									local p = PathfindingService:CreatePath({
+										AgentRadius = 2.4,
+										AgentHeight = 5.0,
+										AgentCanJump = true,
+									})
+									local ok = pcall(function() p:ComputeAsync(root.Position, bestSafe.Center) end)
+									local pts = (ok and p.Status == Enum.PathStatus.Success) and p:GetWaypoints() or nil
+									pcall(p.Destroy, p)
+									if pts and #pts > 1 then
+										currentEscapeWaypoints = {}
+										for i = 2, #pts do
+											table.insert(currentEscapeWaypoints, { Position = pts[i].Position, Action = pts[i].Action })
+										end
+										currentEscapeWpIndex = 1
+									end
+								end
+								if currentEscapeWaypoints and currentEscapeWaypoints[currentEscapeWpIndex] then
+									targetMovePos = currentEscapeWaypoints[currentEscapeWpIndex].Position
+								end
+							else
+								currentEscapeWaypoints = nil
+								currentEscapeWpIndex = 1
+							end
+
 							setSprinting(true)
-							hum:MoveTo(bestSafe.Center)
-							local diff = Vector3.new(bestSafe.Center.X - root.Position.X, 0, bestSafe.Center.Z - root.Position.Z)
-							if diff.Magnitude > 1.2 then
+							hum:MoveTo(targetMovePos)
+							local diff = Vector3.new(targetMovePos.X - root.Position.X, 0, targetMovePos.Z - root.Position.Z)
+							if diff.Magnitude > 1.0 then
 								hum:Move(diff.Unit, false)
 							end
-							LocalPlayer:SetAttribute("BotReviveWalk", bestSafe.Center)
+							LocalPlayer:SetAttribute("BotReviveWalk", targetMovePos)
 							ensureOverrideBound()
 
 							if HUB.UI.DodgeStatusLabel then
-								HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: กำลังสปริ้นต์เข้า green show! (ระยะ %.1fm)", distToSafe)
+								HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: ต้องเข้าโซนเขียวเท่านั้น! กำลังสปริ้นต์เข้า green show (ระยะ %.1fm)", distToSafe)
 							end
 						else
-							-- เข้ามาใน Safe Zone แล้ว: หากสกิล Room ยังระเบิดไม่เสร็จ ให้ปักหลักอยู่ข้างใน ไม่เดินออกไปหาบอส
-							if isDodging then
-								if #allDangerZones > 0 then
-									hum:Move(Vector3.zero, false)
-									LocalPlayer:SetAttribute("BotReviveWalk", bestSafe.Center)
-									ensureOverrideBound()
-									if HUB.UI.DodgeStatusLabel then
-										HUB.UI.DodgeStatusLabel.Text = "สถานะ: อยู่ใน green show ปลอดภัยแล้ว (รอสกิลระเบิด...)"
-									end
-								else
-									cleanupDodge()
-								end
+							-- เข้ามาใน Safe Zone แล้ว: ล็อคตำแหน่งให้อยู่ในโซนเขียว 100% ห้ามเดินออกไปหาบอสจนกว่าโซนเขียวจะสลายไป
+							currentEscapePos = bestSafe.Center
+							currentEscapeWaypoints = nil
+							currentEscapeWpIndex = 1
+							hum:Move(Vector3.zero, false)
+							LocalPlayer:SetAttribute("BotReviveWalk", bestSafe.Center)
+							ensureOverrideBound()
+							if HUB.UI.DodgeStatusLabel then
+								HUB.UI.DodgeStatusLabel.Text = "สถานะ: อยู่ในพื้นที่สีเขียวอย่างปลอดภัย (ล็อคตำแหน่งห้ามออกจนกว่าสกิลจะจบ...)"
 							end
 						end
 					else
+						-- ไม่พบ Safe Zone ในระยะ: ล้าง currentSafeZone
+						currentSafeZone = nil
 						if isDodging and not inDanger then
 							cleanupDodge()
 						end
@@ -10993,6 +11053,7 @@ do
 
 				-- กรณี 2: ตัวเราอยู่ในโซนแดง (Red Show) จริง ๆ -> วิ่งออกจากโซนแดงในระยะทางที่สั้นที่สุดเสมอตาม Settings!
 				elseif (HUB.Config.dodgeRedZones ~= false) and inDanger and badZone then
+					currentSafeZone = nil
 					local escapePos, escapeWps = findEscapePosition(root.Position, allDangerZones, allSafeZones, char)
 					if escapePos then
 						isDodging = true
@@ -11028,6 +11089,7 @@ do
 
 				-- กรณี 3: ตัวเราอยู่นอกโซนแดงแล้ว แต่สกิลบอสยังคงแสดงผลอยู่ในฉาก (Anti-Suicide & Safe Flank Attack)
 				elseif isDodging and (#allDangerZones > 0) then
+					currentSafeZone = nil
 					local boss = getTargetBossModel()
 					if boss then
 						local safeAttackPos = findSafeBossAttackPosition(root.Position, boss, allDangerZones, char)
