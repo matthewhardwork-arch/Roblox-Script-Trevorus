@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.32)
+-- Hunting Together Hub (v9.33)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.32"
+local VERSION = "9.33"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -3934,8 +3934,9 @@ do
 	)
 	HUB.UI.DodgeStatusLabel = dodgeStatus
 
+	-- ---------- 7.5.2 Card ในแท็บ Combat: Auto Open LootBox (วิ่งไปเปิดและกลับที่เดิม) ----------
 	local _, boxStatus = createCard(
-		scrollItem,
+		scrollCombat,
 		"Auto Open LootBox (วิ่งไปเปิดและกลับที่เดิม)",
 		"วิ่งไปเปิดกล่องสมบัติในระยะฟาร์มของเกม แล้ววิ่งกลับมายังจุดฟาร์มเดิมอัตโนมัติ",
 		HUB.Config.autoOpenBox,
@@ -4019,6 +4020,7 @@ do
 	)
 	HUB.UI.BoxStatusLabel = boxStatus
 
+	-- ---------- 7.5.3 Card ในแท็บ Item: Auto Claim Rewards (ตรวจจับและเคลมอัตโนมัติ) ----------
 	local _, claimStatus = createCard(
 		scrollItem,
 		"Auto Claim Rewards (ตรวจจับและเคลมอัตโนมัติ)",
