@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.29)
+-- Hunting Together Hub (v9.32)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.29"
+local VERSION = "9.32"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -78,7 +78,7 @@ if type(prev) == "table" then
 		end
 	end
 	if type(prev.Unload) == "function" then
-		pcall(prev.Unload)
+		pcall(prev.Unload, prev, false, true)
 	end
 end
 
@@ -108,24 +108,102 @@ end
 
 cleanOldGuis(GUI_NAME)
 
--- กวาดล้าง Ghost Event Connections เฉพาะเมื่อเป็นการรันทับซ้ำในเซสชันเดิม (ไม่สแกน RunService C++ Connections ตอนเข้าเกมใหม่)
+-- กวาดล้าง Ghost Event Connections และ Ghost HUB Instances ที่ตกค้างจากเวอร์ชันเก่าในเซสชันเดิม
 local function purgeAllGhostConnections()
 	if type(EXEC.getconnections) ~= "function" then return end
+	local getInfoFn = EXEC.getinfo or (debug and debug.getinfo)
+	local getUpvalsFn = EXEC.getupvalues or (debug and debug.getupvalues)
+
+	local function disconnectExecSignal(sig)
+		if not sig then return end
+		local okConn, conns = pcall(EXEC.getconnections, sig)
+		if not okConn or type(conns) ~= "table" then return end
+		for _, c in ipairs(conns) do
+			local fn = c.Function
+			if fn then
+				local isExec = false
+				if type(getInfoFn) == "function" then
+					local okInfo, info = pcall(getInfoFn, fn)
+					if okInfo and info and info.source and (info.source:find("loadstring") or info.source == "=") then
+						isExec = true
+					end
+				end
+				-- ค้นหาตาราง Ghost HUB เก่าใน Upvalues เพื่อสั่งปิด Alive = false และ Disconnect ทุก Connection ที่สะสมค้างอยู่
+				if type(getUpvalsFn) == "function" then
+					local okUv, uvs = pcall(getUpvalsFn, fn)
+					if okUv and type(uvs) == "table" then
+						for _, uv in pairs(uvs) do
+							if type(uv) == "table" and type(uv.Connections) == "table" and uv.Alive ~= nil then
+								isExec = true
+								uv.Alive = false
+								for _, oldConn in ipairs(uv.Connections) do
+									pcall(function() oldConn:Disconnect() end)
+								end
+								table.clear(uv.Connections)
+							end
+						end
+					end
+				end
+				if isExec then
+					pcall(function() c:Disconnect() end)
+				end
+			end
+		end
+	end
+
 	local attrSignals = {
-		"GearJson", "LocksJson", "EquipJson", "WeaponId", "BagSlotsUsed", "Silver", "AutoOn", "LumiSprintLock", "BotReviveWalk"
+		"GearJson", "StorageGearJson", "LocksJson", "EquipJson", "WeaponId",
+		"BagSlotsUsed", "Silver", "AutoOn", "LumiSprintLock", "BotReviveWalk", "LumiFollowUserId"
 	}
 	for _, sigName in ipairs(attrSignals) do
 		local ok, sig = pcall(LocalPlayer.GetAttributeChangedSignal, LocalPlayer, sigName)
 		if ok and sig then
-			local okConn, conns = pcall(EXEC.getconnections, sig)
-			if okConn and type(conns) == "table" then
-				for _, c in ipairs(conns) do
-					local fn = c.Function
-					local info = fn and type(debug.getinfo) == "function" and debug.getinfo(fn)
-					if info and info.source and (info.source:find("loadstring") or info.source == "=") then
-						pcall(function() c:Disconnect() end)
+			disconnectExecSignal(sig)
+		end
+	end
+
+	local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+	if pgui then
+		local lumi = pgui:FindFirstChild("LumiInventory")
+		if lumi then
+			local win = lumi:FindFirstChild("InventoryWindow", true)
+			if win then
+				pcall(function() disconnectExecSignal(win:GetPropertyChangedSignal("Visible")) end)
+				local sf = win:FindFirstChild("ScrollingFrame", true)
+				if sf then
+					disconnectExecSignal(sf.ChildAdded)
+					for _, cell in ipairs(sf:GetChildren()) do
+						if cell:IsA("TextButton") then
+							disconnectExecSignal(cell.MouseButton1Click)
+						end
 					end
 				end
+				for _, tabName in ipairs({ "all", "item", "armor", "weapon", "garment", "shoes", "ring", "card" }) do
+					local tabBtn = win:FindFirstChild(tabName, true)
+					if tabBtn and tabBtn:IsA("TextButton") then
+						disconnectExecSignal(tabBtn.MouseButton1Click)
+					end
+				end
+				local searchBox = win:FindFirstChild("SearchBox", true)
+				if searchBox and searchBox:IsA("TextBox") then
+					pcall(function() disconnectExecSignal(searchBox:GetPropertyChangedSignal("Text")) end)
+				end
+			end
+			local popup = lumi:FindFirstChild("ItemPopup")
+			if popup then
+				pcall(function() disconnectExecSignal(popup:GetPropertyChangedSignal("Visible")) end)
+				local head = popup:FindFirstChild("Head")
+				local title = head and head:FindFirstChild("Title")
+				if title then
+					pcall(function() disconnectExecSignal(title:GetPropertyChangedSignal("Text")) end)
+				end
+			end
+		end
+
+		for _, screenName in ipairs({ "LumiBagScreen", "HuntShop", "HuntReroll", "LumiRefine", "HuntStorage" }) do
+			local scr = pgui:FindFirstChild(screenName)
+			if scr then
+				pcall(function() disconnectExecSignal(scr:GetPropertyChangedSignal("Enabled")) end)
 			end
 		end
 	end
@@ -134,47 +212,59 @@ if prev ~= nil then
 	purgeAllGhostConnections()
 end
 
--- ล้างป้าย Tier และ Hook Attributes ทั้งหมดในระบบทันทีตั้งแต่เริ่มโหลด (ป้องกันป้ายตัวเก่าค้างและบัคทับสลับไปมา)
-local function purgeAllTierBadgesAndHooks()
+-- ล้างป้าย Tier และ/หรือ Hook Attributes (รองรับโหมด onlyHooks ตอน Hot-Reload เพื่อไม่ให้ป้ายกระพริบหาย และโหมด onlyBadges ตอนกดปิดฟีเจอร์)
+local function purgeAllTierBadgesAndHooks(onlyHooks, onlyBadges)
 	local pgui = LocalPlayer:FindFirstChild("PlayerGui")
 	if not pgui then return end
+	local doBadges = not onlyHooks
+	local doHooks = not onlyBadges
 
 	-- 1. LumiInventory: ล้างป้ายทั้งหมดและรีเซ็ต Hook Attributes ให้สคริปต์ใหม่ผูก Event ได้สดใหม่ 100%
 	local lumi = pgui:FindFirstChild("LumiInventory")
 	if lumi then
 		for _, d in ipairs(lumi:GetDescendants()) do
-			if d.Name == "TierBadge" or d.Name == "PopupTierBadge" or d.Name == "StarBadge" or d.Name == "PopupStarBadge" or d.Name == "RerollDetailStarBadge" or d.Name == "StarShadow" then
-				pcall(d.Destroy, d)
-			elseif d.Name == "ItemCount" and d:IsA("TextLabel") then
-				d.Visible = true
-				d.Position = UDim2.new(1, -67, 0, 1)
+			if doBadges then
+				if d.Name == "TierBadge" or d.Name == "PopupTierBadge" or d.Name == "StarBadge" or d.Name == "PopupStarBadge" or d.Name == "RerollDetailStarBadge" or d.Name == "StarShadow" then
+					pcall(d.Destroy, d)
+				elseif d.Name == "ItemCount" and d:IsA("TextLabel") then
+					d.Visible = true
+					d.Position = UDim2.new(1, -67, 0, 1)
+				end
 			end
-			if d:GetAttribute("TierClickHooked") then d:SetAttribute("TierClickHooked", nil) end
-			if d:GetAttribute("TierChildHooked") then d:SetAttribute("TierChildHooked", nil) end
-			if d:GetAttribute("TierReactiveHooked") then d:SetAttribute("TierReactiveHooked", nil) end
-			if d:GetAttribute("TierPopupHooked") then d:SetAttribute("TierPopupHooked", nil) end
-			if d:GetAttribute("TierTitleHooked") then d:SetAttribute("TierTitleHooked", nil) end
+			if doHooks then
+				if d:GetAttribute("TierClickHooked") then d:SetAttribute("TierClickHooked", nil) end
+				if d:GetAttribute("TierChildHooked") then d:SetAttribute("TierChildHooked", nil) end
+				if d:GetAttribute("TierReactiveHooked") then d:SetAttribute("TierReactiveHooked", nil) end
+				if d:GetAttribute("TierPopupHooked") then d:SetAttribute("TierPopupHooked", nil) end
+				if d:GetAttribute("TierTitleHooked") then d:SetAttribute("TierTitleHooked", nil) end
+			end
 		end
 	end
 
 	-- 2. LumiBagScreen: ล้าง Overlay และป้ายสวมใส่ พร้อมรีเซ็ต Hook Attributes
 	local bagScreen = pgui:FindFirstChild("LumiBagScreen")
 	if bagScreen then
-		local overlay = bagScreen:FindFirstChild("LumiEquipTierOverlay")
-		if overlay then pcall(overlay.Destroy, overlay) end
+		if doBadges then
+			local overlay = bagScreen:FindFirstChild("LumiEquipTierOverlay")
+			if overlay then pcall(overlay.Destroy, overlay) end
+		end
 		for _, d in ipairs(bagScreen:GetDescendants()) do
-			if d.Name == "TierBadge" or d.Name == "StarBadge" or d.Name:match("^EquipTierBadge_") or d.Name:match("^EquipStarBadge_") then
-				pcall(d.Destroy, d)
-			elseif d.Name == "Count" and d:IsA("TextLabel") then
-				d.Visible = true
+			if doBadges then
+				if d.Name == "TierBadge" or d.Name == "StarBadge" or d.Name:match("^EquipTierBadge_") or d.Name:match("^EquipStarBadge_") then
+					pcall(d.Destroy, d)
+				elseif d.Name == "Count" and d:IsA("TextLabel") then
+					d.Visible = true
+				end
 			end
-			if d:GetAttribute("TierClickHooked") then d:SetAttribute("TierClickHooked", nil) end
+			if doHooks then
+				if d:GetAttribute("TierClickHooked") then d:SetAttribute("TierClickHooked", nil) end
+			end
 		end
 	end
 
 	-- 3. HuntShop
 	local huntShop = pgui:FindFirstChild("HuntShop")
-	if huntShop then
+	if huntShop and doBadges then
 		for _, d in ipairs(huntShop:GetDescendants()) do
 			if d.Name == "TierBadge" or d.Name == "StarBadge" then
 				pcall(d.Destroy, d)
@@ -186,13 +276,17 @@ local function purgeAllTierBadgesAndHooks()
 	local huntReroll = pgui:FindFirstChild("HuntReroll")
 	if huntReroll then
 		for _, d in ipairs(huntReroll:GetDescendants()) do
-			if d.Name == "TierBadge" or d.Name == "PopupTierBadge" or d.Name == "StarBadge" or d.Name == "PopupStarBadge" or d.Name == "RerollDetailStarBadge" or d.Name == "StarShadow" then
-				pcall(d.Destroy, d)
+			if doBadges then
+				if d.Name == "TierBadge" or d.Name == "PopupTierBadge" or d.Name == "StarBadge" or d.Name == "PopupStarBadge" or d.Name == "RerollDetailStarBadge" or d.Name == "StarShadow" then
+					pcall(d.Destroy, d)
+				end
 			end
-			if d:GetAttribute("TierRerollHooked") then d:SetAttribute("TierRerollHooked", nil) end
-			if d:GetAttribute("TierDetailHooked") then d:SetAttribute("TierDetailHooked", nil) end
-			if d:GetAttribute("BoundRef") then d:SetAttribute("BoundRef", nil) end
-			if d:GetAttribute("TierRerollClicked") then d:SetAttribute("TierRerollClicked", nil) end
+			if doHooks then
+				if d:GetAttribute("TierRerollHooked") then d:SetAttribute("TierRerollHooked", nil) end
+				if d:GetAttribute("TierDetailHooked") then d:SetAttribute("TierDetailHooked", nil) end
+				if d:GetAttribute("BoundRef") then d:SetAttribute("BoundRef", nil) end
+				if d:GetAttribute("TierRerollClicked") then d:SetAttribute("TierRerollClicked", nil) end
+			end
 		end
 	end
 
@@ -200,14 +294,35 @@ local function purgeAllTierBadgesAndHooks()
 	local lumiRefine = pgui:FindFirstChild("LumiRefine")
 	if lumiRefine then
 		for _, d in ipairs(lumiRefine:GetDescendants()) do
-			if d.Name == "TierBadge" or d.Name == "PopupTierBadge" then
-				pcall(d.Destroy, d)
+			if doBadges then
+				if d.Name == "TierBadge" or d.Name == "PopupTierBadge" or d.Name == "StarBadge" or d.Name == "StarShadow" then
+					pcall(d.Destroy, d)
+				end
 			end
-			if d:GetAttribute("TierRefineHooked") then d:SetAttribute("TierRefineHooked", nil) end
+			if doHooks then
+				if d:GetAttribute("TierRefineHooked") then d:SetAttribute("TierRefineHooked", nil) end
+			end
+		end
+	end
+
+	-- 6. HuntStorage (คลังเก็บของ)
+	local huntStorage = pgui:FindFirstChild("HuntStorage")
+	if huntStorage then
+		for _, d in ipairs(huntStorage:GetDescendants()) do
+			if doBadges then
+				if d.Name == "TierBadge" or d.Name == "StarBadge" or d.Name == "StarShadow" then
+					pcall(d.Destroy, d)
+				end
+			end
+			if doHooks then
+				if d:GetAttribute("BoundRef") then d:SetAttribute("BoundRef", nil) end
+				if d:GetAttribute("TierStorageHooked") then d:SetAttribute("TierStorageHooked", nil) end
+			end
 		end
 	end
 end
-purgeAllTierBadgesAndHooks()
+-- ตอนเริ่มโหลดสคริปต์ใหม่: ล้างเฉพาะ Hook Attributes เพื่อไม่ให้ป้ายที่แสดงอยู่บนจอกระพริบหาย (ส่วนป้ายจะถูก In-Place Mutate หรือลบตาม Config ทันทีที่โหลดเสร็จ)
+purgeAllTierBadgesAndHooks(true, false)
 
 -- ===== 4. State Management (ยุบลงตารางเดียวเพื่อคุม Register Limit) =====
 local HUB = {
@@ -334,7 +449,12 @@ function HUB:AddConnection(conn)
 	return conn
 end
 
-function HUB:Unload(isShuttingDown)
+function HUB.Unload(self, isShuttingDown, isReloading)
+	if type(self) ~= "table" then
+		isReloading = isShuttingDown
+		isShuttingDown = self
+		self = HUB
+	end
 	if not self.Alive and isShuttingDown then return end
 	self.Alive = false
 	EXEC.env.HuntingTogetherHub_Token = (EXEC.env.HuntingTogetherHub_Token or 0) + 1
@@ -364,7 +484,11 @@ function HUB:Unload(isShuttingDown)
 					if p:IsA("BasePart") then p.CanCollide = true end
 				end
 			end
-			purgeAllTierBadgesAndHooks()
+			if isReloading then
+				purgeAllTierBadgesAndHooks(true, false)
+			else
+				purgeAllTierBadgesAndHooks()
+			end
 		end)
 		cleanOldGuis(GUI_NAME)
 		purgeAllGhostConnections()
@@ -493,6 +617,17 @@ function HUB.DisableGameAutoPlay()
 		local ch = LocalPlayer.Character
 		local h = ch and ch:FindFirstChildOfClass("Humanoid")
 		if h then h:Move(Vector3.zero, false) end
+	end)
+
+	-- สั่งหยุด Party Follow ชั่วคราว (ป้องกัน PartyFollowClient ติดลูป setWaiting และแช่แข็งการเดิน)
+	pcall(function()
+		local followEv = LocalPlayer:FindFirstChild("LumiPartyFollow")
+		if followEv and followEv:IsA("BindableEvent") then
+			followEv:Fire("stop")
+		end
+		LocalPlayer:SetAttribute("LumiFollowUserId", nil)
+		LocalPlayer:SetAttribute("LumiFollowPos", nil)
+		LocalPlayer:SetAttribute("LumiGuideGoal", nil)
 	end)
 
 	return not HUB.IsGameAutoActive()
@@ -1274,6 +1409,14 @@ do
 		local gearJsonStr = LocalPlayer:GetAttribute("GearJson") or "{}"
 		local okDecode, gearJson = pcall(HttpService.JSONDecode, HttpService, gearJsonStr)
 		if not okDecode or type(gearJson) ~= "table" then
+			gearJson = {}
+		end
+
+		local storageJsonStr = LocalPlayer:GetAttribute("StorageGearJson") or "{}"
+		local okStorage, storageJson = pcall(HttpService.JSONDecode, HttpService, storageJsonStr)
+		local storageG = (okStorage and type(storageJson) == "table" and type(storageJson.G) == "table") and storageJson.G or nil
+
+		if not next(gearJson) and not (storageG and next(storageG)) then
 			table.clear(ItemTier.Registry)
 			table.clear(ItemTier.Signatures)
 			ItemTier.Cache = ItemTier.Registry
@@ -1286,25 +1429,31 @@ do
 		local newSigs = {}
 		local summary = { SS = 0, S = 0, A = 0, B = 0, C = 0, D = 0, F = 0, Total = 0 }
 
-		for ref, rawGear in pairs(gearJson) do
-			if type(ref) == "string" and type(rawGear) == "table" then
-				local sig = computeGearSig(rawGear)
-				newSigs[ref] = sig
+		local function ingestGears(gearDict)
+			if type(gearDict) ~= "table" then return end
+			for ref, rawGear in pairs(gearDict) do
+				if type(ref) == "string" and type(rawGear) == "table" then
+					local sig = computeGearSig(rawGear)
+					newSigs[ref] = sig
 
-				local res = nil
-				if not forceFull and oldSigs[ref] == sig and oldRegistry[ref] ~= nil then
-					res = oldRegistry[ref]
-				else
-					res = ItemTier.EvaluateGear(ref, rawGear)
-				end
+					local res = nil
+					if not forceFull and oldSigs[ref] == sig and oldRegistry[ref] ~= nil then
+						res = oldRegistry[ref]
+					else
+						res = ItemTier.EvaluateGear(ref, rawGear)
+					end
 
-				if res then
-					newRegistry[ref] = res
-					summary[res.Grade] = (summary[res.Grade] or 0) + 1
-					summary.Total = summary.Total + 1
+					if res then
+						newRegistry[ref] = res
+						summary[res.Grade] = (summary[res.Grade] or 0) + 1
+						summary.Total = summary.Total + 1
+					end
 				end
 			end
 		end
+
+		ingestGears(gearJson)
+		ingestGears(storageG)
 
 		ItemTier.Registry = newRegistry
 		ItemTier.Signatures = newSigs
@@ -1414,6 +1563,9 @@ do
 			if badge.BackgroundColor3 ~= color then
 				badge.BackgroundColor3 = color
 			end
+			if anchor and badge.AnchorPoint ~= anchor then
+				badge.AnchorPoint = anchor
+			end
 			if pos and badge.Position ~= pos then
 				badge.Position = pos
 			end
@@ -1475,9 +1627,16 @@ do
 		local starType = eval and eval.Star
 
 		if not starType then
-			local existing = parent:FindFirstChild(targetName)
-			if existing then
-				existing.Visible = false
+			local firstFound = false
+			for _, child in ipairs(parent:GetChildren()) do
+				if child.Name == targetName then
+					if not firstFound then
+						firstFound = true
+						if child.Visible then child.Visible = false end
+					else
+						pcall(child.Destroy, child)
+					end
+				end
 			end
 			return nil
 		end
@@ -1547,11 +1706,16 @@ do
 		return star
 	end
 
+	local function isTierActive()
+		return HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN and HUB.Config.itemTierBadges
+	end
+
 	function ItemTier.ClearBadges()
-		purgeAllTierBadgesAndHooks()
+		purgeAllTierBadgesAndHooks(false, true)
 	end
 
 	local function applyCellBadge(cell, ref)
+		if not isTierActive() then return end
 		if not cell or not cell:IsA("GuiObject") then return end
 		local eval = ref and (ItemTier.Registry[ref] or ItemTier.Cache[ref])
 		if eval then
@@ -1665,7 +1829,7 @@ do
 	ItemTier.ResolveCurrentPopupRef = resolveCurrentPopupRef
 
 	local function updatePopupBadge(ref)
-		if not HUB.Alive or not HUB.Config.itemTierBadges then return end
+		if not isTierActive() then return end
 		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
 		if not pgui then return end
 		local lumi = pgui:FindFirstChild("LumiInventory")
@@ -1801,7 +1965,8 @@ do
 	ItemTier.UpdatePopupBadge = updatePopupBadge
 
 	function ItemTier.UpdateBadges()
-		if not HUB.Alive or not HUB.Config.itemTierBadges then
+		if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+		if not HUB.Config.itemTierBadges then
 			ItemTier.ClearBadges()
 			return
 		end
@@ -1854,8 +2019,17 @@ do
 				Slot_Acc2 = equipJson.Acc2,
 			}
 
-			-- Persistent Overlay Container: อยู่เหนือ slotBtn และไม่ถูก LumiPage.Clear() ลบทิ้ง
-			local overlay = bagScreen:FindFirstChild("LumiEquipTierOverlay")
+			-- Persistent Overlay Container: อยู่เหนือ slotBtn และไม่ถูก LumiPage.Clear() ลบทิ้ง (ป้องกันซ้อนทับ)
+			local overlay = nil
+			for _, child in ipairs(bagScreen:GetChildren()) do
+				if child.Name == "LumiEquipTierOverlay" then
+					if not overlay then
+						overlay = child
+					else
+						pcall(child.Destroy, child)
+					end
+				end
+			end
 			if not overlay then
 				overlay = Instance.new("Frame")
 				overlay.Name = "LumiEquipTierOverlay"
@@ -1867,6 +2041,8 @@ do
 				overlay:SetAttribute("LumiKeepColor", true)
 				overlay:SetAttribute("LumiClickThrough", true)
 				overlay.Parent = bagScreen
+			elseif not overlay.Visible then
+				overlay.Visible = true
 			end
 
 			for slotName, ref in pairs(slotMapping) do
@@ -2053,7 +2229,16 @@ do
 					local color = TIER_COLORS[eval.Grade] or TIER_COLORS.F
 					local strokeColor = TIER_DARK_STROKES[eval.Grade] or Color3.fromRGB(15, 15, 20)
 					local newText = string.format("TIER %s · %d%%", eval.Grade, math.floor(eval.Score + 0.5))
-					local badge = banner:FindFirstChild("PopupTierBadge")
+					local badge = nil
+					for _, child in ipairs(banner:GetChildren()) do
+						if child.Name == "PopupTierBadge" then
+							if not badge then
+								badge = child
+							else
+								pcall(child.Destroy, child)
+							end
+						end
+					end
 					if not badge then
 						badge = Instance.new("Frame")
 						badge.Name = "PopupTierBadge"
@@ -2156,30 +2341,92 @@ do
 				end
 			end
 		end
+
+		-- =========================================================================
+		-- Sub-routine H: Storage Window Badges (HuntStorage) — Zero Flicker & Central Registry
+		-- =========================================================================
+		local huntStorage = pgui:FindFirstChild("HuntStorage")
+		if huntStorage and huntStorage.Enabled then
+			local win = huntStorage:FindFirstChild("Holder") and huntStorage.Holder:FindFirstChild("Window")
+			if win and win.Visible then
+				local function processStorageContainer(cardName)
+					local card = win:FindFirstChild(cardName)
+					local scroll = card and card:FindFirstChild("Scroll", true)
+					if not scroll then return end
+
+					for _, cell in ipairs(scroll:GetChildren()) do
+						if cell:IsA("GuiObject") and cell.Visible and cell.Name == "ItemSlot" then
+							local ref = cell:GetAttribute("BoundRef")
+							if not ref and type(EXEC.getconnections) == "function" and type(EXEC.getupvalues) == "function" then
+								local hit = cell:FindFirstChild("Hit")
+								if hit then
+									local conns = EXEC.getconnections(hit.MouseButton1Click)
+									for _, c in ipairs(conns) do
+										if c.Function then
+											local uvs = EXEC.getupvalues(c.Function)
+											for _, val in pairs(uvs) do
+												if type(val) == "string" and val:match("^g%d+$") then
+													ref = val
+													break
+												end
+											end
+										end
+										if ref then
+											cell:SetAttribute("BoundRef", ref)
+											break
+										end
+									end
+								end
+							end
+
+							local eval = ref and ItemTier.Registry[ref]
+							if eval then
+								createOrUpdateBadge(cell, ref, eval, UDim2.fromOffset(24, 17), UDim2.new(1, -2, 0, 2), Vector2.new(1, 0))
+								createOrUpdateStarBadge(cell, ref, eval, UDim2.fromOffset(18, 18), UDim2.new(1, -5, 0, 21), Vector2.new(1, 0))
+							else
+								local b = cell:FindFirstChild("TierBadge")
+								if b then pcall(b.Destroy, b) end
+								local s = cell:FindFirstChild("StarBadge")
+								if s then pcall(s.Destroy, s) end
+							end
+						end
+					end
+				end
+
+				processStorageContainer("Card_Storage")
+				processStorageContainer("Card_Bag")
+			end
+		end
 	end
 
 	-- True Cancelling Debounce Scheduler (Zero Task Flooding & Zero Stutter)
 	local _scheduledUpdateThread = nil
 	local function scheduleUpdate(delaySec)
+		if not isTierActive() then return end
 		if _scheduledUpdateThread then
 			task.cancel(_scheduledUpdateThread)
 			_scheduledUpdateThread = nil
 		end
 		_scheduledUpdateThread = task.delay(delaySec or 0.05, function()
 			_scheduledUpdateThread = nil
-			if HUB.Alive and HUB.Config.itemTierBadges then
+			if isTierActive() then
 				ItemTier.UpdateBadges()
 			end
 		end)
 	end
 
 	local function triggerFullUpdate()
+		if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
 		ItemTier.RefreshCache()
 		scheduleUpdate(0.05)
 	end
 
+	-- โหลดข้อมูล Registry ทันทีก่อนเริ่มผูก UI Watchers เพื่อให้ bindCell มีข้อมูลพร้อม 100% ตั้งแต่ไมโครวินาทีแรก (ตัดปัญหาป้ายหายแล้วเด้งใหม่ตอน Execute ทับ)
+	ItemTier.RefreshCache()
+
 	-- Event Watchers: ดักฟังเฉพาะสัญญาณที่เกี่ยวกับอุปกรณ์โดยตรง
 	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("GearJson"):Connect(triggerFullUpdate))
+	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("StorageGearJson"):Connect(triggerFullUpdate))
 	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("EquipJson"):Connect(function()
 		scheduleUpdate(0.02)
 	end))
@@ -2190,14 +2437,14 @@ do
 	-- Watch Inventory Window, Equipped Bag Screen & Shop Sell Screen
 	task.spawn(function()
 		local pgui = LocalPlayer:WaitForChild("PlayerGui", 30)
-		if not pgui then return end
+		if not pgui or not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
 
 		-- 1. LumiInventory (กระเป๋าหลัก)
 		local lumi = pgui:WaitForChild("LumiInventory", 30)
 		local win = lumi and lumi:FindFirstChild("InventoryWindow", true)
 		if win then
 			HUB:AddConnection(win:GetPropertyChangedSignal("Visible"):Connect(function()
-				if HUB.Alive and win.Visible and HUB.Config.itemTierBadges then
+				if isTierActive() and win.Visible then
 					scheduleUpdate(0.02)
 				end
 			end))
@@ -2223,24 +2470,28 @@ do
 			-- Reactive Zero-Latency Cell Binder for ScrollingFrame
 			local sf = win:FindFirstChild("ScrollingFrame", true)
 			local function bindCell(child)
+				if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
 				if not child or not child:IsA("GuiObject") then return end
-				local inv = getInvTable()
-				local ref = inv and inv.cellOf and inv.cellOf[child]
-				if ref then
-					applyCellBadge(child, ref)
-				else
-					task.defer(function()
-						if not child.Parent then return end
-						local invNow = getInvTable()
-						local r = invNow and invNow.cellOf and invNow.cellOf[child]
-						if r then applyCellBadge(child, r) end
-					end)
+				if HUB.Config.itemTierBadges then
+					local inv = getInvTable()
+					local ref = inv and inv.cellOf and inv.cellOf[child]
+					if ref then
+						applyCellBadge(child, ref)
+					else
+						task.defer(function()
+							if not isTierActive() or not child.Parent then return end
+							local invNow = getInvTable()
+							local r = invNow and invNow.cellOf and invNow.cellOf[child]
+							if r then applyCellBadge(child, r) end
+						end)
+					end
 				end
 
 				-- คลิกที่ Cell: จำ SelectedRef และอัปเดต ItemPopup Badge ทันที 0ms (ตัด ChildAdded 240 ตัวออกเพื่อลดภาระ C++ Destructor ตอนออกเกม)
 				if child:IsA("TextButton") and not child:GetAttribute("TierClickHooked") then
 					child:SetAttribute("TierClickHooked", true)
 					HUB:AddConnection(child.MouseButton1Click:Connect(function()
+						if not isTierActive() then return end
 						local invNow = getInvTable()
 						local r = invNow and invNow.cellOf and invNow.cellOf[child]
 						if r then
@@ -2267,6 +2518,7 @@ do
 		if popup and not popup:GetAttribute("TierPopupHooked") then
 			popup:SetAttribute("TierPopupHooked", true)
 			HUB:AddConnection(popup:GetPropertyChangedSignal("Visible"):Connect(function()
+				if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
 				if popup.Visible then
 					task.defer(updatePopupBadge)
 				else
@@ -2286,7 +2538,7 @@ do
 			if title and title:IsA("TextLabel") and not title:GetAttribute("TierTitleHooked") then
 				title:SetAttribute("TierTitleHooked", true)
 				HUB:AddConnection(title:GetPropertyChangedSignal("Text"):Connect(function()
-					if popup.Visible then
+					if isTierActive() and popup.Visible then
 						task.defer(updatePopupBadge)
 					end
 				end))
@@ -2297,7 +2549,7 @@ do
 		local bagScreen = pgui:WaitForChild("LumiBagScreen", 30)
 		if bagScreen then
 			HUB:AddConnection(bagScreen:GetPropertyChangedSignal("Enabled"):Connect(function()
-				if HUB.Alive and bagScreen.Enabled and HUB.Config.itemTierBadges then
+				if isTierActive() and bagScreen.Enabled then
 					local overlay = bagScreen:FindFirstChild("LumiEquipTierOverlay")
 					if overlay then overlay.Visible = true end
 					scheduleUpdate(0.02)
@@ -2310,6 +2562,7 @@ do
 				if slotBtn and slotBtn:IsA("TextButton") and not slotBtn:GetAttribute("TierClickHooked") then
 					slotBtn:SetAttribute("TierClickHooked", true)
 					HUB:AddConnection(slotBtn.MouseButton1Click:Connect(function()
+						if not isTierActive() then return end
 						local equipJsonStr = LocalPlayer:GetAttribute("EquipJson") or "{}"
 						local okEquip, equipJson = pcall(HttpService.JSONDecode, HttpService, equipJsonStr)
 						if okEquip and type(equipJson) == "table" then
@@ -2331,7 +2584,7 @@ do
 		local huntShop = pgui:WaitForChild("HuntShop", 30)
 		if huntShop then
 			HUB:AddConnection(huntShop:GetPropertyChangedSignal("Enabled"):Connect(function()
-				if HUB.Alive and huntShop.Enabled and HUB.Config.itemTierBadges then
+				if isTierActive() and huntShop.Enabled then
 					scheduleUpdate(0.02)
 				end
 			end))
@@ -2341,7 +2594,7 @@ do
 		local huntReroll = pgui:WaitForChild("HuntReroll", 30)
 		if huntReroll then
 			HUB:AddConnection(huntReroll:GetPropertyChangedSignal("Enabled"):Connect(function()
-				if HUB.Alive and huntReroll.Enabled and HUB.Config.itemTierBadges then
+				if isTierActive() and huntReroll.Enabled then
 					scheduleUpdate(0.05)
 				end
 			end))
@@ -2351,7 +2604,7 @@ do
 			if scroll and not scroll:GetAttribute("TierRerollHooked") then
 				scroll:SetAttribute("TierRerollHooked", true)
 				HUB:AddConnection(scroll.ChildAdded:Connect(function(child)
-					if HUB.Alive and huntReroll.Enabled and HUB.Config.itemTierBadges then
+					if isTierActive() and huntReroll.Enabled then
 						scheduleUpdate(0.12)
 					end
 				end))
@@ -2361,7 +2614,7 @@ do
 			if detail and not detail:GetAttribute("TierDetailHooked") then
 				detail:SetAttribute("TierDetailHooked", true)
 				HUB:AddConnection(detail.ChildAdded:Connect(function(child)
-					if HUB.Alive and huntReroll.Enabled and HUB.Config.itemTierBadges then
+					if isTierActive() and huntReroll.Enabled then
 						scheduleUpdate(0.12)
 					end
 				end))
@@ -2372,15 +2625,46 @@ do
 		local lumiRefine = pgui:WaitForChild("LumiRefine", 30)
 		if lumiRefine then
 			HUB:AddConnection(lumiRefine:GetPropertyChangedSignal("Enabled"):Connect(function()
-				if HUB.Alive and lumiRefine.Enabled and HUB.Config.itemTierBadges then
+				if isTierActive() and lumiRefine.Enabled then
 					scheduleUpdate(0.02)
 				end
 			end))
 		end
-	end)
 
-	-- Initial Cache Refresh on Hub Load
-	task.defer(ItemTier.RefreshCache)
+		-- 6. HuntStorage (คลังเก็บของ)
+		local huntStorage = pgui:WaitForChild("HuntStorage", 30)
+		if huntStorage then
+			HUB:AddConnection(huntStorage:GetPropertyChangedSignal("Enabled"):Connect(function()
+				if isTierActive() and huntStorage.Enabled then
+					scheduleUpdate(0.05)
+				end
+			end))
+
+			local win = huntStorage:FindFirstChild("Holder") and huntStorage.Holder:FindFirstChild("Window")
+			local function hookStorageScroll(cardName)
+				local card = win and win:FindFirstChild(cardName)
+				local scroll = card and card:FindFirstChild("Scroll", true)
+				if scroll and not scroll:GetAttribute("TierStorageHooked") then
+					scroll:SetAttribute("TierStorageHooked", true)
+					HUB:AddConnection(scroll.ChildAdded:Connect(function()
+						if isTierActive() and huntStorage.Enabled then
+							scheduleUpdate(0.05)
+						end
+					end))
+				end
+			end
+
+			hookStorageScroll("Card_Storage")
+			hookStorageScroll("Card_Bag")
+		end
+
+		-- Sync สถานะป้ายทันทีหลังผูก Watchers เสร็จสิ้น (In-Place 100% ไม่กระพริบ)
+		if HUB.Config.itemTierBadges then
+			ItemTier.UpdateBadges()
+		else
+			ItemTier.ClearBadges()
+		end
+	end)
 
 	-- Background Heartbeat (ทุก 1.5 วินาทีขณะหน้าต่างเปิดอยู่ เพื่อ sync ข้อมูลแบบ Zero-Flicker)
 	task.spawn(function()
@@ -2396,12 +2680,14 @@ do
 					local huntShop = pgui:FindFirstChild("HuntShop")
 					local huntReroll = pgui:FindFirstChild("HuntReroll")
 					local lumiRefine = pgui:FindFirstChild("LumiRefine")
+					local huntStorage = pgui:FindFirstChild("HuntStorage")
 
 					local isAnyOpen = (invWin and invWin.Visible)
 						or (bagScreen and bagScreen.Enabled)
 						or (huntShop and huntShop.Enabled)
 						or (huntReroll and huntReroll.Enabled)
 						or (lumiRefine and lumiRefine.Enabled)
+						or (huntStorage and huntStorage.Enabled)
 					if isAnyOpen then
 						ItemTier.UpdateBadges()
 					end
@@ -7379,6 +7665,8 @@ local function captureOriginIfNeeded()
 		HUB.OriginCFrame = root.CFrame
 		-- หากจุดเริ่มต้นอยู่ในโซนล่ามอนสเตอร์นอกเมือง (Z < -300) ให้ถือว่าต้องกลับมาเปิด Auto Play ฟาร์มต่อเสมอ
 		HUB.OriginAutoOn = (root.Position.Z < -300) or (HUB.IsGameAutoActive and HUB.IsGameAutoActive()) or (LocalPlayer:GetAttribute("AutoOn") == true)
+		-- จดจำสถานะ Party Follow ก่อนเริ่มรูทีน (เพื่อ Re-sync หลังเดินทางกลับ)
+		HUB.OriginFollowUserId = tonumber(LocalPlayer:GetAttribute("LumiFollowUserId"))
 	end
 	return HUB.OriginCFrame
 end
@@ -7387,6 +7675,7 @@ HUB.CaptureOriginIfNeeded = captureOriginIfNeeded
 local function clearOrigin()
 	HUB.OriginCFrame = nil
 	HUB.OriginAutoOn = nil
+	HUB.OriginFollowUserId = nil
 end
 HUB.ClearOrigin = clearOrigin
 
@@ -7436,6 +7725,45 @@ local function getNearestUnlockedPillar(pos)
 end
 HUB.GetNearestUnlockedPillar = getNearestUnlockedPillar
 
+local function resumeFarmOrFollow(targetPos)
+	local followUid = HUB.OriginFollowUserId
+	local restoredFollow = false
+
+	if followUid then
+		local inMyParty = false
+		pcall(function()
+			local partyJson = LocalPlayer:GetAttribute("PartyJson")
+			if type(partyJson) == "string" and #partyJson > 0 then
+				local data = HttpService:JSONDecode(partyJson)
+				if data and data.Members then
+					for _, m in ipairs(data.Members) do
+						if m.UserId == followUid then
+							inMyParty = true
+							break
+						end
+					end
+				end
+			end
+		end)
+
+		if inMyParty then
+			local followEv = LocalPlayer:FindFirstChild("LumiPartyFollow")
+			if followEv and followEv:IsA("BindableEvent") then
+				followEv:Fire(followUid)
+				restoredFollow = true
+			end
+		end
+	end
+
+	if not restoredFollow then
+		if (targetPos and targetPos.Z < -300) or HUB.OriginAutoOn then
+			if HUB.EnsureGameAutoActive then
+				HUB.EnsureGameAutoActive(6, 0.25)
+			end
+		end
+	end
+end
+
 local function returnToOrigin(shouldAbortFn, updateStatusFn)
 	local char = LocalPlayer.Character
 	local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -7470,11 +7798,7 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn)
 		char = LocalPlayer.Character
 		root = char and char:FindFirstChild("HumanoidRootPart")
 		if root and not (shouldAbortFn and shouldAbortFn()) then
-			if originPos.Z < -300 or HUB.OriginAutoOn then
-				if HUB.EnsureGameAutoActive then
-					HUB.EnsureGameAutoActive(6, 0.25)
-				end
-			end
+			resumeFarmOrFollow(originPos)
 			clearOrigin()
 			return true
 		end
@@ -7639,11 +7963,11 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn)
 	local postWarpDist = (root.Position - originPos).Magnitude
 	if postWarpDist > 500.0 then
 		warn(string.format("[Hunting Together Hub] ReturnToOrigin: ยังอยู่ห่างจากเป้าหมาย %.1f studs (ต่างโซน) — ยกเลิกการวิ่งชนกำแพง", postWarpDist))
-		-- Self-Healing: เคลียร์ Origin ที่เป็นไปไม่ได้ทิ้ง และเปิด Auto Play ในโซนปัจจุบันทันที ป้องกันยืนนิ่ง
-		clearOrigin()
-		if root.Position.Z <= -300 and HUB.EnsureGameAutoActive then
-			HUB.EnsureGameAutoActive(5, 0.3)
+		-- Self-Healing: เคลียร์ Origin ที่เป็นไปไม่ได้ทิ้ง และเปิด Auto Play/Follow ในโซนปัจจุบันทันที ป้องกันยืนนิ่ง
+		if root.Position.Z <= -300 then
+			resumeFarmOrFollow(root.Position)
 		end
+		clearOrigin()
 		return false
 	end
 
@@ -7666,22 +7990,16 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn)
 	char = LocalPlayer.Character
 	root = char and char:FindFirstChild("HumanoidRootPart")
 	if root and not (shouldAbortFn and shouldAbortFn()) and (root.Position - originPos).Magnitude <= 250.0 then
-		-- เมื่อกลับมาถึงโซนฟาร์มมอนสเตอร์ (Z < -300) หรือเคยเปิด Auto Play ไว้ ให้สั่งเปิด Auto Play ทันที 100%!
-		if originPos.Z < -300 or HUB.OriginAutoOn then
-			if HUB.EnsureGameAutoActive then
-				HUB.EnsureGameAutoActive(6, 0.25)
-			end
-		end
+		-- เมื่อกลับมาถึงโซนฟาร์มมอนสเตอร์ หรือเคยเปิด Auto Play ไว้ ให้สั่งเปิด Auto Play/Follow ทันที 100%!
+		resumeFarmOrFollow(originPos)
 		clearOrigin()
 		return true
 	end
 
-	-- Self-Healing Fallback: ถ้าเดินไม่ถึงใน 45s หรือหลงทาง แต่ตัวละครอยู่ในโซนมอนสเตอร์แล้ว ให้เปิด Auto Play และเคลียร์ Origin เพื่อไม่ให้ยืนแข็งทื่อ
+	-- Self-Healing Fallback: ถ้าเดินไม่ถึงใน 45s หรือหลงทาง แต่ตัวละครอยู่ในโซนมอนสเตอร์แล้ว ให้เปิด Auto Play/Follow และเคลียร์ Origin เพื่อไม่ให้ยืนแข็งทื่อ
 	if root and root.Position.Z <= -300 then
+		resumeFarmOrFollow(root.Position)
 		clearOrigin()
-		if HUB.EnsureGameAutoActive then
-			HUB.EnsureGameAutoActive(5, 0.3)
-		end
 	end
 
 	return false
@@ -8175,7 +8493,7 @@ do
 end
 
 -- =========================================================================
--- 9.29 Auto Lock & Auto Sell Workers (Event-Driven, Zero Heavy Scan)
+-- 9.30 Auto Lock & Auto Sell Workers (Event-Driven, Zero Heavy Scan)
 -- =========================================================================
 do
 	local _lastLockScan = 0
@@ -9047,7 +9365,7 @@ do
 end
 
 -- =========================================================================
--- 9.29 Auto Farm Boss Worker (ล่าบอสอัตโนมัติเมื่อเกิด & วาร์ปต่อเนื่อง & กลับจุดฟาร์มเดิม)
+-- 9.30 Auto Farm Boss Worker (ล่าบอสอัตโนมัติเมื่อเกิด & วาร์ปต่อเนื่อง & กลับจุดฟาร์มเดิม)
 -- =========================================================================
 do
 	local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
@@ -9701,7 +10019,7 @@ do
 		end
 	end)
 
-	-- 9.29 Self-Healing Watchdog (ทุก 5 วินาที): ตรวจจับและปลดล็อค Flag / Routine ที่ค้างเกินเวลาแบบอัตโนมัติ
+	-- 9.30 Self-Healing Watchdog (ทุก 5 วินาที): ตรวจจับและปลดล็อค Flag / Routine ที่ค้างเกินเวลาแบบอัตโนมัติ
 	task.spawn(function()
 		local _stuckBossCount = 0
 		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
