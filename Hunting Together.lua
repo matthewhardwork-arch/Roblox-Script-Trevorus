@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.40)
+-- Hunting Together Hub (v9.41)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.40"
+local VERSION = "9.41"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -8017,15 +8017,38 @@ local function warpToTown(shouldAbortFn)
 	if not root then return false end
 	if root.Position.Z > -200 then return true end
 
+	-- ปิด Auto-Hunt ชั่วคราวและปลดล็อกเป้าหมาย เพื่อไม่ให้ CombatClient ขัดจังหวะการร่าย HomeWarp 5 วินาที
+	if HUB.DisableGameAutoPlay then
+		HUB.DisableGameAutoPlay()
+	end
+	local ct = LocalPlayer:FindFirstChild("CurrentTarget")
+	if ct and ct:IsA("ObjectValue") then
+		ct.Value = nil
+	end
+
 	local readyAt = tonumber(LocalPlayer:GetAttribute("HomeWarpReadyAt")) or 0
 	local cdLeft = math.max(0, math.ceil(readyAt - workspace:GetServerTimeNow()))
+
+	-- หากติดคูลดาวน์ HomeWarp ให้รอจนกระทั่งคูลดาวน์หมด
+	if cdLeft > 0 then
+		if HUB.UI.SellStatusLabel then
+			HUB.UI.SellStatusLabel.Text = string.format("สถานะ: รอ HomeWarp คูลดาวน์อีก %d วิ...", cdLeft)
+		end
+		local tCdWait = os.clock()
+		while (os.clock() - tCdWait < (cdLeft + 0.2)) and not (shouldAbortFn and shouldAbortFn()) do
+			task.wait(0.2)
+		end
+		cdLeft = 0
+	end
+
+	-- ยิง HomeWarp เสมอ (ตามคำสั่งหลัก: ใช้ Home warp เสมอ)
 	if cdLeft == 0 and not (shouldAbortFn and shouldAbortFn()) then
 		root.Anchored = true
 		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
 		local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
 		local LumiMenuToggle = LocalPlayer:FindFirstChild("LumiMenuToggle")
 		if homeWarp then
-			homeWarp:FireServer("start", "merchant")
+			homeWarp:FireServer("start")
 		elseif LumiMenuToggle then
 			pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end)
 		end
@@ -8043,6 +8066,7 @@ local function warpToTown(shouldAbortFn)
 		if root then root.Anchored = false end
 	end
 
+	-- Fallback ฉุกเฉิน: หาก HomeWarp ถูกขัดขวาง ให้ใช้เสาวาร์ปใกล้เคียงเพื่อเข้าสู่เมืองหลวง (Town Pillar: 0 Silver)
 	if not (shouldAbortFn and shouldAbortFn()) then
 		local localPillar = (HUB.GetNearbyBossPillar and HUB.GetNearbyBossPillar(root.Position)) or (getNearbyBossPillar and getNearbyBossPillar(root.Position))
 		if localPillar then
@@ -9382,69 +9406,10 @@ do
 
 			-- 2. เดินทางกลับไปที่ร้าน Merchant (เฉพาะเมื่ออยู่นอกเมือง Z <= -200)
 			if not alreadyInTown then
-				local reachedTown = false
-
-				-- 2.1 ตรวจสอบคูลดาวน์ HomeWarp
-				local readyAt = tonumber(LocalPlayer:GetAttribute("HomeWarpReadyAt")) or 0
-				local cdLeft = math.max(0, math.ceil(readyAt - workspace:GetServerTimeNow()))
-
-				-- ถ้าติดคูลดาวน์สั้นๆ (<= 12 วินาที) ให้รอจนพร้อม
-				if cdLeft > 0 and cdLeft <= 12 then
-					if HUB.UI.SellStatusLabel then
-						HUB.UI.SellStatusLabel.Text = string.format("สถานะ: กระเป๋าเต็ม — รอ HomeWarp อีก %d วิ...", cdLeft)
-					end
-					local cdWaitT0 = os.clock()
-					while (os.clock() - cdWaitT0 < (cdLeft + 0.2)) and not shouldAbort() do
-						task.wait(0.2)
-					end
-					cdLeft = 0
+				if HUB.UI.SellStatusLabel then
+					HUB.UI.SellStatusLabel.Text = "สถานะ: กำลังใช้ Home Warp กลับเมืองหลวง..."
 				end
-
-				-- ถ้าไม่มีคูลดาวน์ ให้ยิง HomeWarp
-				if cdLeft == 0 and not shouldAbort() then
-					if root then root.Anchored = true end
-					local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
-					if homeWarp then
-						homeWarp:FireServer("start", "merchant")
-					elseif LumiMenuToggle then
-						pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end)
-					end
-
-					-- รอ Cast 5 วินาที + เช็คยืนยันว่าเข้าสู่เขตเมืองแล้วจริง (Position.Z > -200)
-					local t0 = os.clock()
-					while os.clock() - t0 < 8 and not shouldAbort() do
-						task.wait(0.1)
-						char = LocalPlayer.Character
-						root = char and char:FindFirstChild("HumanoidRootPart")
-						hum = char and char:FindFirstChildOfClass("Humanoid")
-						if not root or not hum or hum.Health <= 0 then break end
-
-						if root.Position.Z > -200 then
-							reachedTown = true
-							break
-						end
-					end
-					if root then root.Anchored = false end
-				end
-
-				-- 2.2 ถ้า HomeWarp ไม่สำเร็จหรือติดคูลดาวน์นาน (> 12 วิ) ให้ตรวจหาเสาวาร์ปใกล้ตัวเพื่อวาร์ปเข้าเมือง (Town Warp: 0 Silver, 0 Cooldown)
-				if not reachedTown and not shouldAbort() then
-					local localPillar = getNearbyBossPillar(root.Position)
-					if localPillar then
-						if HUB.UI.SellStatusLabel then
-							HUB.UI.SellStatusLabel.Text = "สถานะ: ใช้เสาวาร์ปใกล้เคียงเพื่อเดินทางเข้าเมือง (Zero Cooldown)..."
-						end
-						local okWarp = executePillarWarp(localPillar, "Town", shouldAbort)
-						if okWarp then
-							char = LocalPlayer.Character
-							root = char and char:FindFirstChild("HumanoidRootPart")
-							if root and root.Position.Z > -200 then
-								reachedTown = true
-							end
-						end
-					end
-				end
-
+				local reachedTown = warpToTown(shouldAbort)
 				if shouldAbort() or not root or not hum or hum.Health <= 0 then return end
 
 				if not reachedTown then
@@ -9454,6 +9419,17 @@ do
 					end
 					return
 				end
+
+				-- รอ WarpLandClient ปล่อย Anchored และ RequestStreamAroundAsync พื้นที่เมืองรอบตัว
+				local tWarpDone = os.clock()
+				while (root and root.Anchored and os.clock() - tWarpDone < 1.8) do
+					task.wait(0.08)
+				end
+				pcall(function()
+					LocalPlayer:RequestStreamAroundAsync(root.Position, 3)
+				end)
+				task.wait(0.15)
+			end
 
 				-- รอ WarpLandClient ปล่อย Anchored และ RequestStreamAroundAsync พื้นที่เมืองรอบตัว
 				local tWarpDone = os.clock()
@@ -9740,27 +9716,38 @@ do
 			hitSell = false
 		end
 
-		-- 1. ลำดับที่ 1: ตรวจสอบและรัน Auto Salvage ก่อน (Location-Independent, ทำงานทันทีในเบื้องหลัง ไม่ขัดจังหวะฟาร์ม)
+		-- 1. กรณีเปิดใช้งาน Auto Salvage (ย่อยอุปกรณ์กลางสนามฟาร์มก่อนเสมอ ไม่ขัดจังหวะฟาร์ม):
+		--    หากเปิดใช้งาน Auto Sell ควบคู่ด้วย จะปล่อยให้ย่อยอุปกรณ์เสร็จก่อน จากนั้นส่งไม้ต่อให้ Auto Sell วาร์ปกลับไปขายของทันที
 		if hitSalvage and not _isSalvagingRoutine and not HUB.IsSalvagingRoutineActive then
 			task.spawn(function()
 				runAutoSalvageRoutine()
-				-- หลัง Salvage รันเสร็จ หากถึงเกณฑ์ Auto Sell ด้วย ให้ส่งไม้ต่อให้ Auto Sell ขายขยะ/ของที่เหลือ
-				task.wait(0.5)
-				if hitSell and HUB.Config.autoSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
-					if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded(true) then
+				task.wait(0.4)
+				-- หลัง Salvage เสร็จสิ้น หากเปิดใช้งาน Auto Sell อยู่ ให้ส่งไม้ต่อให้ Auto Sell เดินทางไปขายขยะ/ของที่เหลือทันที!
+				if HUB.Config.autoSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
+					local canSell = hasSellableItems()
+					if canSell then
 						task.spawn(function()
 							runAutoSellRoutine(true)
 						end)
+					else
+						local afterStats = getBagStats()
+						if HUB.UI.SellStatusLabel then
+							HUB.UI.SellStatusLabel.Text = string.format("สถานะ: ย่อยอุปกรณ์สำเร็จ กระเป๋าว่างแล้ว (%d%%) · ไม่มีของต้องขาย ข้ามการวาร์ป", afterStats.pct)
+						end
 					end
 				end
 			end)
 			return
 		end
 
-		-- 2. ลำดับที่ 2: หากไม่ได้เปิด Salvage แต่ถึงเกณฑ์ Auto Sell
+		-- 2. กรณีไม่ได้เปิด Auto Salvage แต่เปิด Auto Sell (Standalone Auto Sell):
+		--    Auto sell ทำงานด้วยตัวเองได้ 100% เมื่อกระเป๋าถึงเกณฑ์ จะใช้ Home warp เสมอกลับไปขายของ
 		if hitSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
-			if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded() then
-				task.spawn(runAutoSellRoutine)
+			local canSell = hasSellableItems()
+			if canSell then
+				task.spawn(function()
+					runAutoSellRoutine(false)
+				end)
 			end
 		end
 	end
