@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.41)
+-- Hunting Together Hub (v9.42)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.41"
+local VERSION = "9.42"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -9431,17 +9431,6 @@ do
 				task.wait(0.15)
 			end
 
-				-- รอ WarpLandClient ปล่อย Anchored และ RequestStreamAroundAsync พื้นที่เมืองรอบตัว
-				local tWarpDone = os.clock()
-				while (root and root.Anchored and os.clock() - tWarpDone < 1.8) do
-					task.wait(0.08)
-				end
-				pcall(function()
-					LocalPlayer:RequestStreamAroundAsync(root.Position, 3)
-				end)
-				task.wait(0.15)
-			end
-
 			if shouldAbort() then return end
 
 			if HUB.UI.SellStatusLabel then
@@ -10764,31 +10753,169 @@ do
 		return false, nil
 	end
 
-	local function findEscapePosition(charPos, dangerZones, safeZones, character)
-		-- กรณี 1: มี Safe Zone (Green Show) อยู่ในระยะต่อสู้จริง (<= 85 studs)
+	-- ตรวจสอบว่าการเคลื่อนที่ระหว่าง p1 ไปยัง p2 ไม่ตัดผ่านโซนแดง
+	local function isSegmentSafeFromDanger(p1, p2, dangerZones, customBuffer)
+		local d = (p2 - p1).Magnitude
+		if d <= 0.5 then
+			for _, z in ipairs(dangerZones) do
+				if isPointInsideZone(p2, z, customBuffer) then return false end
+			end
+			return true
+		end
+		local steps = math.max(2, math.ceil(d / 2.0))
+		for i = 0, steps do
+			local pt = p1:Lerp(p2, i / steps)
+			for _, z in ipairs(dangerZones) do
+				if isPointInsideZone(pt, z, customBuffer) then
+					return false
+				end
+			end
+		end
+		return true
+	end
+
+	-- ค้นหา Model บอสหรือมอนสเตอร์ที่กำลังสู้อยู่ (อ่านจาก CurrentTarget ของเกมก่อนเสมอ)
+	local function getActiveCombatTarget(charPos)
+		local curTarget = LocalPlayer:FindFirstChild("CurrentTarget")
+		local target = curTarget and curTarget.Value
+		if target and target.Parent and target:IsA("Model") and target.PrimaryPart then
+			local hp = tonumber(target:GetAttribute("HP")) or 0
+			if hp > 0 and not target:GetAttribute("AnimDead") then
+				return target
+			end
+		end
+		local nearest = nil
+		local nearestDist = 80
+		for _, m in ipairs(CollectionService:GetTagged("Monster")) do
+			if m:IsA("Model") and m.Parent and m.PrimaryPart then
+				local hp = tonumber(m:GetAttribute("HP")) or 0
+				if hp > 0 and not m:GetAttribute("AnimDead") then
+					local d = (m.PrimaryPart.Position - charPos).Magnitude
+					if d < nearestDist then
+						nearestDist = d
+						nearest = m
+					end
+				end
+			end
+		end
+		return nearest
+	end
+
+	-- คำนวณระยะโจมตีจริงของตัวละครตามสูตรของเกม (ReplicatedStorage.Shared.ClassRange & CombatClient)
+	local function getPlayerCombatReach(targetMonster)
+		local atkRange = tonumber(LocalPlayer:GetAttribute("AttackRange"))
+		if not atkRange or atkRange <= 0 then
+			local myJob = LocalPlayer:GetAttribute("Job") or "Archer"
+			if myJob == "Archer" then
+				atkRange = 34
+			elseif myJob == "Mage" then
+				atkRange = 30
+			elseif myJob == "Cleric" then
+				atkRange = 24
+			else
+				atkRange = 7
+			end
+		end
+		local reachCap = tonumber(LocalPlayer:GetAttribute("BotRangedReach"))
+		if reachCap and reachCap > 0 then
+			atkRange = math.min(atkRange, reachCap)
+		end
+		local monRad = 2.5
+		if targetMonster and targetMonster:IsA("Model") then
+			monRad = tonumber(targetMonster:GetAttribute("Radius")) or 2.5
+		end
+		local stopInside = (atkRange >= 10) and 2.5 or 1.5
+		-- เผื่อระยะ 0.5 stud เพื่อให้อยู่ในโซน hold ของ Auto Play อย่างมั่นคง ไม่หลุดระยะ
+		local maxReach = math.max(4.5, atkRange + monRad - stopInside - 0.5)
+		return maxReach, atkRange, monRad
+	end
+
+	-- ตรวจสอบว่ามีกำแพง DungeonLosWall บังแนวสายตาระหว่างผู้เล่นกับเป้าหมายหรือไม่ (เฉพาะในดันเจี้ยน)
+	local function hasDungeonLos(fromPos, targetPos, character, targetMonster)
+		if not workspace:GetAttribute("DungeonId") then
+			return true
+		end
+		local walls = CollectionService:GetTagged("DungeonLosWall")
+		if not walls or #walls == 0 then
+			return true
+		end
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Include
+		rp.RespectCanCollide = true
+		rp.FilterDescendantsInstances = walls
+		local origin = fromPos + Vector3.new(0, 1.5, 0)
+		local dest = targetPos + Vector3.new(0, 1.5, 0)
+		local dir = dest - origin
+		local hit = workspace:Raycast(origin, dir, rp)
+		return hit == nil
+	end
+
+	-- ค้นหาจุดหลบที่ "ปลอดภัย + โจมตีถึง + วิ่งใกล้ที่สุด" (Tier 1: Attack-Reachable, Tier 2: Escape Fallback)
+	local function findEscapePosition(charPos, dangerZones, safeZones, character, targetMonster)
+		-- กรณี 1: มี Safe Zone (Green Show) บังคับต้องเข้าโซนเขียวเป็นอันดับแรก (Priority 1 สูงสุดตอนหลบ)
 		if #safeZones > 0 then
 			local bestSafe = nil
 			local bestDist = math.huge
 			for _, sz in ipairs(safeZones) do
 				if sz.Center then
 					local d = (charPos - sz.Center).Magnitude
-					if d < bestDist and d <= 85 then
+					if d < bestDist and d <= 130 then
 						bestDist = d
 						bestSafe = sz
 					end
 				end
 			end
 			if bestSafe then
-				local clear = isPathClear(charPos, bestSafe.Center, character)
+				local targetPos = (targetMonster and targetMonster.PrimaryPart) and targetMonster.PrimaryPart.Position or nil
+				local maxReach = targetPos and getPlayerCombatReach(targetMonster) or 0
+				local safeRad = math.max(7.0, bestSafe.Radius or 9.0)
+				local innerSafeRad = safeRad * 0.70
+				local bestSpot = bestSafe.Center
+
+				-- หากมีมอนสเตอร์เป้าหมาย ให้ค้นหาจุดในโซนเขียวที่อยู่ในระยะโจมตีถึง และใกล้ผู้เล่นที่สุด
+				if targetPos and maxReach > 0 then
+					local bestScore = math.huge
+					local testAngles = { 0, 45, 90, 135, 180, 225, 270, 315 }
+					for _, deg in ipairs(testAngles) do
+						local rad = math.rad(deg)
+						for frac = 0.3, 0.9, 0.3 do
+							local rOff = innerSafeRad * frac
+							local spot = bestSafe.Center + Vector3.new(math.cos(rad) * rOff, 0, math.sin(rad) * rOff)
+							local groundOk, gPos = isGroundWalkable(spot, character)
+							if groundOk then
+								spot = Vector3.new(spot.X, gPos.Y, spot.Z)
+								local inAnyDanger = false
+								for _, dz in ipairs(dangerZones) do
+									if isPointInsideZone(spot, dz, 1.0) then
+										inAnyDanger = true
+										break
+									end
+								end
+								if not inAnyDanger then
+									local dToTarget = (Vector3.new(spot.X, 0, spot.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
+									local dToChar = (Vector3.new(spot.X, 0, spot.Z) - Vector3.new(charPos.X, 0, charPos.Z)).Magnitude
+									local isReachable = (dToTarget <= maxReach) and hasDungeonLos(spot, targetPos, character, targetMonster)
+									local score = (isReachable and 0 or 1000) + dToChar
+									if score < bestScore then
+										bestScore = score
+										bestSpot = spot
+									end
+								end
+							end
+						end
+					end
+				end
+
+				local clear = isPathClear(charPos, bestSpot, character)
 				if clear then
-					return bestSafe.Center, nil, bestSafe
+					return bestSpot, nil, bestSafe, true
 				else
 					local p = PathfindingService:CreatePath({
 						AgentRadius = 2.4,
 						AgentHeight = 5.0,
 						AgentCanJump = true,
 					})
-					local ok = pcall(function() p:ComputeAsync(charPos, bestSafe.Center) end)
+					local ok = pcall(function() p:ComputeAsync(charPos, bestSpot) end)
 					local pts = (ok and p.Status == Enum.PathStatus.Success) and p:GetWaypoints() or nil
 					pcall(p.Destroy, p)
 					if pts and #pts > 1 then
@@ -10796,108 +10923,130 @@ do
 						for i = 2, #pts do
 							table.insert(wps, { Position = pts[i].Position, Action = pts[i].Action })
 						end
-						return bestSafe.Center, wps, bestSafe
+						return bestSpot, wps, bestSafe, true
 					end
-					return bestSafe.Center, nil, bestSafe
+					return bestSpot, nil, bestSafe, true
 				end
 			end
 		end
 
 		local inDanger, badZone = isCharacterInDanger(charPos, dangerZones)
-		if not inDanger or not badZone then return nil, nil, nil end
+		if not inDanger and (#dangerZones == 0) then
+			return nil, nil, nil, false
+		end
 
 		local userMargin = getDodgeBuffer()
+		local targetPos = (targetMonster and targetMonster.PrimaryPart) and targetMonster.PrimaryPart.Position or nil
+		local maxReach = targetPos and getPlayerCombatReach(targetMonster) or 0
 
-		-- ตัวเลือกอันดับ 1: ทางออกที่สั้นที่สุดทางเรขาคณิต (Shortest Exit Vector) อิงตาม Settings
-		local shortestPos = getShortestExitVector(charPos, badZone, userMargin)
-		local primaryHit = nil
-		if shortestPos then
-			local inOtherDanger = false
-			for _, z in ipairs(dangerZones) do
-				if z ~= badZone and isPointInsideZone(shortestPos, z, 1.2) then
-					inOtherDanger = true
+		-- รวบรวมจุดผู้สมัคร (Candidates) ทั้งหมด
+		local candidates = {}
+		local function addCandidate(pt)
+			if not pt then return end
+			local key = string.format("%.1f_%.1f", pt.X, pt.Z)
+			if not candidates[key] then
+				candidates[key] = pt
+			end
+		end
+
+		-- 1. ทางออกที่สั้นที่สุดทางเรขาคณิต (Shortest Exit Vectors)
+		if badZone then
+			local p1 = getShortestExitVector(charPos, badZone, userMargin)
+			addCandidate(p1)
+			local p2 = getShortestExitVector(charPos, badZone, userMargin + 2.5)
+			addCandidate(p2)
+			local p3 = getShortestExitVector(charPos, badZone, userMargin + 5.0)
+			addCandidate(p3)
+		end
+
+		-- 2. รัศมีรอบตัวผู้เล่น (Radial Fan) 24 ทิศทาง
+		for deg = 0, 345, 15 do
+			local rad = math.rad(deg)
+			local uDir = Vector3.new(math.cos(rad), 0, math.sin(rad))
+			for _, dist in ipairs({ 3.5, 6.0, 9.5, 14.0, 19.0, 25.0, 32.0 }) do
+				addCandidate(charPos + uDir * dist)
+			end
+		end
+
+		-- 3. รัศมีรอบตัวมอนสเตอร์เป้าหมายในระยะโจมตี (Target Attack-Ring)
+		-- ช่วยให้ตัวละครสามารถ Sidestep หลบกรวย/เส้นตรง/วงกลม แล้วยืนในระยะยิงได้ทันที
+		if targetPos and maxReach > 0 then
+			local currDist = (Vector3.new(charPos.X, 0, charPos.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
+			local distLevels = {
+				math.max(4.0, maxReach - 1.0),
+				math.max(4.0, maxReach * 0.75),
+				math.clamp(currDist, 4.5, maxReach - 0.5)
+			}
+			for deg = 0, 345, 15 do
+				local rad = math.rad(deg)
+				local uDir = Vector3.new(math.cos(rad), 0, math.sin(rad))
+				for _, rDist in ipairs(distLevels) do
+					addCandidate(targetPos + uDir * rDist)
+				end
+			end
+		end
+
+		local bestTier1 = nil
+		local bestTier1Dist = math.huge
+		local bestTier2 = nil
+		local bestTier2Dist = math.huge
+
+		for _, candPt in pairs(candidates) do
+			local inDangerAny = false
+			for _, dz in ipairs(dangerZones) do
+				if isPointInsideZone(candPt, dz, 1.2) then
+					inDangerAny = true
 					break
 				end
 			end
 
-			if not inOtherDanger then
-				local clear, hit = isPathClear(charPos, shortestPos, character)
-				local groundOk = isGroundWalkable(shortestPos, character)
-				if clear and groundOk then
-					return shortestPos, nil, badZone
-				end
-				primaryHit = hit
-			end
-		end
+			if not inDangerAny then
+				local groundOk, groundPos = isGroundWalkable(candPt, character)
+				if groundOk then
+					local validPt = Vector3.new(candPt.X, groundPos.Y, candPt.Z)
+					local walkDist = (Vector3.new(validPt.X, 0, validPt.Z) - Vector3.new(charPos.X, 0, charPos.Z)).Magnitude
 
-		-- ตัวเลือกอันดับ 2: ปรับเส้นทางใหม่ด้วย Smart Navigation (Obstacle-Aware Closest Exit Search)
-		-- หากเส้นทางหลบเดิมติดกำแพง/สิ่งกีดขวาง ระบบจะสแกนหาเส้นทางใหม่ที่ไม่ติดกำแพง และพ้นโซนแดงในระยะที่สั้นที่สุด
-		local bestCandidate = nil
-		local bestDist = math.huge
-
-		-- รวบรวมมุมทดสอบ: 24 ทิศทางรอบตัว (ทุก 15 องศา) + ทิศทางตามแนวระนาบกำแพง (Wall Tangent)
-		local testAngles = {}
-		for deg = 0, 345, 15 do
-			table.insert(testAngles, math.rad(deg))
-		end
-
-		if primaryHit and primaryHit.Normal then
-			local N = primaryHit.Normal
-			local t1 = Vector3.new(-N.Z, 0, N.X)
-			local t2 = Vector3.new(N.Z, 0, -N.X)
-			if t1.Magnitude > 0.01 then
-				local steer1 = (t1.Unit * 0.85 + Vector3.new(N.X, 0, N.Z).Unit * 0.25).Unit
-				local steer2 = (t2.Unit * 0.85 + Vector3.new(N.X, 0, N.Z).Unit * 0.25).Unit
-				table.insert(testAngles, math.atan2(steer1.Z, steer1.X))
-				table.insert(testAngles, math.atan2(steer2.Z, steer2.X))
-			end
-		end
-
-		for _, rad in ipairs(testAngles) do
-			local dir = Vector3.new(math.cos(rad), 0, math.sin(rad)).Unit
-			local clearDist = getClearDistance(charPos, dir, 50.0, character)
-
-			-- มีระยะทางโล่งอย่างน้อย 2.5 studs (พอให้ตัวละครก้าวได้)
-			if clearDist >= 2.5 then
-				local minEscapeDist = nil
-				local startDist = math.max(2.5, userMargin)
-				local stepDist = 2.0
-				for d = startDist, clearDist, stepDist do
-					local testPt = charPos + dir * d
-					local inAny = false
-					for _, z in ipairs(dangerZones) do
-						if isPointInsideZone(testPt, z, 1.2) then
-							inAny = true
-							break
+					local pathClear = isPathClear(charPos, validPt, character)
+					if pathClear then
+						local segmentSafe = true
+						if not inDanger then
+							segmentSafe = isSegmentSafeFromDanger(charPos, validPt, dangerZones, 0.8)
 						end
-					end
-					if not inAny then
-						minEscapeDist = d
-						break
-					end
-				end
 
-				if minEscapeDist and minEscapeDist < bestDist then
-					local candPt = charPos + dir * minEscapeDist
-					local groundOk, groundPos = isGroundWalkable(candPt, character)
-					if groundOk then
-						candPt = Vector3.new(candPt.X, groundPos.Y, candPt.Z)
-						local pathClear = isPathClear(charPos, candPt, character)
-						if pathClear then
-							bestCandidate = candPt
-							bestDist = minEscapeDist
+						if segmentSafe then
+							local inAttackReach = false
+							if targetPos and maxReach > 0 then
+								local dToTarget = (Vector3.new(validPt.X, 0, validPt.Z) - Vector3.new(targetPos.X, 0, targetPos.Z)).Magnitude
+								if dToTarget <= maxReach and hasDungeonLos(validPt, targetPos, character, targetMonster) then
+									inAttackReach = true
+								end
+							end
+
+							if inAttackReach then
+								if walkDist < bestTier1Dist then
+									bestTier1Dist = walkDist
+									bestTier1 = validPt
+								end
+							else
+								if walkDist < bestTier2Dist then
+									bestTier2Dist = walkDist
+									bestTier2 = validPt
+								end
+							end
 						end
 					end
 				end
 			end
 		end
 
-		if bestCandidate then
-			return bestCandidate, nil, badZone
+		if bestTier1 then
+			return bestTier1, nil, badZone, true
+		elseif bestTier2 then
+			return bestTier2, nil, badZone, false
 		end
 
-		-- ตัวเลือกอันดับ 3: Complex Geometry / L-Corner Fallback (PathfindingService)
-		-- หากเส้นตรงทุกมุมถูกบล็อก (ติดในมุมอับ/ซอกกำแพง) ใช้ PathfindingService นำทางอ้อมสิ่งกีดขวาง
+		-- Fallback สุดท้าย: ใช้ PathfindingService นำทางหากเส้นตรงทุกมุมมีสิ่งกีดขวาง
+		local shortestPos = badZone and getShortestExitVector(charPos, badZone, userMargin)
 		if shortestPos then
 			local p = PathfindingService:CreatePath({
 				AgentRadius = 2.4,
@@ -10912,80 +11061,11 @@ do
 				for i = 2, #pts do
 					table.insert(wps, { Position = pts[i].Position, Action = pts[i].Action })
 				end
-				return shortestPos, wps, badZone
+				return shortestPos, wps, badZone, false
 			end
 		end
 
-		return shortestPos or charPos, nil, badZone
-	end
-
-	-- ค้นหา Model บอสหรือมอนสเตอร์ที่กำลังสู้อยู่
-	local function getTargetBossModel()
-		local curTarget = LocalPlayer:FindFirstChild("CurrentTarget")
-		local target = curTarget and curTarget.Value
-		if target and target.Parent and target:IsA("Model") and target.PrimaryPart then
-			local hp = tonumber(target:GetAttribute("HP")) or 0
-			if hp > 0 then
-				return target
-			end
-		end
-		local char = LocalPlayer.Character
-		local root = char and char:FindFirstChild("HumanoidRootPart")
-		if root then
-			local nearest = nil
-			local nearestDist = 45
-			for _, m in ipairs(CollectionService:GetTagged("Monster")) do
-				if m:IsA("Model") and m.Parent and m.PrimaryPart then
-					local hp = tonumber(m:GetAttribute("HP")) or 0
-					if hp > 0 then
-						local d = (m.PrimaryPart.Position - root.Position).Magnitude
-						if d < nearestDist then
-							nearestDist = d
-							nearest = m
-						end
-					end
-				end
-			end
-			return nearest
-		end
-		return nil
-	end
-
-	-- ค้นหาจุดตีรอบตัวบอสที่ไม่อยู่ในโซนแดง (Safe Boss Attack Positioning)
-	local function findSafeBossAttackPosition(charPos, boss, dangerZones, character)
-		if not (boss and boss.PrimaryPart) then return nil end
-		local bossPos = boss.PrimaryPart.Position
-		local bossRad = tonumber(boss:GetAttribute("Radius")) or 2.5
-		local attackDist = math.max(6.0, bossRad + 4.0)
-
-		local bestPos = nil
-		local bestDist = math.huge
-
-		-- สแกน 12 ทิศทางรอบตัวบอสในระยะโจมตี
-		for angleDeg = 0, 330, 30 do
-			local rad = math.rad(angleDeg)
-			local cand = bossPos + Vector3.new(math.cos(rad) * attackDist, 0, math.sin(rad) * attackDist)
-			local inAnyDanger = false
-			for _, z in ipairs(dangerZones) do
-				if isPointInsideZone(cand, z, 1.2) then
-					inAnyDanger = true
-					break
-				end
-			end
-			if not inAnyDanger then
-				local pathClear = isPathClear(charPos, cand, character)
-				local groundOk = isGroundWalkable(cand, character)
-				if pathClear and groundOk then
-					local d = (cand - charPos).Magnitude
-					if d < bestDist then
-						bestDist = d
-						bestPos = cand
-					end
-				end
-			end
-		end
-
-		return bestPos
+		return shortestPos or charPos, nil, badZone, false
 	end
 
 	if bossFx then
@@ -11053,6 +11133,8 @@ do
 		local lastDodgeSamplePos = nil
 		local lastDodgeSampleTime = os.clock()
 		local dodgeStuckAccumTime = 0
+		local lastDangerZones = {}
+		local lastSafeZones = {}
 
 		local function ensureOverrideBound()
 			if not isBound then
@@ -11063,7 +11145,7 @@ do
 						local r = ch and ch:FindFirstChild("HumanoidRootPart")
 						local h = ch and ch:FindFirstChildOfClass("Humanoid")
 						if r and h and h.Health > 0 then
-							-- กรณีที่ 0: วิ่งเก็บหัวกะโหลกบอส (Priority 1 สูงสุดเหนือกว่าทั้ง Safe Zone และ Red Zone)
+							-- กรณีที่ 0: วิ่งเก็บหัวกะโหลกบอส (Priority 0 สูงสุดเหนือกว่าทั้ง Safe Zone และ Red Zone)
 							if HUB.CollectingSkull and (HUB.Config.dungeonCollectSkulls ~= false) and HUB.ActiveSkullPos then
 								local toSkull = Vector3.new(HUB.ActiveSkullPos.X - r.Position.X, 0, HUB.ActiveSkullPos.Z - r.Position.Z)
 								if toSkull.Magnitude > 1.8 then
@@ -11077,6 +11159,7 @@ do
 								else
 									h:Move(Vector3.zero, false)
 								end
+
 							-- กรณีที่ 1: มี Safe Zone (Green Show) บังคับอยู่ในพื้นที่สีเขียวเท่านั้น (Strict Containment Guard)
 							elseif currentSafeZone and currentSafeZone.Center then
 								local toCenter = Vector3.new(currentSafeZone.Center.X - r.Position.X, 0, currentSafeZone.Center.Z - r.Position.Z)
@@ -11092,11 +11175,18 @@ do
 										h:Move(moveDir, false)
 									end
 								else
-									-- ปักหลักอยู่ภายในพื้นที่สีเขียวอย่างปลอดภัยแล้ว: ล็อคการเคลื่อนที่ (Move Vector3.zero) ห้ามเกมพาเดินออก
-									h:Move(Vector3.zero, false)
+									-- อยู่ในพื้นที่สีเขียวอย่างปลอดภัยแล้ว:
+									-- หากตัวละครพยายามจะก้าวออกนอกโซนเขียว ให้เบรกทันที
+									if h.MoveDirection.Magnitude > 0.05 then
+										local nextPos = r.Position + h.MoveDirection * 2.0
+										local nextDist = Vector3.new(nextPos.X - currentSafeZone.Center.X, 0, nextPos.Z - currentSafeZone.Center.Z).Magnitude
+										if nextDist > maxInnerRad then
+											h:Move(Vector3.zero, false)
+										end
+									end
 								end
 
-							-- กรณีที่ 2: สปริ้นต์หลบวงแดงหรือเคลื่อนที่ตาม Waypoints ปกติ
+							-- กรณีที่ 2: กำลังเคลื่อนที่ไปยังจุดหลบ (Moving to Escape Position)
 							elseif currentEscapePos then
 								if currentEscapeWaypoints and #currentEscapeWaypoints > 0 then
 									local curWp = currentEscapeWaypoints[currentEscapeWpIndex]
@@ -11130,6 +11220,18 @@ do
 								else
 									h:Move(Vector3.zero, false)
 								end
+
+							-- กรณีที่ 3: ยืนในจุดปลอดภัยและโจมตีถึงแล้ว (Predictive Boundary Guard ไม่แย่งการควบคุมกับ Auto Play)
+							else
+								if h.MoveDirection.Magnitude > 0.05 then
+									local nextPos = r.Position + h.MoveDirection * 2.2
+									for _, dz in ipairs(lastDangerZones) do
+										if isPointInsideZone(nextPos, dz, 0.8) then
+											h:Move(Vector3.zero, false)
+											break
+										end
+									end
+								end
 							end
 						end
 					end
@@ -11148,6 +11250,8 @@ do
 				currentEscapeWpIndex = 1
 				dodgeStuckAccumTime = 0
 				lastDodgeSamplePos = nil
+				lastDangerZones = {}
+				lastSafeZones = {}
 				if isBound and not (HUB.CollectingSkull and (HUB.Config.dungeonCollectSkulls ~= false) and HUB.ActiveSkullPos) then
 					isBound = false
 					pcall(RunService.UnbindFromRenderStep, RunService, BIND_NAME)
@@ -11188,7 +11292,7 @@ do
 					return
 				end
 
-				-- กรณี 0: วิ่งเก็บหัวกะโหลกบอส (Priority 1 สูงสุดเหนือกว่าทั้ง Safe Zone และ Red Zone)
+				-- กรณี 0: วิ่งเก็บหัวกะโหลกบอส (Priority 0 สูงสุดเหนือกว่าทั้ง Safe Zone และ Red Zone)
 				if (HUB.Config.dungeonCollectSkulls ~= false) and HUB.CollectingSkull and HUB.ActiveSkullPos then
 					ensureOverrideBound()
 					setSprinting(true)
@@ -11374,15 +11478,19 @@ do
 					end
 				end
 
+				lastDangerZones = allDangerZones
+				lastSafeZones = allSafeZones
+
 				HUB.LastDangerCount = #allDangerZones
 				HUB.LastSafeCount = #allSafeZones
 				HUB.IsDodgingInternal = isDodging
 
 				-- =========================================================================
-				-- การควบคุมและหลบหลีก (Shortest Exit & Safe Boss Attack State Machine)
+				-- การควบคุมและหลบหลีก (Attack-Range-Aware Dodge State Machine)
 				-- =========================================================================
 
 				local inDanger, badZone = isCharacterInDanger(root.Position, allDangerZones)
+				local target = getActiveCombatTarget(root.Position)
 
 				-- Real-time Stuck Detection: ตรวจจับหากตัวละครติดกำแพง/สิ่งกีดขวางขณะหลบ
 				if isDodging and currentEscapePos then
@@ -11396,7 +11504,7 @@ do
 							if dodgeStuckAccumTime >= 0.20 then
 								hum.Jump = true
 								if inDanger and badZone then
-									local newEscPos, newEscWps = findEscapePosition(root.Position, allDangerZones, allSafeZones, char)
+									local newEscPos, newEscWps = findEscapePosition(root.Position, allDangerZones, allSafeZones, char, target)
 									if newEscPos then
 										currentEscapePos = newEscPos
 										currentEscapeWaypoints = newEscWps
@@ -11417,7 +11525,7 @@ do
 					dodgeStuckAccumTime = 0
 				end
 
-				-- กรณี 1: มี Safe Zone (Green Show) บังคับต้องเข้าไปอยู่ในพื้นที่สีเขียวเท่านั้น (Mandatory Containment)
+				-- กรณี 1: มี Safe Zone (Green Show) บังคับต้องเข้าไปอยู่ในพื้นที่สีเขียวเท่านั้น (Mandatory Containment Guard)
 				if (HUB.Config.dodgeGreenZones ~= false) and #allSafeZones > 0 then
 					local bestSafe = nil
 					local bestDist = math.huge
@@ -11441,41 +11549,17 @@ do
 						currentSafeZone = bestSafe
 
 						if distToSafe > innerSafeRad then
-							-- ตัวละครยังอยู่นอกโซนเขียว: มุ่งหน้าเข้าสู่ศูนย์กลางพื้นที่สีเขียวทันที
-							currentEscapePos = bestSafe.Center
+							-- ยังอยู่นอกโซนเขียว: ค้นหาตำแหน่งที่ดีที่สุดในโซนเขียว (ที่โจมตีถึง) แล้ววิ่งเข้าทันที
+							local targetSafePos, safeWps = findEscapePosition(root.Position, allDangerZones, allSafeZones, char, target)
+							local targetMovePos = (safeWps and safeWps[1] and safeWps[1].Position) or targetSafePos or bestSafe.Center
+
+							currentEscapePos = targetSafePos or bestSafe.Center
+							currentEscapeWaypoints = safeWps
+							currentEscapeWpIndex = 1
+
 							if not didDodgeCount then
 								HUB.Stats.dodgesPerformed = HUB.Stats.dodgesPerformed + 1
 								didDodgeCount = true
-							end
-
-							-- ตรวจสอบว่าเส้นทางตรงไปยังโซนเขียวติดสิ่งกีดขวางหรือไม่
-							local pathClear = isPathClear(root.Position, bestSafe.Center, char)
-							local targetMovePos = bestSafe.Center
-							if not pathClear then
-								-- มีสิ่งกีดขวาง: ใช้ PathfindingService เพื่อคำนวณ Waypoints อ้อมสิ่งกีดขวางเข้าโซนเขียว
-								if not currentEscapeWaypoints or #currentEscapeWaypoints == 0 then
-									local p = PathfindingService:CreatePath({
-										AgentRadius = 2.4,
-										AgentHeight = 5.0,
-										AgentCanJump = true,
-									})
-									local ok = pcall(function() p:ComputeAsync(root.Position, bestSafe.Center) end)
-									local pts = (ok and p.Status == Enum.PathStatus.Success) and p:GetWaypoints() or nil
-									pcall(p.Destroy, p)
-									if pts and #pts > 1 then
-										currentEscapeWaypoints = {}
-										for i = 2, #pts do
-											table.insert(currentEscapeWaypoints, { Position = pts[i].Position, Action = pts[i].Action })
-										end
-										currentEscapeWpIndex = 1
-									end
-								end
-								if currentEscapeWaypoints and currentEscapeWaypoints[currentEscapeWpIndex] then
-									targetMovePos = currentEscapeWaypoints[currentEscapeWpIndex].Position
-								end
-							else
-								currentEscapeWaypoints = nil
-								currentEscapeWpIndex = 1
 							end
 
 							setSprinting(true)
@@ -11491,29 +11575,43 @@ do
 								HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: ต้องเข้าโซนเขียวเท่านั้น! กำลังสปริ้นต์เข้า green show (ระยะ %.1fm)", distToSafe)
 							end
 						else
-							-- เข้ามาใน Safe Zone แล้ว: ล็อคตำแหน่งให้อยู่ในโซนเขียว 100% ห้ามเดินออกไปหาบอสจนกว่าโซนเขียวจะสลายไป
-							currentEscapePos = bestSafe.Center
+							-- เข้ามาในโซนเขียวอย่างปลอดภัยแล้ว:
+							currentEscapePos = nil
 							currentEscapeWaypoints = nil
 							currentEscapeWpIndex = 1
-							hum:Move(Vector3.zero, false)
-							LocalPlayer:SetAttribute("BotReviveWalk", bestSafe.Center)
-							ensureOverrideBound()
-							if HUB.UI.DodgeStatusLabel then
-								HUB.UI.DodgeStatusLabel.Text = "สถานะ: อยู่ในพื้นที่สีเขียวอย่างปลอดภัย (ล็อคตำแหน่งห้ามออกจนกว่าสกิลจะจบ...)"
+
+							local targetPos = (target and target.PrimaryPart) and target.PrimaryPart.Position or nil
+							local maxReach = target and getPlayerCombatReach(target) or 0
+							local inAttackReach = targetPos and ((Vector3.new(targetPos.X - root.Position.X, 0, targetPos.Z - root.Position.Z)).Magnitude <= maxReach)
+
+							if inAttackReach then
+								-- โจมตีถึงจากในโซนเขียว: ปลด BotReviveWalk ทันทีเพื่อให้ Auto Play โจมตีต่อเนื่อง
+								LocalPlayer:SetAttribute("BotReviveWalk", nil)
+								ensureOverrideBound()
+								if HUB.UI.DodgeStatusLabel then
+									HUB.UI.DodgeStatusLabel.Text = "สถานะ: อยู่ในพื้นที่สีเขียวอย่างปลอดภัย & โจมตีต่อเนื่อง (Auto Play)"
+								end
+							else
+								-- อยู่นอกระยะโจมตี: ล็อคตำแหน่งให้อยู่ในโซนเขียว
+								hum:Move(Vector3.zero, false)
+								LocalPlayer:SetAttribute("BotReviveWalk", bestSafe.Center)
+								ensureOverrideBound()
+								if HUB.UI.DodgeStatusLabel then
+									HUB.UI.DodgeStatusLabel.Text = "สถานะ: อยู่ในพื้นที่สีเขียวอย่างปลอดภัย (ล็อคตำแหน่งห้ามออกจนกว่าสกิลจะจบ...)"
+								end
 							end
 						end
 					else
-						-- ไม่พบ Safe Zone ในระยะ: ล้าง currentSafeZone
 						currentSafeZone = nil
 						if isDodging and not inDanger then
 							cleanupDodge()
 						end
 					end
 
-				-- กรณี 2: ตัวเราอยู่ในโซนแดง (Red Show) จริง ๆ -> วิ่งออกจากโซนแดงในระยะทางที่สั้นที่สุดเสมอตาม Settings!
+				-- กรณี 2: ตัวเราอยู่ในโซนแดง (Red Show) -> วิ่งเข้าจุดที่ "ปลอดภัย + โจมตีถึง + วิ่งสั้นสุด" ทันที!
 				elseif (HUB.Config.dodgeRedZones ~= false) and inDanger and badZone then
 					currentSafeZone = nil
-					local escapePos, escapeWps = findEscapePosition(root.Position, allDangerZones, allSafeZones, char)
+					local escapePos, escapeWps, _, isAttackReachable = findEscapePosition(root.Position, allDangerZones, allSafeZones, char, target)
 					if escapePos then
 						isDodging = true
 						HUB.Dodging = true
@@ -11536,26 +11634,42 @@ do
 						ensureOverrideBound()
 
 						local exitDist = (escapePos - root.Position).Magnitude
-						local userBuf = getDodgeBuffer()
 						if HUB.UI.DodgeStatusLabel then
-							if escapeWps and #escapeWps > 0 then
-								HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: นำทางอ้อมสิ่งกีดขวางพ้นโซนแดง (%d waypoints)!", #escapeWps)
+							if isAttackReachable then
+								HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: สปริ้นต์หลบเข้าจุดโจมตีถึงทันที (วิ่ง %.1fm | โจมตีต่อทันที)!", exitDist)
 							else
-								HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: สปริ้นต์หลบเลี่ยงสิ่งกีดขวางระยะสั้นสุด %.1f studs (เผื่อ %.1f studs)!", exitDist, userBuf)
+								HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: สปริ้นต์หลบพ้นโซนแดงระยะสั้นสุด (วิ่ง %.1fm)!", exitDist)
 							end
 						end
 					end
 
-				-- กรณี 3: ตัวเราอยู่นอกโซนแดงแล้ว แต่สกิลบอสยังคงแสดงผลอยู่ในฉาก (Anti-Suicide & Safe Flank Attack)
+				-- กรณี 3: ตัวเราอยู่นอกโซนแดงแล้ว แต่สกิลบอสยังคงมีอยู่ในฉาก (Anti-Suicide & Attack-Range Cooperation)
 				elseif isDodging and (#allDangerZones > 0) then
 					currentSafeZone = nil
-					local boss = getTargetBossModel()
-					if boss then
-						local safeAttackPos = findSafeBossAttackPosition(root.Position, boss, allDangerZones, char)
-						if safeAttackPos then
-							-- พบบริเวณรอบตัวบอสที่ปลอดภัยจากโซนแดง: เคลื่อนที่ไปยืนตีจากมุมปลอดภัยนั้น!
+					local targetPos = (target and target.PrimaryPart) and target.PrimaryPart.Position or nil
+					local maxReach = target and getPlayerCombatReach(target) or 0
+					local distToTarget = targetPos and (Vector3.new(targetPos.X - root.Position.X, 0, targetPos.Z - root.Position.Z)).Magnitude or math.huge
+					local inAttackReach = (distToTarget <= maxReach) and hasDungeonLos(root.Position, targetPos, char, target)
+
+					if inAttackReach then
+						-- ถึงจุดปลอดภัยและอยู่ในระยะโจมตีถึงแล้ว:
+						-- ปลด BotReviveWalk ทันทีเพื่อให้ Auto Play โจมตีและกดสกิลได้อย่างราบรื่น ไม่แย่งการควบคุม!
+						currentEscapePos = nil
+						currentEscapeWaypoints = nil
+						currentEscapeWpIndex = 1
+						LocalPlayer:SetAttribute("BotReviveWalk", nil)
+						ensureOverrideBound()
+						setSprinting(false)
+
+						if HUB.UI.DodgeStatusLabel then
+							HUB.UI.DodgeStatusLabel.Text = "สถานะ: ยืนในจุดปลอดภัยและโจมตีถึงแล้ว (Auto Play กำลังโจมตีต่อเนื่อง)"
+						end
+					else
+						-- อยู่นอกโซนแดง แต่ยังอยู่นอกระยะโจมตี: ค้นหาว่ามีจุดปลอดภัยที่โจมตีถึงและเดินไปได้หรือไม่
+						local safeAttackPos, attackWps, _, canReach = findEscapePosition(root.Position, allDangerZones, allSafeZones, char, target)
+						if safeAttackPos and canReach then
 							currentEscapePos = safeAttackPos
-							currentEscapeWaypoints = nil
+							currentEscapeWaypoints = attackWps
 							currentEscapeWpIndex = 1
 							setSprinting(isAuto)
 							hum:MoveTo(safeAttackPos)
@@ -11565,34 +11679,23 @@ do
 								LocalPlayer:SetAttribute("BotReviveWalk", safeAttackPos)
 								ensureOverrideBound()
 								if HUB.UI.DodgeStatusLabel then
-									HUB.UI.DodgeStatusLabel.Text = "สถานะ: กำลังอ้อมเข้าตีบอสจากมุมปลอดภัย (Flank Attack)..."
+									HUB.UI.DodgeStatusLabel.Text = "สถานะ: กำลังขยับเข้าจุดปลอดภัยที่โจมตีถึง..."
 								end
 							else
-								-- ถึงจุดตีปลอดภัยแล้ว: ปลด BotReviveWalk เพื่อให้ CombatClient ตีบอสต่อเนื่อง
+								currentEscapePos = nil
 								LocalPlayer:SetAttribute("BotReviveWalk", nil)
-								hum:Move(Vector3.zero, false)
-								if HUB.UI.DodgeStatusLabel then
-									HUB.UI.DodgeStatusLabel.Text = "สถานะ: กำลังโจมตีบอสจากมุมปลอดภัยที่ไม่มีโซนแดง!"
-								end
-							end
-						else
-							-- สกิลบอสคลุมรอบตัว 360 องศา (ไม่มีจุดตีปลอดภัย): ปักหลักอยู่นอกโซนแดงจนกว่าจะระเบิดเสร็จ!
-							if currentEscapePos then
-								hum:Move(Vector3.zero, false)
-								LocalPlayer:SetAttribute("BotReviveWalk", currentEscapePos)
 								ensureOverrideBound()
 							end
-
+						else
+							-- วงแดงคลุมมิดระยะโจมตีทั้งหมด: ปักหลักรอนอกโซนแดงอย่างปลอดภัย
+							hum:Move(Vector3.zero, false)
+							if currentEscapePos then
+								LocalPlayer:SetAttribute("BotReviveWalk", currentEscapePos)
+							end
+							ensureOverrideBound()
 							if HUB.UI.DodgeStatusLabel then
 								HUB.UI.DodgeStatusLabel.Text = "สถานะ: ปักหลักรอนอกโซนแดงอย่างปลอดภัย (รอสกิลระเบิดเสร็จ...)"
 							end
-						end
-					else
-						-- ไม่พบบอสในระยะสู้: ปักหลักรอ
-						if currentEscapePos then
-							hum:Move(Vector3.zero, false)
-							LocalPlayer:SetAttribute("BotReviveWalk", currentEscapePos)
-							ensureOverrideBound()
 						end
 					end
 
