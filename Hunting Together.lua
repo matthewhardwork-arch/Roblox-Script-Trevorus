@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.48)
+-- Hunting Together Hub (v9.49)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.48"
+local VERSION = "9.49"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -331,6 +331,7 @@ local HUB = {
 	Navigating = false,
 	Dodging = false,
 	IsHomeWarping = false,
+	LastHomeWarpTrigger = 0,
 	IsSellingRoutineActive = false,
 	CollectingSkull = false,
 	ActiveSkullPos = nil,
@@ -545,6 +546,27 @@ function HUB.IsDungeonPlace()
 	return false
 end
 
+-- Ground-Truth HomeWarp Active Checker (ตรวจสอบสถานะการร่าย HomeWarp ทุกมิติเพื่อป้องกันการขัดจังหวะ 100%)
+function HUB.IsHomeWarpActive()
+	if HUB.IsHomeWarping == true then
+		return true
+	end
+	if HUB.LastHomeWarpTrigger and (os.clock() - HUB.LastHomeWarpTrigger) < 1.2 then
+		return true
+	end
+	local endsAt = tonumber(LocalPlayer:GetAttribute("HomeWarpEndsAt")) or 0
+	if endsAt > workspace:GetServerTimeNow() then
+		return true
+	end
+	local pg = LocalPlayer:FindFirstChild("PlayerGui")
+	local hwGui = pg and pg:FindFirstChild("LumiHomeWarp")
+	local castBar = hwGui and hwGui:FindFirstChild("CastBar")
+	if castBar and castBar.Visible == true then
+		return true
+	end
+	return false
+end
+
 -- Ground-Truth Auto Play Checker (อ่านสถานะ C4On และ AutoOn ของตัวเกมแท้)
 function HUB.IsGameAutoActive()
 	if LocalPlayer:GetAttribute("AutoOn") == true then
@@ -557,6 +579,11 @@ end
 
 -- สั่งเปิดใช้งาน Auto Play ของเกมต่อเนื่องอย่างน่าเชื่อถือ (Triple-Layer Redundant Fallback)
 function HUB.EnsureGameAutoActive(maxRetries, retryInterval)
+	-- HomeWarp Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากตัวละครกำลังร่าย HomeWarp (ทั้งผู้เล่นกดเองหรือระบบฮับ)
+	if HUB.IsHomeWarpActive and HUB.IsHomeWarpActive() then
+		return false
+	end
+
 	HUB.BotPausingAuto = false
 	HUB.UserDisabledAuto = false
 	if HUB.IsGameAutoActive() then return true end
@@ -565,6 +592,7 @@ function HUB.EnsureGameAutoActive(maxRetries, retryInterval)
 	retryInterval = retryInterval or 0.3
 
 	for attempt = 1, maxRetries do
+		if HUB.IsHomeWarpActive and HUB.IsHomeWarpActive() then return false end
 		if HUB.IsGameAutoActive() then return true end
 
 		-- Layer 1: LumiMenuToggle BindableEvent (ทำงานแบบ Synchronous ทันทีใน CombatClient บรรทัด 1910)
@@ -7237,6 +7265,11 @@ local function isGameAutoActive()
 	return HUB.IsGameAutoActive()
 end
 
+-- ตรวจสอบว่าระบบ HomeWarp กำลังทำงานอยู่หรือไม่ (Ground-Truth)
+local function isHomeWarpActive()
+	return (HUB.IsHomeWarpActive and HUB.IsHomeWarpActive()) == true
+end
+
 -- ตรวจสอบว่าตัวละครกำลังมีมอนสเตอร์เป้าหมายและกำลังต่อสู้อยู่จริงหรือไม่
 local function isPlayerInActiveCombat()
 	local curTarget = LocalPlayer:FindFirstChild("CurrentTarget")
@@ -10237,8 +10270,8 @@ do
 							break
 						end
 
-						-- รักษาสถานะ Auto Play ให้เปิดอยู่เสมอระหว่างสู้บอส
-						if not HUB.IsGameAutoActive() and HUB.EnsureGameAutoActive then
+						-- รักษาสถานะ Auto Play ให้เปิดอยู่เสมอระหว่างสู้บอส (ยกเว้นกำลังร่าย HomeWarp)
+						if not isHomeWarpActive() and not HUB.IsGameAutoActive() and HUB.EnsureGameAutoActive then
 							HUB.EnsureGameAutoActive(3, 0.2)
 						end
 
@@ -10313,8 +10346,8 @@ do
 								HUB.UI.BossStatusLabel.Text = string.format("สถานะ: ปราบ %s สำเร็จ! กำลังเก็บของที่ต้องการ (เหลือ %d ชิ้น)...", targetBoss.name, #desiredDrops)
 							end
 
-							-- รักษาสถานะ Auto Play ให้ทำงาน และเคลียร์เป้าหากเผลอล็อกมอนสเตอร์ลูกน้องขณะยังมีของดรอป
-							if HUB.EnsureGameAutoActive then
+							-- รักษาสถานะ Auto Play ให้ทำงาน และเคลียร์เป้าหากเผลอล็อกมอนสเตอร์ลูกน้องขณะยังมีของดรอป (ยกเว้นกำลังร่าย HomeWarp)
+							if not isHomeWarpActive() and HUB.EnsureGameAutoActive then
 								HUB.EnsureGameAutoActive()
 							end
 							if currentTargetObj and currentTargetObj.Value ~= nil then
@@ -10527,7 +10560,7 @@ do
 				local rt = ch and ch:FindFirstChild("HumanoidRootPart")
 				local hm = ch and ch:FindFirstChildOfClass("Humanoid")
 				if rt and hm and hm.Health > 0 and rt.Position.Z <= -300 then
-					if not HUB.UserDisabledAuto and not HUB.IsGameAutoActive() and HUB.Config.autoResumeGamePlay ~= false then
+					if not isHomeWarpActive() and not HUB.UserDisabledAuto and not HUB.IsGameAutoActive() and HUB.Config.autoResumeGamePlay ~= false then
 						_stuckBossCount = _stuckBossCount + 1
 						if _stuckBossCount >= 3 then -- ยืนนิ่งเกิน 15 วินาที
 							_stuckBossCount = 0
@@ -11111,7 +11144,7 @@ do
 	if bossFx then
 		HUB:AddConnection(bossFx.OnClientEvent:Connect(function(action, monsterId, skillId, zones, duration)
 			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
-			local isHomeWarping = (HUB.IsHomeWarping == true) or (LocalPlayer:GetAttribute("HomeWarpEndsAt") ~= nil and (tonumber(LocalPlayer:GetAttribute("HomeWarpEndsAt")) or 0) > workspace:GetServerTimeNow())
+			local isHomeWarping = (HUB.IsHomeWarpActive and HUB.IsHomeWarpActive()) == true
 			if not HUB.Config.autoDodge or HUB.IsSellingRoutineActive or isHomeWarping then return end
 
 			local key = tostring(monsterId) .. "_" .. tostring(skillId)
@@ -11181,7 +11214,7 @@ do
 			if not isBound then
 				isBound = true
 				pcall(RunService.BindToRenderStep, RunService, BIND_NAME, Enum.RenderPriority.Character.Value + 10, function()
-					local isHomeWarping = (HUB.IsHomeWarping == true) or (LocalPlayer:GetAttribute("HomeWarpEndsAt") ~= nil and (tonumber(LocalPlayer:GetAttribute("HomeWarpEndsAt")) or 0) > workspace:GetServerTimeNow())
+					local isHomeWarping = (HUB.IsHomeWarpActive and HUB.IsHomeWarpActive()) == true
 					if HUB.IsSellingRoutineActive or isHomeWarping then
 						return
 					end
@@ -11314,7 +11347,7 @@ do
 			task.wait(0.04)
 			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
 
-			local isHomeWarping = (HUB.IsHomeWarping == true) or (LocalPlayer:GetAttribute("HomeWarpEndsAt") ~= nil and (tonumber(LocalPlayer:GetAttribute("HomeWarpEndsAt")) or 0) > workspace:GetServerTimeNow())
+			local isHomeWarping = (HUB.IsHomeWarpActive and HUB.IsHomeWarpActive()) == true
 			if not HUB.Config.autoDodge or HUB.IsSellingRoutineActive or isHomeWarping then
 				cleanupDodge()
 				continue
@@ -11878,7 +11911,7 @@ do
 				end
 
 				-- 3. มอนสเตอร์อยู่รอบตัวแต่ Auto Play ดับเอง (Continuous Auto Play Health Monitor)
-				if (HUB.Config.autoResumeGamePlay ~= false) and not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsSellingRoutineActive and not HUB.Navigating then
+				if (HUB.Config.autoResumeGamePlay ~= false) and not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsSellingRoutineActive and not HUB.Navigating and not isHomeWarpActive() then
 					if not HUB.IsGameAutoActive() then
 						if isMonsterWithinRadius(35) then
 							HUB.EnsureGameAutoActive(2, 0.25)
@@ -11890,15 +11923,15 @@ do
 	end)
 
 	-- User Shutoff Guard: หาก Hub เคยเปิด Auto Play ให้ แล้วผู้ใช้กดปิดด้วยตนเอง จะไม่เปิดอัตโนมัติซ้ำอีก
-	-- แต่ถ้าปิดเพราะตัวละครตาย หรือเลือดหมด จะไม่นับว่าผู้ใช้สั่งปิดเองเด็ดขาด 100%
+	-- แต่ถ้าปิดเพราะตัวละครตาย เลือดหมด หรือกำลังร่าย HomeWarp จะไม่นับว่าผู้ใช้สั่งปิดเองเด็ดขาด 100%
 	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("AutoOn"):Connect(function()
 		if LocalPlayer:GetAttribute("AutoOn") ~= true then
-			if HUB.CharacterDying then return end
+			if HUB.CharacterDying or isHomeWarpActive() then return end
 			local ch = LocalPlayer.Character
 			local h = ch and ch:FindFirstChildOfClass("Humanoid")
 			if not h or h.Health <= 0 then return end
 
-			if HUB.BotTurnedOnAuto and not HUB.BotPausingAuto and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.Navigating then
+			if HUB.BotTurnedOnAuto and not HUB.BotPausingAuto and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.Navigating and not isHomeWarpActive() then
 				HUB.UserDisabledAuto = true
 				print("[Hunting Together Hub] ผู้ใช้กดปิด Auto Play ด้วยตนเอง — งดการเปิดอัตโนมัติซ้ำจนกว่าจะกดเปิดในเมนู Hub หรือ execute ใหม่")
 				if HUB.UI.AutoResumeStatusLabel then
@@ -11907,6 +11940,56 @@ do
 			end
 		end
 	end))
+
+	-- HomeWarp Triple-Layer Active Watcher (ดักจับการร่าย HomeWarp ทุกช่องทางเพื่อระงับการแย่งเปิด Auto Play 100%)
+	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("HomeWarpEndsAt"):Connect(function()
+		local endsAt = tonumber(LocalPlayer:GetAttribute("HomeWarpEndsAt")) or 0
+		if endsAt > workspace:GetServerTimeNow() then
+			HUB.BotPausingAuto = true
+			print("[Hunting Together Hub] ตรวจพบการเริ่มร่าย HomeWarp — ล็อคห้ามเปิด Auto Play และระงับงานนำทาง/บอส/ดันเจี้ยน 100%")
+		else
+			task.delay(0.5, function()
+				local curEnds = tonumber(LocalPlayer:GetAttribute("HomeWarpEndsAt")) or 0
+				if curEnds <= workspace:GetServerTimeNow() and not HUB.IsHomeWarping then
+					HUB.BotPausingAuto = false
+				end
+			end)
+		end
+	end))
+
+	-- ดักจับการกดปุ่ม H ของผู้เล่น (Zero-Latency Protection ก่อนเซิร์ฟเวอร์ตอบกลับ)
+	local UserInputService = game:GetService("UserInputService")
+	HUB:AddConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed then return end
+		if input.KeyCode == Enum.KeyCode.H and not UserInputService:GetFocusedTextBox() then
+			HUB.LastHomeWarpTrigger = os.clock()
+			HUB.BotPausingAuto = true
+		end
+	end))
+
+	-- ดักจับการยิงผ่าน LumiMenuToggle BindableEvent
+	local lmt = LocalPlayer:FindFirstChild("LumiMenuToggle")
+	if lmt and lmt:IsA("BindableEvent") then
+		HUB:AddConnection(lmt.Event:Connect(function(arg)
+			if arg == "homeWarp" or arg == "homeWarpMerchant" then
+				HUB.LastHomeWarpTrigger = os.clock()
+				HUB.BotPausingAuto = true
+			end
+		end))
+	end
+
+	-- ดักจับการคลิกปุ่ม HomeWarpButton บน PlayerGui
+	task.spawn(function()
+		local pgui = LocalPlayer:WaitForChild("PlayerGui", 20)
+		local hwScreen = pgui and pgui:WaitForChild("LumiHomeWarp", 15)
+		local hwBtn = hwScreen and hwScreen:WaitForChild("HomeWarpButton", 10)
+		if hwBtn and hwBtn:IsA("TextButton") then
+			HUB:AddConnection(hwBtn.MouseButton1Click:Connect(function()
+				HUB.LastHomeWarpTrigger = os.clock()
+				HUB.BotPausingAuto = true
+			end))
+		end
+	end)
 
 	-- ตรวจสอบและกดเปิด Auto Play อัตโนมัติเมื่อเพิ่ง Execute / Rejoin เข้ามาช่วงแรก (เฉพาะเมื่อพบมอนในระยะ 30 studs)
 	task.spawn(function()
@@ -11931,7 +12014,7 @@ do
 
 			if HUB.UserDisabledAuto then break end
 
-			if HUB.Config.autoResumeGamePlay ~= false then
+			if HUB.Config.autoResumeGamePlay ~= false and not isHomeWarpActive() then
 				if not HUB.IsGameAutoActive() then
 					-- ตรวจสอบเงื่อนไขระยะมอนสเตอร์: ต้องมีมอนสเตอร์อยู่ในระยะ 30 studs เท่านั้น
 					if isMonsterWithinRadius(30) then
@@ -11994,8 +12077,8 @@ do
 				return
 			end
 
-			-- ถ้ามีมอนสเตอร์ใกล้ตัว หรืออยู่ในโซนมอนสเตอร์ ให้เปิด Auto Play ทันที
-			if isMonsterWithinRadius(30) or root.Position.Z <= -300 then
+			-- ถ้ามีมอนสเตอร์ใกล้ตัว หรืออยู่ในโซนมอนสเตอร์ ให้เปิด Auto Play ทันที (ยกเว้นกำลังร่าย HomeWarp)
+			if not isHomeWarpActive() and (isMonsterWithinRadius(30) or root.Position.Z <= -300) then
 				local ok = HUB.EnsureGameAutoActive(5, 0.3)
 				if ok then
 					HUB.BotTurnedOnAuto = true
@@ -12437,6 +12520,12 @@ do
 					local secInfo = (cdText and cdText ~= "") and (" (" .. cdText .. " วิ)") or ""
 					HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอนับถอยหลังเริ่มดันเจี้ยน" .. secInfo .. "..."
 				end
+				task.wait(0.2)
+				continue
+			end
+
+			-- HomeWarp Guard: ถ้ากำลังร่าย HomeWarp ให้หยุดพักการทำงานของ Dungeon Worker และงดเปิด Auto Play ชั่วคราว 100%
+			if HUB.IsHomeWarpActive and HUB.IsHomeWarpActive() then
 				task.wait(0.2)
 				continue
 			end
