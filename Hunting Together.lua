@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.46)
+-- Hunting Together Hub (v9.48)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,14 +11,14 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.46"
+local VERSION = "9.48"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
 
 -- ===== 1. ตรวจสอบสภาพแวดล้อมและความพร้อมของ Client (Auto-Execute Resilience) =====
 local EXEC = { env = getgenv() }
-for _, name in ipairs({ "readfile", "writefile", "isfile", "isfolder", "makefolder", "firesignal", "queue_on_teleport", "hookfunction", "getgc", "getinfo", "getconstants", "getupvalues", "setupvalue", "getconnections", "fireproximityprompt" }) do
+for _, name in ipairs({ "readfile", "writefile", "isfile", "isfolder", "makefolder", "firesignal", "queue_on_teleport", "hookfunction", "hookmetamethod", "getgc", "getinfo", "getconstants", "getupvalues", "setupvalue", "getconnections", "fireproximityprompt" }) do
 	EXEC[name] = rawget(EXEC.env, name) or (debug and debug[name])
 end
 
@@ -475,6 +475,7 @@ function HUB.Unload(self, isShuttingDown, isReloading)
 	self.Alive = false
 	EXEC.env.HuntingTogetherHub_Token = (EXEC.env.HuntingTogetherHub_Token or 0) + 1
 	pcall(RunService.UnbindFromRenderStep, RunService, "HuntingTogetherHub_DodgeOverride")
+	pcall(RunService.UnbindFromRenderStep, RunService, "HuntingTogetherHub_SimulatedManualMove")
 
 	for _, conn in ipairs(self.Connections) do
 		pcall(function() conn:Disconnect() end)
@@ -2093,23 +2094,28 @@ do
 				local eval = ref and ItemTier.Cache[ref]
 
 				if eval and slotBtn and slotBtn:IsA("GuiObject") and slotBtn.Visible then
-					-- ย้ายตำแหน่ง Tier Badge ไปไว้มุมบนซ้าย (AnchorPoint 0,0) ป้องกันการทับปุ่ม UnequipX ของเกม (มุมบนขวา)
-					local bPos = UDim2.new(
-						slotBtn.Position.X.Scale,
-						slotBtn.Position.X.Offset + 3,
-						slotBtn.Position.Y.Scale,
-						slotBtn.Position.Y.Offset + 3
-					)
-					createOrUpdateBadge(overlay, ref, eval, UDim2.fromOffset(28, 20), bPos, Vector2.new(0, 0), badgeName)
+					local slotRightScale = slotBtn.Position.X.Scale + slotBtn.Size.X.Scale
+					local slotRightOffset = slotBtn.Position.X.Offset + slotBtn.Size.X.Offset
+					local slotTopScale = slotBtn.Position.Y.Scale
+					local slotTopOffset = slotBtn.Position.Y.Offset
 
-					-- วาง Star Badge รองลงมาจาก Tier Badge ฝั่งซ้ายบน (ขยายขนาดเป็น 22x22 px ให้คมชัดเห็นชัดเจน)
-					local sPos = UDim2.new(
-						slotBtn.Position.X.Scale,
-						slotBtn.Position.X.Offset + 6,
-						slotBtn.Position.Y.Scale,
-						slotBtn.Position.Y.Offset + 26
+					-- วางตำแหน่ง Tier Badge ไว้มุมบนขวา (AnchorPoint 1,0) เปิดพื้นที่มุมบนซ้ายให้เห็นเลขตีบวก (+Plus) ของเกมชัดเจน
+					local bPos = UDim2.new(
+						slotRightScale,
+						slotRightOffset - 3,
+						slotTopScale,
+						slotTopOffset + 3
 					)
-					createOrUpdateStarBadge(overlay, ref, eval, UDim2.fromOffset(22, 22), sPos, Vector2.new(0, 0), starBadgeName)
+					createOrUpdateBadge(overlay, ref, eval, UDim2.fromOffset(28, 20), bPos, Vector2.new(1, 0), badgeName)
+
+					-- วาง Star Badge รองลงมาจาก Tier Badge ฝั่งขวาบน จัดกึ่งกลางใต้ป้าย Tier พอดี
+					local sPos = UDim2.new(
+						slotRightScale,
+						slotRightOffset - 6,
+						slotTopScale,
+						slotTopOffset + 26
+					)
+					createOrUpdateStarBadge(overlay, ref, eval, UDim2.fromOffset(22, 22), sPos, Vector2.new(1, 0), starBadgeName)
 
 					-- ซ่อนป้าย Count เลขโรมันของเกมในช่องสวมใส่เพื่อไม่ให้ซ้อนทับกัน
 					local gameCount = slotBtn:FindFirstChild("Count", true)
@@ -11762,17 +11768,68 @@ do
 		HUB.Dodging = false
 	end
 
+	-- Metamethod Interceptor: บล็อกคำสั่ง Jump = true บน Humanoid ทุกกรณี (CombatClient Anti-Stuck Jump Elimination 100%)
+	local function installJumpBlockHook()
+		local hookFn = EXEC.hookmetamethod or (hookmetamethod and hookmetamethod)
+		if type(hookFn) == "function" and not rawget(EXEC.env, "HuntingTogetherHub_JumpHookInstalled") then
+			local oldNewIndex
+			oldNewIndex = hookFn(game, "__newindex", function(self, key, value)
+				if (key == "Jump" or key == "jump") and value == true then
+					local ch = LocalPlayer.Character
+					local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+					if self == hum then
+						return -- บล็อกคำสั่งกระโดดของ CombatClient และสคริปต์ภายนอก 100%!
+					end
+				end
+				return oldNewIndex(self, key, value)
+			end)
+			rawset(EXEC.env, "HuntingTogetherHub_JumpHookInstalled", true)
+		end
+	end
+	installJumpBlockHook()
+
 	local function hookHumanoid(char)
 		if not char then return end
 		local hum = char:FindFirstChildOfClass("Humanoid")
+		if not hum then
+			local t0 = os.clock()
+			repeat
+				task.wait(0.1)
+				hum = char:FindFirstChildOfClass("Humanoid")
+			until hum ~= nil or (os.clock() - t0) > 10
+		end
 		if hum then
 			HUB:AddConnection(hum.Died:Connect(onCharacterDied))
-			-- Anti-Ragdoll & Jump Elimination Vaccine (ป้องกันสะดุดล้มและยกเลิก State กระโดด 100%)
-			pcall(function()
-				hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-				hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
-			end)
+			-- Anti-Ragdoll & Jump Elimination Vaccine 5 ชั้น (ป้องกันสะดุดล้มและยกเลิก State ทุกชนิด 100%)
+			local disabledStates = {
+				Enum.HumanoidStateType.Ragdoll,
+				Enum.HumanoidStateType.FallingDown,
+				Enum.HumanoidStateType.Jumping,
+				Enum.HumanoidStateType.PlatformStanding,
+				Enum.HumanoidStateType.Physics,
+			}
+			for _, st in ipairs(disabledStates) do
+				pcall(function() hum:SetStateEnabled(st, false) end)
+			end
+
+			-- Auto-Recovery ในเสี้ยววินาที: ดักจับ StateChanged กู้คืนสถานะเป็น Running ทันทีหากเอนจินพยายามเปลี่ยน State
+			HUB:AddConnection(hum.StateChanged:Connect(function(old, new)
+				if new == Enum.HumanoidStateType.Ragdoll 
+					or new == Enum.HumanoidStateType.FallingDown 
+					or new == Enum.HumanoidStateType.PlatformStanding 
+					or new == Enum.HumanoidStateType.Physics then
+					pcall(function()
+						hum:ChangeState(Enum.HumanoidStateType.Running)
+					end)
+				end
+			end))
+
+			-- Fallback Watcher: บังคับล้าง hum.Jump ทุกเฟรม Heartbeat ป้องกันการรั่วไหล
+			HUB:AddConnection(RunService.Heartbeat:Connect(function()
+				if hum.Jump then
+					hum.Jump = false
+				end
+			end))
 		end
 	end
 
@@ -11798,10 +11855,25 @@ do
 				local char = LocalPlayer.Character
 				local hum = char and char:FindFirstChildOfClass("Humanoid")
 				if hum and hum.Health > 0 then
-					if hum:GetStateEnabled(Enum.HumanoidStateType.Ragdoll) or hum:GetStateEnabled(Enum.HumanoidStateType.FallingDown) or hum:GetStateEnabled(Enum.HumanoidStateType.Jumping) then
-						hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-						hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-						hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+					local disabledStates = {
+						Enum.HumanoidStateType.Ragdoll,
+						Enum.HumanoidStateType.FallingDown,
+						Enum.HumanoidStateType.Jumping,
+						Enum.HumanoidStateType.PlatformStanding,
+						Enum.HumanoidStateType.Physics,
+					}
+					for _, st in ipairs(disabledStates) do
+						pcall(hum.SetStateEnabled, hum, st, false)
+					end
+					local curSt = hum:GetState()
+					if curSt == Enum.HumanoidStateType.Ragdoll 
+						or curSt == Enum.HumanoidStateType.FallingDown 
+						or curSt == Enum.HumanoidStateType.PlatformStanding 
+						or curSt == Enum.HumanoidStateType.Physics then
+						hum:ChangeState(Enum.HumanoidStateType.Running)
+					end
+					if hum.Jump then
+						hum.Jump = false
 					end
 				end
 
@@ -11896,7 +11968,9 @@ do
 			local root = newChar:WaitForChild("HumanoidRootPart", 5)
 			if root then root.Anchored = false end
 		end)
-		hookHumanoid(newChar)
+		task.spawn(function()
+			hookHumanoid(newChar)
+		end)
 
 		if not HUB.Alive or HUB.Config.autoResumeGamePlay == false then return end
 
