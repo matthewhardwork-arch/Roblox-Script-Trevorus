@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.60)
+-- Hunting Together Hub (v9.70)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.60"
+local VERSION = "9.70"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -361,6 +361,10 @@ local HUB = {
 		dungeonAttackBackBoss = true,
 		dungeonLightCandles = true,
 		dungeonCandleOrder = "nearest",
+		dungeonAfterClear = "wait",
+		speedBoostOn = false,
+		speedBoostPct = 15,
+		speedBaseClean = 0,
 		autoJoinDungeon = false,
 		dungeonDifficulty = "easy",
 		dungeonAutoBuyKey = true,
@@ -595,6 +599,8 @@ end
 
 -- สั่งเปิดใช้งาน Auto Play ของเกมต่อเนื่องอย่างน่าเชื่อถือ (Triple-Layer Redundant Fallback)
 function HUB.EnsureGameAutoActive(maxRetries, retryInterval)
+	-- ลำดับความสำคัญสูงสุด: ระหว่างจุดเทียนบอสห้ามเปิด Auto Play แย่งการเดิน
+	if HUB.BrazierPriority then return HUB.IsGameAutoActive() end
 	-- Town Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากตัวละครอยู่ในเมือง (ในเมืองไม่มีมอนสเตอร์ป่าเด็ดขาด มีเฉพาะ TrainingDummy)
 	if HUB.IsInTown and HUB.IsInTown() then
 		return false
@@ -960,6 +966,10 @@ local function saveConfig()
 		dungeonAttackBackBoss = (HUB.Config.dungeonAttackBackBoss ~= false),
 		dungeonLightCandles = (HUB.Config.dungeonLightCandles ~= false),
 		dungeonCandleOrder = HUB.Config.dungeonCandleOrder or "nearest",
+		dungeonAfterClear = HUB.Config.dungeonAfterClear or "wait",
+		speedBoostOn = (HUB.Config.speedBoostOn == true),
+		speedBoostPct = HUB.Config.speedBoostPct or 15,
+		speedBaseClean = HUB.Config.speedBaseClean or 0,
 		autoJoinDungeon = (HUB.Config.autoJoinDungeon == true),
 		dungeonDifficulty = HUB.Config.dungeonDifficulty or "easy",
 		dungeonAutoBuyKey = (HUB.Config.dungeonAutoBuyKey ~= false),
@@ -1002,7 +1012,11 @@ local function loadConfig()
 				if data.dungeonOpenChests ~= nil then HUB.Config.dungeonOpenChests = data.dungeonOpenChests end
 				if data.dungeonAttackBackBoss ~= nil then HUB.Config.dungeonAttackBackBoss = data.dungeonAttackBackBoss end
 				if data.dungeonLightCandles ~= nil then HUB.Config.dungeonLightCandles = data.dungeonLightCandles end
-				if data.dungeonCandleOrder ~= nil then HUB.Config.dungeonCandleOrder = data.dungeonCandleOrder end
+				if data.dungeonCandleOrder ~= nil then HUB.Config.dungeonCandleOrder = (data.dungeonCandleOrder == "farthest") and "farthest" or "nearest" end
+				if data.dungeonAfterClear ~= nil then HUB.Config.dungeonAfterClear = (data.dungeonAfterClear == "replay" or data.dungeonAfterClear == "leave") and data.dungeonAfterClear or "wait" end
+				if data.speedBoostOn ~= nil then HUB.Config.speedBoostOn = data.speedBoostOn == true end
+				if tonumber(data.speedBoostPct) then HUB.Config.speedBoostPct = math.clamp(tonumber(data.speedBoostPct), 0, 30) end
+				if tonumber(data.speedBaseClean) then HUB.Config.speedBaseClean = tonumber(data.speedBaseClean) end
 				if data.autoJoinDungeon ~= nil then HUB.Config.autoJoinDungeon = data.autoJoinDungeon end
 				if data.dungeonDifficulty ~= nil then HUB.Config.dungeonDifficulty = data.dungeonDifficulty end
 				if data.dungeonAutoBuyKey ~= nil then HUB.Config.dungeonAutoBuyKey = data.dungeonAutoBuyKey end
@@ -1123,6 +1137,9 @@ local function loadConfig()
 end
 
 loadConfig()
+-- ค่า nearest/farthest จาก session ก่อนหน้าอาจค้างใน prevConfig จึงแปลงให้เป็น ltr/rtl เสมอหลังโหลด
+HUB.Config.dungeonCandleOrder = (HUB.Config.dungeonCandleOrder == "farthest") and "farthest" or "nearest"
+HUB.Config.dungeonAfterClear = (HUB.Config.dungeonAfterClear == "replay" or HUB.Config.dungeonAfterClear == "leave") and HUB.Config.dungeonAfterClear or "wait"
 
 -- ===== 6.5 ระบบ Item Tier Ranking Engine, Central Registry & Zero-Flicker Reactive Overlay (v5.3) =====
 do
@@ -4150,9 +4167,9 @@ do
 		nil,
 		function(subPanel, card, cStatus, setExpandHeight)
 			if setExpandHeight then
-				setExpandHeight(306, 390)
+				setExpandHeight(360, 444)
 			end
-			subPanel.Size = UDim2.new(1, -24, 0, 306)
+			subPanel.Size = UDim2.new(1, -24, 0, 360)
 
 			-- =========================================================================
 			-- ส่วนที่ 1 (ด้านบน): ตั้งค่าการเข้าดันเจี้ยน (Dungeon Matchmaking Settings)
@@ -4600,6 +4617,60 @@ do
 				if HUB.Config.autoSave then saveConfig() end
 			end))
 
+			-- แถวที่ 10-11: เลือกการทำงานหลังเคลียร์ดันเจี้ยน (After Clear): [Replay] [Leave] [รอให้ดันพาออกเอง] (ปุ่มติ๊กเดี่ยว)
+			local lblAfterClear = Instance.new("TextLabel")
+			lblAfterClear.Size = UDim2.new(1, -20, 0, 22)
+			lblAfterClear.Position = UDim2.new(0, 10, 0, 300)
+			lblAfterClear.BackgroundTransparency = 1
+			lblAfterClear.Text = "🔁 หลังเคลียร์ดันเจี้ยน (After Clear):"
+			lblAfterClear.TextColor3 = Color3.fromRGB(255, 220, 100)
+			lblAfterClear.TextSize = 12
+			lblAfterClear.TextXAlignment = Enum.TextXAlignment.Left
+			applyFont(lblAfterClear, true)
+			lblAfterClear.Parent = subPanel
+
+			local afterClearOptions = {
+				{ key = "replay", label = "🔁 Replay" },
+				{ key = "leave", label = "🚪 Leave" },
+				{ key = "wait", label = "⏳ รอออกเอง" },
+			}
+			local afterClearBtns = {}
+			for i, opt in ipairs(afterClearOptions) do
+				local b = Instance.new("TextButton")
+				b.Size = UDim2.new(1 / 3, -8, 0, 26)
+				b.Position = UDim2.new((i - 1) / 3, 4, 0, 326)
+				b.BorderSizePixel = 0
+				applyFont(b, true)
+				b.TextSize = 11
+				b.Parent = subPanel
+				local bCorner = Instance.new("UICorner")
+				bCorner.CornerRadius = UDim.new(0, 6)
+				bCorner.Parent = b
+				local bStroke = Instance.new("UIStroke")
+				bStroke.Thickness = 1.2
+				bStroke.Parent = b
+				afterClearBtns[i] = { btn = b, stroke = bStroke, key = opt.key, label = opt.label }
+			end
+
+			local function refreshAfterClearRadio()
+				local cur = HUB.Config.dungeonAfterClear or "wait"
+				for _, item in ipairs(afterClearBtns) do
+					local on = (item.key == cur)
+					item.btn.BackgroundColor3 = on and THEME.BtnGreen or THEME.BtnOff
+					item.btn.TextColor3 = on and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+					item.btn.Text = (on and "✓ " or "") .. item.label
+					item.stroke.Color = on and THEME.BtnGreenStroke or THEME.BtnOffStroke
+				end
+			end
+			refreshAfterClearRadio()
+
+			for _, item in ipairs(afterClearBtns) do
+				HUB:AddConnection(item.btn.MouseButton1Click:Connect(function()
+					HUB.Config.dungeonAfterClear = item.key
+					refreshAfterClearRadio()
+					if HUB.Config.autoSave then saveConfig() end
+				end))
+			end
 			refreshAllDungeonSubBtns = function()
 				refreshDiffRadio()
 				refreshKeyBtn()
@@ -4610,6 +4681,7 @@ do
 				refreshBackBossBtn()
 				refreshCandlesBtn()
 				refreshCandleOrderRadio()
+				refreshAfterClearRadio()
 			end
 		end
 	)
@@ -7264,6 +7336,65 @@ do
 		end
 	)
 	HUB.UI.AutoResumeStatusLabel = autoResumeStatus
+		-- Speed Boost: เปิด/ปิด + เลือกเปอร์เซ็นต์โบนัสความเร็ว (ใช้ฐานจาก LumiBaseSpeed ของเกม)
+		local _, speedBoostStatus = createCard(
+			scrollSettings,
+			"Speed Boost (วิ่งเร็วขึ้นตามค่าที่เซิร์ฟเวอร์อนุญาต)",
+			"เพิ่มความเร็วเดินจากค่า LumiBaseSpeed ของเกมตามเปอร์เซ็นต์ที่เลือก ระหว่างกด Sprint เกมจะคุมความเร็วเอง",
+			HUB.Config.speedBoostOn == true,
+			function(enabled, label)
+				HUB.Config.speedBoostOn = enabled
+				label.Text = string.format("สถานะ: %s · โบนัส %d%%", enabled and "เปิดใช้งาน" or "ปิดใช้งาน", HUB.Config.speedBoostPct or 15)
+				if HUB.Config.autoSave then saveConfig() end
+			end,
+			nil,
+			function(subPanel, card, cStatus, setExpandHeight)
+				setExpandHeight(64, 148)
+
+				local lblPct = Instance.new("TextLabel")
+				lblPct.Size = UDim2.new(1, -20, 0, 22)
+				lblPct.Position = UDim2.new(0, 10, 0, 4)
+				lblPct.BackgroundTransparency = 1
+				lblPct.Text = "📈 โบนัสความเร็ว (เลือกเปอร์เซ็นต์):"
+				lblPct.TextColor3 = Color3.fromRGB(255, 220, 100)
+				lblPct.TextSize = 12
+				lblPct.TextXAlignment = Enum.TextXAlignment.Left
+				applyFont(lblPct, true)
+				lblPct.Parent = subPanel
+
+				local pctBtns = {}
+				local function refreshPctBtns()
+					local cur = HUB.Config.speedBoostPct or 15
+					for _, item in ipairs(pctBtns) do
+						local on = (item.pct == cur)
+						item.btn.BackgroundColor3 = on and THEME.BtnGreen or THEME.BtnOff
+						item.btn.TextColor3 = on and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+						item.btn.Text = (on and "✓ " or "") .. tostring(item.pct) .. "%"
+					end
+				end
+
+				for i, pct in ipairs({ 5, 10, 15, 20, 25, 30 }) do
+					local b = Instance.new("TextButton")
+					b.Size = UDim2.new(1 / 6, -6, 0, 26)
+					b.Position = UDim2.new((i - 1) / 6, 3, 0, 32)
+					b.BorderSizePixel = 0
+					applyFont(b, true)
+					b.TextSize = 11
+					b.Parent = subPanel
+					local bCorner = Instance.new("UICorner")
+					bCorner.CornerRadius = UDim.new(0, 6)
+					bCorner.Parent = b
+					pctBtns[i] = { btn = b, pct = pct }
+					HUB:AddConnection(b.MouseButton1Click:Connect(function()
+						HUB.Config.speedBoostPct = pct
+						refreshPctBtns()
+						if HUB.Config.autoSave then saveConfig() end
+					end))
+				end
+				refreshPctBtns()
+			end
+		)
+		HUB.UI.SpeedBoostStatusLabel = speedBoostStatus
 
 	local _, saveStatusLabel = createCard(
 		scrollSettings,
@@ -7477,6 +7608,7 @@ end
 
 -- ควบคุมระบบวิ่ง (Sprint & Stamina) แท้ของเกมผ่าน LumiSprintLock
 local function setSprinting(enabled)
+	if HUB.BrazierSprintHold and enabled ~= true then return end
 	pcall(function()
 		LocalPlayer:SetAttribute("LumiSprintLock", enabled == true)
 	end)
@@ -12342,6 +12474,108 @@ do
 	end))
 end
 
+-- ===== 9.9 Speed Boost + ตัวแก้ฐานความเร็วที่ปนเปื้อน (v9.70) =====
+-- เกมคูณฐานความเร็วด้วย 1.4 ตอน Sprint และบางครั้งค่าคูณนี้ค้างเป็นฐาน (LumiBaseSpeed) หลัง Sprint จบ
+-- สคริปต์จำ "ฐานที่สะอาด" (cleanBase) ไว้ใน config แล้วแก้ค่าที่ปนเปื้อนอัตโนมัติเมื่อไม่ได้ Sprint
+-- Speed Boost ใช้ cleanBase × (1 + %) เป็นเป้าหมาย และไม่แทรกตอน Sprint หรือตอนเกมตั้งค่าความเร็วเป็น 0 (แช่แข็ง/สตัน)
+do
+	local SPRINT_MULT = 1.4
+	local lastApplied = nil -- ค่า WalkSpeed ที่สคริปต์ตั้งล่าสุด ใช้แยกเสียงสะท้อนจาก LumiBaseSpeed
+	local lastAttr = nil -- ค่า LumiBaseSpeed ล่าสุดที่เห็น
+
+	local function readBaseSpeed()
+		local v = tonumber(LocalPlayer:GetAttribute("LumiBaseSpeed"))
+		if v and v > 0 then return v end
+		return nil
+	end
+
+	local function boostFactor()
+		if HUB.Config.speedBoostOn ~= true then return 1 end
+		return 1 + math.clamp(tonumber(HUB.Config.speedBoostPct) or 15, 0, 30) / 100
+	end
+
+	local function sprintActive()
+		return LocalPlayer:GetAttribute("LumiSprinting") == true
+			or LocalPlayer:GetAttribute("LumiSprintLock") == true
+			or HUB.BrazierSprintHold == true
+	end
+
+	-- ฐานที่สะอาด: ค่าความเร็วฐานโดยไม่มีโบนัสของสคริปต์และไม่มีตัวคูณ Sprint
+	local cleanBase = nil
+	local stored = tonumber(HUB.Config.speedBaseClean)
+	if stored and stored > 0 then cleanBase = stored end
+	do
+		local cur = readBaseSpeed()
+		local f0 = boostFactor()
+		lastAttr = cur
+		if cur then
+			if not cleanBase then
+				cleanBase = cur / f0
+			elseif math.abs(cur - cleanBase * f0) < 0.05 or math.abs(cur - cleanBase * f0 * SPRINT_MULT) < 0.05 then
+				-- ตรงกับฐานที่จำไว้ (หรือปนเปื้อน ซึ่งจะถูกแก้ใน Heartbeat)
+			else
+				cleanBase = cur / f0 -- เปลี่ยนจริง (เช่นอุปกรณ์) รับค่าใหม่
+			end
+		end
+	end
+
+	local function persistClean()
+		HUB.Config.speedBaseClean = cleanBase or 0
+		if HUB.Config.autoSave then pcall(saveConfig) end
+	end
+	if cleanBase then persistClean() end
+
+	-- เกมหรือสคริปต์เปลี่ยนความเร็วฐาน: ถ้าค่าใหม่เป็นตัวคูณ Sprint ของค่าที่สะอาด ถือว่าปนเปื้อน ไม่รับเป็นฐาน
+	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("LumiBaseSpeed"):Connect(function()
+		local v = readBaseSpeed()
+		if not v then return end
+		local prev = lastAttr
+		lastAttr = v
+		if lastApplied and math.abs(v - lastApplied) < 0.05 then return end -- เสียงสะท้อนจาก Speed Boost ของเราเอง
+		local f = boostFactor()
+		local ref = cleanBase or prev
+		if ref then
+			local ratio1 = v / ref
+			local ratio2 = v / (ref * f)
+			if math.abs(ratio1 - SPRINT_MULT) < 0.01 or math.abs(ratio2 - SPRINT_MULT) < 0.01 then
+				return -- ปนเปื้อนด้วยตัวคูณ Sprint: เก็บฐานเดิมไว้ แล้วให้ Heartbeat แก้ค่า
+			end
+		end
+		if math.abs((cleanBase or 0) - v) > 0.01 then
+			cleanBase = v
+			persistClean()
+		end
+	end))
+
+	HUB:AddConnection(RunService.Heartbeat:Connect(function()
+		if not cleanBase then return end
+		local ch = LocalPlayer.Character
+		local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+		if not hum or hum.Health <= 0 then return end
+
+		-- ระหว่าง Sprint ให้เกมคุมความเร็วเอง และไม่แตะค่าที่เป็น 0 (แช่แข็ง/สตัน)
+		if sprintActive() then return end
+		local ws = hum.WalkSpeed
+		if ws <= 0.5 then return end
+
+		local f = boostFactor()
+		local target = cleanBase * f
+		if f > 1 then
+			if math.abs(ws - target) > 0.05 then
+				lastApplied = target -- ตั้งค่าก่อนเขียน เพื่อให้เสียงสะท้อนที่มาถึงทีหลังถูกข้าม
+				hum.WalkSpeed = target
+			end
+		else
+			if ws > cleanBase + 0.05 then
+				-- เร็วกว่าฐานที่สะอาด (ปนเปื้อนหรือโบนัสค้าง) ⇒ แก้ให้เท่าฐาน
+				lastApplied = cleanBase
+				hum.WalkSpeed = cleanBase
+			elseif lastApplied and math.abs(ws - cleanBase) < 0.05 then
+				lastApplied = nil
+			end
+		end
+	end))
+end
 -- ===== 10. Anti-AFK Background Worker (Hardware-Level VIM Pulse & Triple Protection) =====
 do
 	local UserInputService = game:GetService("UserInputService")
@@ -12479,13 +12713,6 @@ do
 		return workspace:FindFirstChild("Spawns")
 	end
 
-	local BRAZIER_PADS = {
-		{ id = 1, name = "NW", pos = Vector3.new(-4052, 60.3, -224) },
-		{ id = 2, name = "NE", pos = Vector3.new(-3988, 60.3, -224) },
-		{ id = 3, name = "SW", pos = Vector3.new(-4052, 60.3, -296) },
-		{ id = 4, name = "SE", pos = Vector3.new(-3988, 60.3, -296) },
-	}
-
 	local function isBossChargingBraziers()
 		if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return false, nil end
 		local hw = workspace:FindFirstChild("Halloween")
@@ -12511,132 +12738,6 @@ do
 		return false, boss
 	end
 
-	local activeCandleVisited = {}
-
-	local function findActiveBossCandles(myPos, order, visitedPads)
-		if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return nil end
-		local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-		if not root then return nil end
-		myPos = myPos or root.Position
-		visitedPads = visitedPads or activeCandleVisited
-
-		local active = {}
-		local seen = {}
-
-		-- ลำดับ 1: ค้นหาจาก ProximityPrompt ใน Folder Braziers โดยตรง
-		local hw = workspace:FindFirstChild("Halloween")
-		local braziers = hw and hw:FindFirstChild("Braziers")
-		if braziers then
-			for _, p in ipairs(braziers:GetDescendants()) do
-				if p:IsA("ProximityPrompt") and p.Enabled then
-					local part = p.Parent
-					local pos = nil
-					if part:IsA("BasePart") then
-						pos = part.Position
-					elseif part:IsA("Model") then
-						pos = part.PrimaryPart and part.PrimaryPart.Position or (part:GetPivot() and part:GetPivot().Position)
-					end
-					if pos and not seen[p] then
-						seen[p] = true
-						table.insert(active, { instance = part, prompt = p, position = pos })
-					end
-				end
-			end
-		end
-
-		-- ลำดับ 2: ค้นหาจาก ProximityPrompt ทั่วทั้ง Workspace ที่มีคีย์เวิร์ดเกี่ยวกับเทียน/กระถางไฟ/จุดไฟ (รองรับทั้งภาษาไทยและอังกฤษ)
-		if #active == 0 then
-			local container = hw or workspace
-			for _, p in ipairs(container:GetDescendants()) do
-				if p:IsA("ProximityPrompt") and p.Enabled and not seen[p] then
-					local objText = p.ObjectText:lower()
-					local actText = p.ActionText:lower()
-					local pName = p.Name:lower()
-					local parName = p.Parent and p.Parent.Name:lower() or ""
-					local actTh = tostring(p:GetAttribute("ActionTh") or ""):lower()
-					local objTh = tostring(p:GetAttribute("ObjectTh") or ""):lower()
-					local isCandle = objText:find("brazier") or objText:find("candle") or objText:find("altar")
-						or actText:find("light") or actText:find("ignite") or actText:find("activate")
-						or pName:find("brazier") or pName:find("candle")
-						or parName:find("brazier") or parName:find("candle")
-						or actTh:find("จุด") or objTh:find("กระถาง") or objTh:find("เทียน")
-						or objText:find("จุด") or objText:find("เทียน") or objText:find("กระถาง")
-						or actText:find("จุด")
-
-					-- ตัดกรณีกล่องสมบัติ ประตู หรือหัวกะโหลกออก
-					if isCandle and not objText:find("chest") and not objText:find("door") and not objText:find("skull") and not actText:find("open") and not actText:find("kick") then
-						local part = p.Parent
-						local pos = nil
-						if part:IsA("BasePart") then
-							pos = part.Position
-						elseif part:IsA("Model") then
-							pos = part.PrimaryPart and part.PrimaryPart.Position or (part:GetPivot() and part:GetPivot().Position)
-						end
-						if pos then
-							seen[p] = true
-							table.insert(active, { instance = part, prompt = p, position = pos })
-						end
-					end
-				end
-			end
-		end
-
-		-- ลำดับ 3: หากบอสกำลังชาร์จท่าใหญ่ (Inferno Judgment) แต่ยังไม่พบ Prompt ให้ใช้แท่น Pad ทั้ง 4 จุดเป็นเป้าหมายทันที
-		local isCharging = isBossChargingBraziers()
-		if isCharging then
-			for _, bz in ipairs(BRAZIER_PADS) do
-				if not visitedPads[bz.id] then
-					local nearbyPrompt = nil
-					for _, p in ipairs(workspace:GetDescendants()) do
-						if p:IsA("ProximityPrompt") and p.Enabled then
-							local pPart = p.Parent
-							local pPos = pPart and pPart:IsA("BasePart") and pPart.Position
-							if pPos and (pPos - bz.pos).Magnitude <= 15 then
-								nearbyPrompt = p
-								break
-							end
-						end
-					end
-
-					local alreadyIn = false
-					for _, item in ipairs(active) do
-						if (item.position - bz.pos).Magnitude <= 10 then
-							alreadyIn = true
-							item.padIndex = bz.id
-							break
-						end
-					end
-
-					if not alreadyIn then
-						table.insert(active, {
-							instance = braziers and braziers:FindFirstChild("Pad") or nil,
-							prompt = nearbyPrompt,
-							position = bz.pos,
-							padIndex = bz.id
-						})
-					end
-				end
-			end
-		end
-
-		if #active == 0 then return nil end
-
-		if order == "farthest" then
-			table.sort(active, function(a, b)
-				local da = (Vector3.new(a.position.X - myPos.X, 0, a.position.Z - myPos.Z)).Magnitude
-				local db = (Vector3.new(b.position.X - myPos.X, 0, b.position.Z - myPos.Z)).Magnitude
-				return da > db -- ไกลสุดก่อน
-			end)
-		else
-			table.sort(active, function(a, b)
-				local da = (Vector3.new(a.position.X - myPos.X, 0, a.position.Z - myPos.Z)).Magnitude
-				local db = (Vector3.new(b.position.X - myPos.X, 0, b.position.Z - myPos.Z)).Magnitude
-				return da < db -- ใกล้สุดก่อน
-			end)
-		end
-
-		return active
-	end
 
 	local function findActiveBossSkull()
 		if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return nil end
@@ -12840,6 +12941,287 @@ do
 		end
 	end
 
+	-- ช่วงเวลาที่บอสชาร์จท่า Inferno Judgment: อ่านจาก MonsterData (Config ของ Server) — fallback 8 วิ
+	-- แคชเฉพาะตอนอ่านสำเร็จ (AGENTS §1.6: ห้ามแคชความล้มเหลวถาวร)
+	local brazierWindowCache = nil
+	local function getBrazierWindow()
+		if brazierWindowCache then return brazierWindowCache end
+		local okRead, window = pcall(function()
+			local shared = game:GetService("ReplicatedStorage"):FindFirstChild("Shared")
+			local mdModule = shared and shared:FindFirstChild("MonsterData")
+			local md = mdModule and require(mdModule)
+			local skills = md and md.dgn_crypt_boss and md.dgn_crypt_boss.Skills or {}
+			for _, sk in pairs(skills) do
+				if type(sk) == "table" and sk.Shape == "braziers" and type(sk.Warn) == "number" then
+					return sk.Warn
+				end
+			end
+			return nil
+		end)
+		if okRead and type(window) == "number" then
+			brazierWindowCache = window
+			return window
+		end
+		return 8.0
+	end
+
+	-- ค่าคงที่ของการประสานงานเทียน (ไม่ต้องให้อีกฝั่งมี hub ไม่มีการสื่อสารระหว่างเครื่อง)
+	local BRAZIER_PRESENCE_RANGE = 200 -- ผู้เล่นที่ไกลกว่านี้จากห้องบอสไม่นับ
+	local BRAZIER_CLAIM_RANGE = 150 -- ผู้เล่นที่ไกลกว่านี้จากเทียนไม่ถือว่ากำลังไปเทียนนั้น
+	local BRAZIER_CLAIM_COS = 0.7 -- ทิศการเคลื่อนที่ต้องชี้เข้าหาเทียนประมาณ 45 องศาขึ้นไป
+	local BRAZIER_CLAIM_SPEED = 4 -- ความเร็วขั้นต่ำ (studs/s) ที่นับว่ากำลังเดินไปทางนั้น
+	local BRAZIER_AT_RANGE = 8 -- ยืนใกล้เทียนระยะนี้ ถือว่ากำลังจัดการเทียนนั้น
+	local BRAZIER_CLAIM_RECHECK = 0.25 -- ตรวจว่าเสียเป้าให้ใครทุกกี่วินาทีระหว่างเดิน
+	local BRAZIER_CONTENDER_REFRESH = 0.5 -- รีเฟรชรายชื่อผู้เล่นใกล้เคียงทุกกี่วินาที
+	local BRAZIER_CONFIRM_SEC = 0.35 -- ถ้า Server ยังไม่ดับเทียนภายในเวลานี้ จึงยิงซ้ำ
+	local BRAZIER_MAX_TRIES = 3
+
+	-- ดึงเทียนที่ยังไม่ติดจาก Server โดยตรง: ProximityPrompt.Enabled ใน Workspace.Halloween.Braziers
+	-- เรียงบนแกน X ของแมพเสมอ (ค่าน้อยไปมาก = ซ้ายไปขวา) ไม่ขึ้นกับมุมกล้อง
+	-- Folder มีแค่ไม่กี่ชิ้น จึงไม่สแกน workspace ทั้งแมพซ้ำในลูป (AGENTS §4.2 / §11)
+	local function getBrazierTargets(myPos)
+		local list = {}
+		local hw = workspace:FindFirstChild("Halloween")
+		local folder = hw and hw:FindFirstChild("Braziers")
+		if not folder or not myPos then return list end
+
+		for _, p in ipairs(folder:GetDescendants()) do
+			local part = (p:IsA("ProximityPrompt") and p.Enabled and p.Parent) or nil
+			if part then
+				local pos = nil
+				if part:IsA("BasePart") then
+					pos = part.Position
+				elseif part:IsA("Attachment") then
+					pos = part.WorldPosition
+				elseif part:IsA("Model") then
+					pos = part:GetPivot().Position
+				end
+				if pos then
+					table.insert(list, { prompt = p, part = part, position = pos })
+				end
+			end
+		end
+
+		table.sort(list, function(a, b)
+			if a.position.X ~= b.position.X then return a.position.X < b.position.X end
+			return a.position.Z < b.position.Z
+		end)
+		return list
+	end
+
+	-- ผู้เล่นที่อยู่ใกล้ห้องบอสตอนนี้ (มีตัวละคร เลือดเหลือ) ใช้เป็นรายชื่อคนที่อาจแย่งเทียนได้
+	local function getBrazierContenders(centerPos)
+		local list = {}
+		for _, plr in ipairs(game:GetService("Players"):GetPlayers()) do
+			local ch = plr.Character
+			local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+			local hm = ch and ch:FindFirstChildOfClass("Humanoid")
+			if hrp and hm and hm.Health > 0 and (hrp.Position - centerPos).Magnitude <= BRAZIER_PRESENCE_RANGE then
+				table.insert(list, plr)
+			end
+		end
+		return list
+	end
+
+	-- ผู้เล่นอีกคนกำลังจัดการเทียนนี้อยู่หรือไม่ ดูจากตำแหน่งและทิศการเคลื่อนที่ที่ Server replicate มา
+	-- (ไม่ต้องรู้ว่าเขาใช้ hub หรือไม่ และไม่ต้องรู้ว่าเขาตั้งทิศไว้อย่างไร)
+	local function brazierClaimedBy(plr, pos)
+		local ch = plr.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return false end
+
+		local rp = hrp.Position
+		local toX, toZ = pos.X - rp.X, pos.Z - rp.Z
+		local d = math.sqrt(toX * toX + toZ * toZ)
+		if d <= BRAZIER_AT_RANGE then return true end
+		if d > BRAZIER_CLAIM_RANGE then return false end
+
+		local v = hrp.AssemblyLinearVelocity
+		local speed = math.sqrt(v.X * v.X + v.Z * v.Z)
+		if speed < BRAZIER_CLAIM_SPEED then return false end
+
+		local dot = (v.X * toX + v.Z * toZ) / (speed * d)
+		return dot >= BRAZIER_CLAIM_COS
+	end
+
+	-- ฉันชนะการแย่งเทียนนี้หรือไม่: ถ้ามีคนที่ UserId น้อยกว่าฉันกำลังไปทางนี้ ฉันยอมเปลี่ยนเป้า
+	-- ทุกเครื่องเห็นการเคลื่อนที่เดียวกันจึงตัดสินตรงกัน โดยไม่ต้องคุยกัน
+	local function iWinBrazier(contenders, pos)
+		local myId = LocalPlayer.UserId
+		for _, o in ipairs(contenders) do
+			if o ~= LocalPlayer and o.UserId < myId and brazierClaimedBy(o, pos) then
+				return false
+			end
+		end
+		return true
+	end
+
+	-- เลือกเทียนถัดไปจากตำแหน่งปัจจุบันของตัวละคร: ใกล้สุดก่อน (nearest) หรือไกลสุดก่อน (farthest)
+	-- ข้ามเทียนที่ติดแล้วหรือจัดการแล้ว และข้ามเทียนที่คนอื่นจับจองอยู่
+	-- ถ้าเหลือแต่เทียนที่ถูกจับจองทั้งหมด ให้รับเทียนแรกในลำดับนั้นแบบแข่ง (isRace = true)
+	local function pickBrazierTarget(queue, contenders, handled, order, fromPos)
+		local cands = {}
+		for _, t in ipairs(queue) do
+			if not handled[t.prompt] and t.prompt.Parent and t.prompt.Enabled then
+				t.distXZ = Vector3.new(t.position.X - fromPos.X, 0, t.position.Z - fromPos.Z).Magnitude
+				table.insert(cands, t)
+			end
+		end
+		if #cands == 0 then return nil, true end
+
+		local farFirst = (order == "farthest")
+		table.sort(cands, function(a, b)
+			if farFirst then return a.distXZ > b.distXZ end
+			return a.distXZ < b.distXZ
+		end)
+
+		local firstUnlit = cands[1]
+		for _, t in ipairs(cands) do
+			if iWinBrazier(contenders, t.position) then
+				return t, false
+			end
+		end
+		return firstUnlit, true
+	end
+
+	-- ระหว่างวิ่งจุดเทียน Auto Play ยังเปิดอยู่ แต่จะไม่ยอมให้มันพาตัวละครวิ่งไปหาเป้าหมายที่อยู่ไกล
+	local BRAZIER_TARGET_KEEP = 14 -- เป้าหมายที่ไกลกว่านี้ (studs) จะถูกปล่อยระหว่างวิ่งจุดเทียน
+
+	local function dropFarCombatTarget(root)
+		local char = LocalPlayer.Character
+		for _, holder in ipairs({ LocalPlayer, char }) do
+			local ct = holder and holder:FindFirstChild("CurrentTarget")
+			if ct and ct:IsA("ObjectValue") and ct.Value and ct.Value:IsA("Model") then
+				local tp = ct.Value:GetPivot().Position
+				if (tp - root.Position).Magnitude > BRAZIER_TARGET_KEEP then
+					ct.Value = nil
+				end
+			end
+		end
+	end
+
+	-- Brazier Sprint Engine: ลำดับความสำคัญสูงสุดระหว่างดันเจี้ยน
+	-- พาตัวละครเดินตรงไปยืนในระยะ Prompt แล้วกดทันที และยืนยันทุกเฟรมจาก prompt.Enabled ของ Server
+	-- ระหว่างนี้ Auto Play ยังเปิดอยู่ (EnsureGameAutoActive ถูกล็อกด้วย HUB.BrazierPriority เพื่อไม่ให้ระบบอื่นสลับสถานะ)
+	local function runBrazierSession(root, hum)
+		if not (root and hum) then return end
+		local queue = getBrazierTargets(root.Position)
+		local total = #queue
+		if total == 0 then return end
+
+		local t0 = os.clock()
+		local deadline = t0 + getBrazierWindow() + 1.0
+		local order = (HUB.Config.dungeonCandleOrder == "farthest") and "farthest" or "nearest"
+		local orderTxt = (order == "farthest") and "ไกลสุดก่อน" or "ใกล้สุดก่อน"
+
+		local cx, cz = 0, 0
+		for _, t in ipairs(queue) do
+			cx = cx + t.position.X
+			cz = cz + t.position.Z
+		end
+		local center = Vector3.new(cx / total, root.Position.Y, cz / total)
+		local contenders = getBrazierContenders(center)
+		local contendersAt = os.clock()
+		local lit, failed, yields = 0, 0, 0
+		local handled = {}
+
+		HUB.LightingCandle = true
+		HUB.Dodging = false
+		HUB.BrazierSprintHold = true
+		setSprinting(true)
+
+		while HUB.Alive and HUB.Config.autoPlayDungeon and os.clock() < deadline do
+			if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) or hum.Health <= 0 then break end
+			if os.clock() - contendersAt >= BRAZIER_CONTENDER_REFRESH then
+				contenders = getBrazierContenders(center)
+				contendersAt = os.clock()
+			end
+
+			-- เลือกเทียนถัดไปจากตำแหน่งปัจจุบัน (คำนวณใหม่ทุกครั้งที่เลือก)
+			local target, isRace = pickBrazierTarget(queue, contenders, handled, order, root.Position)
+			if not target then break end -- เทียนติดหมดแล้ว ⇒ จบ session
+
+			local prompt, pos = target.prompt, target.position
+			local firedAt, tries, moveAt = nil, 0, 0
+			local bestDist, bestAt = math.huge, os.clock()
+			local nextRecheck = os.clock() + BRAZIER_CLAIM_RECHECK
+			local yielded = false
+
+			while HUB.Alive and HUB.Config.autoPlayDungeon and prompt.Parent and prompt.Enabled and os.clock() < deadline do
+				RunService.Heartbeat:Wait()
+				if hum.Health <= 0 then break end
+
+				-- กันไม่ให้ Auto Play ดึงตัวละครไปหาเป้าหมายที่อยู่ไกลระหว่างวิ่งจุดเทียน
+				dropFarCombatTarget(root)
+
+				-- ก่อนกดครั้งแรก ตรวจทุก 0.25 วิ: ถ้ามีคนที่ UserId น้อยกว่าเข้ามาจับเทียนนี้ ให้เปลี่ยนเป้า
+				if (not isRace) and firedAt == nil and os.clock() >= nextRecheck then
+					nextRecheck = os.clock() + BRAZIER_CLAIM_RECHECK
+					contenders = getBrazierContenders(center)
+					contendersAt = os.clock()
+					if not iWinBrazier(contenders, pos) then
+						yielded = true
+						break
+					end
+				end
+
+				local rp = root.Position
+				local dist = Vector3.new(pos.X - rp.X, 0, pos.Z - rp.Z).Magnitude
+				local reach = math.max(prompt.MaxActivationDistance - 0.5, 1.5)
+
+				if dist <= reach then
+					-- ถึงระยะแล้ว: เบรกทันทีและยิง Prompt ทันที (ไม่รอให้ลูปหลักวนรอบ)
+					if (not firedAt) or (tries < BRAZIER_MAX_TRIES and os.clock() - firedAt >= BRAZIER_CONFIRM_SEC) then
+						hum:MoveTo(rp)
+						triggerPromptSafe(prompt)
+						firedAt = os.clock()
+						tries = tries + 1
+					elseif os.clock() - firedAt >= BRAZIER_CONFIRM_SEC then
+						break -- ยิงครบ 3 ครั้งแล้ว Server ยังไม่ดับ ⇒ ข้ามเป้านี้
+					end
+				else
+					-- ยังไม่ถึงระยะ: เดินด้วย MoveTo ของ Humanoid เกม (C++) ไม่ใช้ CFrame ต่ออัปเดตทุก 0.2 วิ
+					if os.clock() - moveAt >= 0.2 then
+						moveAt = os.clock()
+						hum:MoveTo(pos)
+					end
+					-- ไม่เข้าใกล้เพิ่มเลยนาน 1.2 วิ (ติดสิ่งกีดขวาง) ⇒ ให้ระบบนำทางของ HUB ช่วยหาทาง
+					if dist < bestDist - 0.5 then
+						bestDist, bestAt = dist, os.clock()
+					elseif os.clock() - bestAt >= 1.2 then
+						HUB.NavigatePath(pos, { stopDistance = math.max(reach - 0.5, 1.0), timeout = 2.5, sprint = true, emulatePlayerMove = true })
+						bestDist, bestAt = math.huge, os.clock()
+					end
+				end
+			end
+
+			if yielded then
+				-- เสียเป้าให้คนอื่น: ไม่นับว่าพลาด และยังไม่ทำเครื่องหมายว่าจัดการแล้ว เพราะเทียนยังไม่ติด
+				yields = yields + 1
+			else
+				handled[prompt] = true
+				if prompt.Parent and not prompt.Enabled then
+					lit = lit + 1
+					HUB.Stats.candlesLit = (HUB.Stats.candlesLit or 0) + 1
+				elseif prompt.Parent then
+					failed = failed + 1
+					HUB.Stats.candlesFailed = (HUB.Stats.candlesFailed or 0) + 1
+				end
+			end
+			if HUB.UI and HUB.UI.DungeonStatusLabel then
+				HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: จุดเทียนบอส %d/%d (%s) 🕯️", lit, total, orderTxt)
+			end
+		end
+
+		HUB.LightingCandle = false
+		HUB.BrazierSprintHold = false
+		setSprinting(false)
+		HUB.Stats.lastCandleSession = { lit = lit, failed = failed, yields = yields, total = total, order = order, contenders = #contenders, elapsed = os.clock() - t0 }
+	end
+
+	HUB.GetBrazierTargets = getBrazierTargets
+	HUB.RunBrazierSession = runBrazierSession
+
 	local function isDungeonStartingCountdown()
 		local pgui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
 		local lumiDungeon = pgui and pgui:FindFirstChild("LumiDungeon")
@@ -12852,6 +13234,39 @@ do
 		return false, nil
 	end
 
+	-- ===== Replay / Leave หลังเคลียร์ดันเจี้ยน (ใช้ข้อมูลและ remote ที่เกมใช้จริง) =====
+	-- DungeonAction: "replayStart" (หัวหน้าขอ replay), "replayVote" (true/false ตอบป๊อปอัป), "leave" (ออกจากดันเจี้ยน)
+	-- Attribute: DungeonReplayLeader (UserId ของหัวหน้า replay), DungeonReturnAt (เวลา Server ที่จะส่งกลับเมือง)
+	-- ปุ่ม REPLAY ของเกมจะแสดงเมื่อเหลือมากกว่า 4 วินาที จึงเผื่อไว้ 0.5 วินาที
+	local REPLAY_MIN_REMAINING = 4.5
+
+	local function fireDungeonAction(action, ...)
+		local remotesFolder = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+		local da = remotesFolder and remotesFolder:FindFirstChild("DungeonAction")
+		if not (da and da:IsA("RemoteEvent")) then return false end
+		local ok = pcall(da.FireServer, da, action, ...)
+		return ok
+	end
+
+	local function getReplayRemaining()
+		local returnAt = tonumber(workspace:GetAttribute("DungeonReturnAt"))
+		if not returnAt then return 0 end
+		return returnAt - workspace:GetServerTimeNow()
+	end
+
+	local function isReplayLeader()
+		return workspace:GetAttribute("DungeonReplayLeader") == LocalPlayer.UserId
+	end
+
+	-- ป๊อปอัป "X wants to replay!" ที่สมาชิกที่ไม่ใช่หัวหน้าเห็น (ต้องทั้ง ScreenGui เปิดอยู่และ ReplayPop มองเห็น)
+	local function getReplayPopup()
+		local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		local gui = pg and pg:FindFirstChild("LumiDungeonReplay")
+		if not (gui and gui.Enabled) then return nil end
+		local pop = gui:FindFirstChild("ReplayPop", true)
+		if pop and pop.Visible then return pop end
+		return nil
+	end
 	local function getDungeonBossDoor()
 		local hw = workspace:FindFirstChild("Halloween")
 		if hw then
@@ -13290,14 +13705,55 @@ do
 			end
 
 			local dState = workspace:GetAttribute("DungeonState")
+			if dState ~= "cleared" then HUB.AfterClear = nil end
 			local dStep = tonumber(workspace:GetAttribute("DungeonStep")) or 1
 			if dStep ~= lastStep then
 				lastStep = dStep
 				visitedSpots = {}
 			end
 
-			-- 2. เมื่อเคลียร์ดันเจี้ยนสำเร็จ (State == 'cleared'): วิ่งไปเปิดกล่องจบดันเจี้ยน BossChest ประจำตัว
+			-- 2. เมื่อเคลียร์ดันเจี้ยนสำเร็จ (State == 'cleared'): ทำตามตัวเลือกหลังเคลียร์ (Replay / Leave / รอให้ดันพาออกเอง)
 			if dState == "cleared" then
+				local afterClear = HUB.Config.dungeonAfterClear or "wait"
+				local ac = HUB.AfterClear
+				if not ac then
+					ac = { replayFired = false, popupVoted = false, leaveFired = false, chestTriggeredAt = nil, startedAt = os.clock() }
+					HUB.AfterClear = ac
+				end
+				local remaining = getReplayRemaining()
+				local statusTxt = nil
+
+				-- A) Replay: หัวหน้าปาร์ตี้ขอ replay ก่อนเวลาส่งกลับ (ทำก่อนเปิดกล่องเพราะเวลามีจำกัด)
+				if afterClear == "replay" then
+					if isReplayLeader() then
+						if not ac.replayFired and remaining > REPLAY_MIN_REMAINING then
+							ac.replayFired = fireDungeonAction("replayStart") and true or false
+							if ac.replayFired then
+								HUB.Stats.replayRequests = (HUB.Stats.replayRequests or 0) + 1
+							end
+						end
+						if ac.replayFired then
+							statusTxt = "สถานะ: ขอ Replay แล้ว รอสมาชิกตอบรับ 🔁"
+						elseif remaining <= REPLAY_MIN_REMAINING then
+							statusTxt = string.format("สถานะ: Replay ไม่ทัน (เหลือ %d วิ) รอให้ดันพาออก ⏳", math.max(0, math.floor(remaining)))
+						end
+					else
+						-- สมาชิกที่ไม่ใช่หัวหน้า: เมื่อมีป๊อปอัปขอ replay ให้ตอบรับ (ทำครั้งเดียวต่อป๊อปอัป)
+						local pop = getReplayPopup()
+						if pop then
+							if not ac.popupVoted then
+								ac.popupVoted = fireDungeonAction("replayVote", true) and true or false
+							end
+							statusTxt = "สถานะ: ตอบรับ Replay ที่หัวหน้าขอแล้ว 🔁"
+						else
+							ac.popupVoted = false
+							statusTxt = "สถานะ: รอหัวหน้าปาร์ตี้ขอ Replay (ถ้าไม่มีจะรอให้ดันพาออก) ⏳"
+						end
+					end
+				end
+
+				-- B) เปิดกล่องจบดันเจี้ยน (ทำคู่ขนานกับ Replay เหมือนเดิม) และบันทึกเวลาที่กดเพื่อใช้ตัดสินว่าเปิดเสร็จ
+				local chestFinished = true
 				if HUB.Config.dungeonAutoExitChest ~= false then
 					local chest = findExitChest()
 					if chest then
@@ -13305,6 +13761,7 @@ do
 						if cPos then
 							local dist = (cPos - root.Position).Magnitude
 							if dist > 6.0 then
+								chestFinished = false
 								if not HUB.Navigating then
 									HUB.NavigatePath(cPos, {
 										stopDistance = 5.0,
@@ -13320,92 +13777,54 @@ do
 								local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
 								if prompt then
 									triggerPromptSafe(prompt)
-									if HUB.UI and HUB.UI.DungeonStatusLabel then
-										HUB.UI.DungeonStatusLabel.Text = "สถานะ: เปิดรับรางวัลกล่องจบสำเร็จ! รอดันเจี้ยนส่งตัวกลับเมือง... 🎁"
-									end
+									if not ac.chestTriggeredAt then ac.chestTriggeredAt = os.clock() end
 								end
+								chestFinished = (ac.chestTriggeredAt ~= nil and os.clock() - ac.chestTriggeredAt >= 2.0)
 							end
-						end
-					else
-						if HUB.UI and HUB.UI.DungeonStatusLabel then
-							HUB.UI.DungeonStatusLabel.Text = "สถานะ: เคลียร์ดันเจี้ยนสำเร็จ! รอดันเจี้ยนส่งตัวกลับเมือง... 🏛️"
 						end
 					end
 				end
-				task.wait(1.0)
+				if os.clock() - ac.startedAt >= 25 then chestFinished = true end
+
+				-- C) Leave: ออกหลังเปิดกล่องเสร็จเท่านั้น (ไม่ออกก่อนเพื่อไม่ให้เสียรางวัลกล่องจบ)
+				if afterClear == "leave" then
+					if chestFinished and not ac.leaveFired then
+						ac.leaveFired = fireDungeonAction("leave") and true or false
+					end
+					if not chestFinished then
+						statusTxt = "สถานะ: กำลังเปิดกล่องจบก่อนออก 🎁"
+					elseif ac.leaveFired then
+						statusTxt = "สถานะ: กำลังออกจากดันเจี้ยนตามที่ตั้งไว้ 🚪"
+					else
+						statusTxt = "สถานะ: เปิดกล่องจบแล้ว กำลังส่งคำสั่งออก 🚪"
+					end
+				end
+
+				-- D) Wait: ไม่ทำอะไรเพิ่ม รอให้เกมส่งกลับเมืองเอง
+				if afterClear == "wait" then
+					statusTxt = "สถานะ: เคลียร์ดันเจี้ยนสำเร็จ! รอดันเจี้ยนส่งตัวกลับเมือง... 🏛️"
+				end
+
+				if HUB.UI and HUB.UI.DungeonStatusLabel and statusTxt then
+					HUB.UI.DungeonStatusLabel.Text = statusTxt
+				end
 				continue
 			end
 
-			-- 2.8 จุดเทียนมินิเกมบอส (Auto Light Candles - Boss Ultimate Charge Mini-Game)
-			local isCharging, bossSK = isBossChargingBraziers()
-			if (HUB.Config.dungeonLightCandles ~= false) and (dStep >= 4) then
-				local candles = findActiveBossCandles(root.Position, HUB.Config.dungeonCandleOrder, activeCandleVisited)
-				if (candles and #candles > 0) or isCharging then
-					HUB.LightingCandle = true
-					if HUB.Dodging then
-						HUB.Dodging = false
-					end
-
-					if candles and #candles > 0 then
-						local targetCandle = candles[1]
-						local cPos = targetCandle.position
-						local cPrompt = targetCandle.prompt or (targetCandle.instance and targetCandle.instance:FindFirstChildWhichIsA("ProximityPrompt", true))
-						local dist = (Vector3.new(cPos.X - root.Position.X, 0, cPos.Z - root.Position.Z)).Magnitude
-						local actDist = cPrompt and (cPrompt.MaxActivationDistance - 0.5) or 6.0
-
-						if dist <= actDist then
-							-- ถึงระยะจุดเทียนแล้ว: หยุดเดิน + ขยับขึ้นแท่น + กดจุดไฟ
-							if hum then
-								hum:Move(Vector3.zero, false)
-								hum:MoveTo(cPos)
-							end
-							if cPrompt then
-								triggerPromptSafe(cPrompt)
-							end
-							if targetCandle.padIndex then
-								activeCandleVisited[targetCandle.padIndex] = tick()
-							end
-							HUB.Stats.candlesLit = (HUB.Stats.candlesLit or 0) + 1
-							if HUB.UI and HUB.UI.DungeonStatusLabel then
-								local orderTxt = (HUB.Config.dungeonCandleOrder == "farthest") and "ไกลสุดก่อน" or "ใกล้สุดก่อน"
-								HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: กำลังจุดเทียนบอส (%s, เหลือ %d จุด)... 🕯️🔥", orderTxt, #candles)
-							end
-							task.wait(0.25)
-						else
-							-- ยังไม่ถึงระยะ: วิ่งเข้าหาเทียนทันที (Priority 0 สปริ้นต์เต็มสปีด ไม่สน AutoDodge)
-							if not HUB.Navigating then
-								if HUB.UI and HUB.UI.DungeonStatusLabel then
-									local orderTxt = (HUB.Config.dungeonCandleOrder == "farthest") and "ไกลสุดก่อน" or "ใกล้สุดก่อน"
-									HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: วิ่งไปจุดเทียนบอส (%s, %d studs, เหลือ %d จุด)... 🕯️", orderTxt, math.floor(dist), #candles)
-								end
-								task.spawn(function()
-									HUB.NavigatePath(cPos, {
-										stopDistance = math.max(2.5, actDist - 1.0),
-										timeout = 6.0,
-										sprint = true,
-										emulatePlayerMove = true,
-										shouldAbort = function()
-											if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
-											if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
-											-- ★ Priority 0: ไม่ยอมให้ HUB.Dodging มาขัดขวางการจุดเทียน
-											if cPrompt and not cPrompt.Enabled then return true end
-											return false
-										end
-									})
-								end)
-							end
-							task.wait(0.2)
-						end
-						continue
-					end
-				else
+			-- 2.8 จุดเทียนมินิเกมบอส (Brazier Sprint Engine v9.66) — ลำดับความสำคัญสูงสุดระหว่างดันเจี้ยน เมื่อมีเทียนให้จุด
+			local candleOn = (HUB.Config.dungeonLightCandles ~= false) and (dStep >= 4)
+			if candleOn and #getBrazierTargets(root.Position) > 0 then
+				HUB.BrazierPriority = true
+				local okBz, errBz = pcall(runBrazierSession, root, hum)
+				HUB.BrazierPriority = false
+				HUB.BrazierSprintHold = false
+				if not okBz then
 					HUB.LightingCandle = false
-					activeCandleVisited = {}
+					warn("[Hunting Together] จุดเทียนบอสผิดพลาด: " .. tostring(errBz))
 				end
-			else
-				HUB.LightingCandle = false
-				activeCandleVisited = {}
+				continue
 			end
+			HUB.LightingCandle = false
 
 			-- 3. ตรวจจับหัวกะโหลกบอสเสก/ดรอป (Priority 1 สูงสุด)
 			if HUB.Config.dungeonCollectSkulls ~= false then
