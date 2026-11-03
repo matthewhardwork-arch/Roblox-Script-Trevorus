@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.42)
+-- Hunting Together Hub (v9.46)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.42"
+local VERSION = "9.46"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -330,6 +330,8 @@ local HUB = {
 	Alive = true,
 	Navigating = false,
 	Dodging = false,
+	IsHomeWarping = false,
+	IsSellingRoutineActive = false,
 	CollectingSkull = false,
 	ActiveSkullPos = nil,
 	FarmAnchor = nil,
@@ -7450,7 +7452,7 @@ local function navigatePath(goalPos, options)
 			local path = PathfindingService:CreatePath({
 				AgentRadius = 2.6,
 				AgentHeight = 5.0,
-				AgentCanJump = true,
+				AgentCanJump = false,
 				WaypointSpacing = 4.0,
 			})
 			local ok = pcall(function() path:ComputeAsync(fP, tP) end)
@@ -7642,9 +7644,6 @@ local function navigatePath(goalPos, options)
 				if xzDist < 2.6 then
 					wpIndex = wpIndex + 1
 					curWp = waypoints[wpIndex]
-					if curWp and curWp.Action == Enum.PathWaypointAction.Jump then
-						hum.Jump = true
-					end
 				else
 					break
 				end
@@ -7685,9 +7684,7 @@ local function navigatePath(goalPos, options)
 			if flatMoved < (expectedDist * 0.22) then
 				stuckAccumTime = stuckAccumTime + dt
 
-				if stuckAccumTime >= 0.40 and stuckAccumTime < 0.80 then
-					hum.Jump = true
-				elseif stuckAccumTime >= 0.80 then
+				if stuckAccumTime >= 0.80 then
 					-- ตรวจสอบระยะห่างจากจุดติดครั้งก่อนหน้า
 					if lastStuckPos and (curPos - lastStuckPos).Magnitude <= 8.5 then
 						consecutiveStuckCount = consecutiveStuckCount + 1
@@ -7719,10 +7716,9 @@ local function navigatePath(goalPos, options)
 					local sideDir = (leftDist >= rightDist) and leftPerp or rightPerp
 
 					if consecutiveStuckCount == 1 then
-						-- Tier 1: ติดครั้งแรก -> Lateral Evasion (ฉากหลบออกด้านข้าง 90 องศา 6 studs + กระโดด ไม่ถอยหลังตรงๆ 180 องศา)
+						-- Tier 1: ติดครั้งแรก -> Lateral Evasion (ฉากหลบออกด้านข้าง 90 องศา 6 studs ไม่ถอยหลังตรงๆ 180 องศา)
 						pcall(function()
 							local evadeTarget = curPos + sideDir * 6.0 - flatDir * 1.5
-							hum.Jump = true
 							if emulatePlayerMove then
 								ensureManualMoveBound()
 								activeMoveDir = (sideDir * 0.85 - flatDir * 0.25).Unit
@@ -7746,7 +7742,6 @@ local function navigatePath(goalPos, options)
 						-- Tier 2 & 3: ติดซ้ำที่จุดเดิม (ครั้งที่ 2 หรือ 3) -> Dynamic 2-Leg Detour Pathfinding (สร้างเส้นทางอ้อมจริง)
 						pcall(function()
 							local evadeTarget = curPos + sideDir * 8.0 - flatDir * 3.0
-							hum.Jump = true
 							if emulatePlayerMove then
 								ensureManualMoveBound()
 								activeMoveDir = (sideDir * 0.85 - flatDir * 0.35).Unit
@@ -8017,7 +8012,9 @@ local function warpToTown(shouldAbortFn)
 	if not root then return false end
 	if root.Position.Z > -200 then return true end
 
-	-- ปิด Auto-Hunt ชั่วคราวและปลดล็อกเป้าหมาย เพื่อไม่ให้ CombatClient ขัดจังหวะการร่าย HomeWarp 5 วินาที
+	HUB.IsHomeWarping = true
+
+	-- 1. ปิด Auto-Hunt ชั่วคราวและปลดล็อกเป้าหมาย เพื่อไม่ให้ CombatClient ขัดจังหวะการร่าย HomeWarp 5 วินาที
 	if HUB.DisableGameAutoPlay then
 		HUB.DisableGameAutoPlay()
 	end
@@ -8025,6 +8022,24 @@ local function warpToTown(shouldAbortFn)
 	if ct and ct:IsA("ObjectValue") then
 		ct.Value = nil
 	end
+
+	-- 2. ตัดขาดและล้างระบบ Dodge/Movement ทั้งหมดโดยเด็ดขาด ป้องกันการขยับระหว่างร่าย
+	if HUB.CleanupDodge then
+		pcall(HUB.CleanupDodge)
+	end
+	HUB.Dodging = false
+	pcall(RunService.UnbindFromRenderStep, RunService, "HuntingTogetherHub_DodgeOverride")
+	pcall(function()
+		LocalPlayer:SetAttribute("BotReviveWalk", nil)
+		LocalPlayer:SetAttribute("LumiSprintLock", nil)
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum:Move(Vector3.zero, false)
+			hum:MoveTo(root.Position)
+		end
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+	end)
 
 	local readyAt = tonumber(LocalPlayer:GetAttribute("HomeWarpReadyAt")) or 0
 	local cdLeft = math.max(0, math.ceil(readyAt - workspace:GetServerTimeNow()))
@@ -8042,28 +8057,35 @@ local function warpToTown(shouldAbortFn)
 	end
 
 	-- ยิง HomeWarp เสมอ (ตามคำสั่งหลัก: ใช้ Home warp เสมอ)
+	local reached = false
 	if cdLeft == 0 and not (shouldAbortFn and shouldAbortFn()) then
 		root.Anchored = true
 		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
 		local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
 		local LumiMenuToggle = LocalPlayer:FindFirstChild("LumiMenuToggle")
 		if homeWarp then
-			homeWarp:FireServer("start")
-		elseif LumiMenuToggle then
+			homeWarp:FireServer("start", "merchant")
+		end
+		if LumiMenuToggle then
 			pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end)
 		end
 		local t0 = os.clock()
-		while os.clock() - t0 < 8.0 and not (shouldAbortFn and shouldAbortFn()) do
+		while os.clock() - t0 < 8.5 and not (shouldAbortFn and shouldAbortFn()) do
 			task.wait(0.1)
 			char = LocalPlayer.Character
 			root = char and char:FindFirstChild("HumanoidRootPart")
 			if not root then break end
 			if root.Position.Z > -200 then
-				root.Anchored = false
-				return true
+				reached = true
+				break
 			end
 		end
 		if root then root.Anchored = false end
+	end
+
+	if reached then
+		HUB.IsHomeWarping = false
+		return true
 	end
 
 	-- Fallback ฉุกเฉิน: หาก HomeWarp ถูกขัดขวาง ให้ใช้เสาวาร์ปใกล้เคียงเพื่อเข้าสู่เมืองหลวง (Town Pillar: 0 Silver)
@@ -8075,11 +8097,13 @@ local function warpToTown(shouldAbortFn)
 				char = LocalPlayer.Character
 				root = char and char:FindFirstChild("HumanoidRootPart")
 				if root and root.Position.Z > -200 then
+					HUB.IsHomeWarping = false
 					return true
 				end
 			end
 		end
 	end
+	HUB.IsHomeWarping = false
 	return false
 end
 HUB.WarpToTown = warpToTown
@@ -9413,7 +9437,17 @@ do
 				if shouldAbort() or not root or not hum or hum.Health <= 0 then return end
 
 				if not reachedTown then
+					task.wait(1.0)
+					if not shouldAbort() and root and hum and hum.Health > 0 and root.Position.Z <= -200 then
+						reachedTown = warpToTown(shouldAbort)
+					end
+				end
+
+				if not reachedTown then
 					warn("[Hunting Together Hub] Auto Sell: วาร์ปเข้าเมืองไม่สำเร็จ — เลื่อนรอบการขายและเปิด Auto Play ต่อ")
+					if HUB.UI.SellStatusLabel then
+						HUB.UI.SellStatusLabel.Text = "สถานะ: วาร์ปเข้าเมืองไม่สำเร็จ — เลื่อนรอบการขาย"
+					end
 					if HUB.EnsureGameAutoActive and root.Position.Z <= -300 then
 						HUB.EnsureGameAutoActive(4, 0.3)
 					end
@@ -10913,7 +10947,7 @@ do
 					local p = PathfindingService:CreatePath({
 						AgentRadius = 2.4,
 						AgentHeight = 5.0,
-						AgentCanJump = true,
+						AgentCanJump = false,
 					})
 					local ok = pcall(function() p:ComputeAsync(charPos, bestSpot) end)
 					local pts = (ok and p.Status == Enum.PathStatus.Success) and p:GetWaypoints() or nil
@@ -11051,7 +11085,7 @@ do
 			local p = PathfindingService:CreatePath({
 				AgentRadius = 2.4,
 				AgentHeight = 5.0,
-				AgentCanJump = true,
+				AgentCanJump = false,
 			})
 			local ok = pcall(function() p:ComputeAsync(charPos, shortestPos) end)
 			local pts = (ok and p.Status == Enum.PathStatus.Success) and p:GetWaypoints() or nil
@@ -11071,7 +11105,8 @@ do
 	if bossFx then
 		HUB:AddConnection(bossFx.OnClientEvent:Connect(function(action, monsterId, skillId, zones, duration)
 			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
-			if not HUB.Config.autoDodge then return end
+			local isHomeWarping = (HUB.IsHomeWarping == true) or (LocalPlayer:GetAttribute("HomeWarpEndsAt") ~= nil and (tonumber(LocalPlayer:GetAttribute("HomeWarpEndsAt")) or 0) > workspace:GetServerTimeNow())
+			if not HUB.Config.autoDodge or HUB.IsSellingRoutineActive or isHomeWarping then return end
 
 			local key = tostring(monsterId) .. "_" .. tostring(skillId)
 			if action == "warn" and type(zones) == "table" then
@@ -11140,6 +11175,10 @@ do
 			if not isBound then
 				isBound = true
 				pcall(RunService.BindToRenderStep, RunService, BIND_NAME, Enum.RenderPriority.Character.Value + 10, function()
+					local isHomeWarping = (HUB.IsHomeWarping == true) or (LocalPlayer:GetAttribute("HomeWarpEndsAt") ~= nil and (tonumber(LocalPlayer:GetAttribute("HomeWarpEndsAt")) or 0) > workspace:GetServerTimeNow())
+					if HUB.IsSellingRoutineActive or isHomeWarping then
+						return
+					end
 					if HUB.Dodging or (HUB.CollectingSkull and (HUB.Config.dungeonCollectSkulls ~= false) and HUB.ActiveSkullPos) then
 						local ch = LocalPlayer.Character
 						local r = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -11195,9 +11234,6 @@ do
 										if distToWp < 2.5 and currentEscapeWpIndex < #currentEscapeWaypoints then
 											currentEscapeWpIndex = currentEscapeWpIndex + 1
 											curWp = currentEscapeWaypoints[currentEscapeWpIndex]
-											if curWp and curWp.Action == Enum.PathWaypointAction.Jump then
-												h.Jump = true
-											end
 										else
 											break
 										end
@@ -11240,40 +11276,40 @@ do
 		end
 
 		local function cleanupDodge()
-			if isDodging or isBound then
-				isDodging = false
-				HUB.Dodging = false
-				didDodgeCount = false
-				currentSafeZone = nil
-				currentEscapePos = nil
-				currentEscapeWaypoints = nil
-				currentEscapeWpIndex = 1
-				dodgeStuckAccumTime = 0
-				lastDodgeSamplePos = nil
-				lastDangerZones = {}
-				lastSafeZones = {}
-				if isBound and not (HUB.CollectingSkull and (HUB.Config.dungeonCollectSkulls ~= false) and HUB.ActiveSkullPos) then
-					isBound = false
-					pcall(RunService.UnbindFromRenderStep, RunService, BIND_NAME)
-				end
-				pcall(function()
-					LocalPlayer:SetAttribute("BotReviveWalk", nil)
-				end)
-				local isAuto = isGameAutoActive()
-				local autoPlayTargeting = (HUB.Config.targetSprint ~= false) and isAuto and isPlayerInActiveCombat()
-				setSprinting(isAuto and autoPlayTargeting)
-				if HUB.UI.DodgeStatusLabel and HUB.Config.autoDodge then
-					local buf = getDodgeBuffer()
-					HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: เปิดใช้งาน · หลบแล้ว %d ครั้ง (ระยะเผื่อ %.1f studs)", HUB.Stats.dodgesPerformed, buf)
-				end
+			isDodging = false
+			HUB.Dodging = false
+			didDodgeCount = false
+			currentSafeZone = nil
+			currentEscapePos = nil
+			currentEscapeWaypoints = nil
+			currentEscapeWpIndex = 1
+			dodgeStuckAccumTime = 0
+			lastDodgeSamplePos = nil
+			lastDangerZones = {}
+			lastSafeZones = {}
+			if isBound and not (HUB.CollectingSkull and (HUB.Config.dungeonCollectSkulls ~= false) and HUB.ActiveSkullPos) then
+				isBound = false
+				pcall(RunService.UnbindFromRenderStep, RunService, BIND_NAME)
+			end
+			pcall(function()
+				LocalPlayer:SetAttribute("BotReviveWalk", nil)
+			end)
+			local isAuto = isGameAutoActive()
+			local autoPlayTargeting = (HUB.Config.targetSprint ~= false) and isAuto and isPlayerInActiveCombat()
+			setSprinting(isAuto and autoPlayTargeting)
+			if HUB.UI.DodgeStatusLabel and HUB.Config.autoDodge then
+				local buf = getDodgeBuffer()
+				HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: เปิดใช้งาน · หลบแล้ว %d ครั้ง (ระยะเผื่อ %.1f studs)", HUB.Stats.dodgesPerformed, buf)
 			end
 		end
+		HUB.CleanupDodge = cleanupDodge
 
 		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
 			task.wait(0.04)
 			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
 
-			if not HUB.Config.autoDodge then
+			local isHomeWarping = (HUB.IsHomeWarping == true) or (LocalPlayer:GetAttribute("HomeWarpEndsAt") ~= nil and (tonumber(LocalPlayer:GetAttribute("HomeWarpEndsAt")) or 0) > workspace:GetServerTimeNow())
+			if not HUB.Config.autoDodge or HUB.IsSellingRoutineActive or isHomeWarping then
 				cleanupDodge()
 				continue
 			end
@@ -11502,7 +11538,6 @@ do
 						if distToGoal > 2.0 and movedDist < 0.6 then
 							dodgeStuckAccumTime = dodgeStuckAccumTime + dtStuck
 							if dodgeStuckAccumTime >= 0.20 then
-								hum.Jump = true
 								if inDanger and badZone then
 									local newEscPos, newEscWps = findEscapePosition(root.Position, allDangerZones, allSafeZones, char, target)
 									if newEscPos then
@@ -11700,10 +11735,8 @@ do
 					end
 
 				else
-					-- โซนแดงทั้งหมดระเบิดเสร็จสิ้นหรือไม่มีอันตรายแล้ว -> ปลดล็อคและคืนการควบคุมให้ Auto Play ตีบอสตามปกติ!
-					if isDodging then
-						cleanupDodge()
-					end
+					-- โซนแดงทั้งหมดระเบิดเสร็จสิ้นหรือไม่มีอันตรายแล้ว -> ปลดล็อคและคืนการควบคุมให้ Auto Play ตีบอสตามปกติ (ล้าง BotReviveWalk เสมอ 100%)
+					cleanupDodge()
 				end
 			end)
 		end
@@ -11734,12 +11767,55 @@ do
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		if hum then
 			HUB:AddConnection(hum.Died:Connect(onCharacterDied))
+			-- Anti-Ragdoll & Jump Elimination Vaccine (ป้องกันสะดุดล้มและยกเลิก State กระโดด 100%)
+			pcall(function()
+				hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+				hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+			end)
 		end
 	end
 
 	if LocalPlayer.Character then
 		hookHumanoid(LocalPlayer.Character)
 	end
+
+	-- Dedicated Self-Healing Watchdog: ป้องกัน Orphaned BotReviveWalk & Auto Play Desync & Anti-Ragdoll
+	task.spawn(function()
+		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
+			task.wait(1.5)
+			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
+
+			pcall(function()
+				-- 1. ตรวจสอบและล้าง BotReviveWalk ตกค้าง หากไม่ได้อยู่ในจังหวะหลบจริงหรือเก็บกะโหลกจริง
+				if not HUB.Dodging and not HUB.CollectingSkull then
+					if LocalPlayer:GetAttribute("BotReviveWalk") ~= nil then
+						LocalPlayer:SetAttribute("BotReviveWalk", nil)
+					end
+				end
+
+				-- 2. Anti-Ragdoll Self-Healing (ป้องกันกรณีตัวเกมพยายามเปิด State กลับมา)
+				local char = LocalPlayer.Character
+				local hum = char and char:FindFirstChildOfClass("Humanoid")
+				if hum and hum.Health > 0 then
+					if hum:GetStateEnabled(Enum.HumanoidStateType.Ragdoll) or hum:GetStateEnabled(Enum.HumanoidStateType.FallingDown) or hum:GetStateEnabled(Enum.HumanoidStateType.Jumping) then
+						hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+						hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+						hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+					end
+				end
+
+				-- 3. มอนสเตอร์อยู่รอบตัวแต่ Auto Play ดับเอง (Continuous Auto Play Health Monitor)
+				if (HUB.Config.autoResumeGamePlay ~= false) and not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsSellingRoutineActive and not HUB.Navigating then
+					if not HUB.IsGameAutoActive() then
+						if isMonsterWithinRadius(35) then
+							HUB.EnsureGameAutoActive(2, 0.25)
+						end
+					end
+				end
+			end)
+		end
+	end)
 
 	-- User Shutoff Guard: หาก Hub เคยเปิด Auto Play ให้ แล้วผู้ใช้กดปิดด้วยตนเอง จะไม่เปิดอัตโนมัติซ้ำอีก
 	-- แต่ถ้าปิดเพราะตัวละครตาย หรือเลือดหมด จะไม่นับว่าผู้ใช้สั่งปิดเองเด็ดขาด 100%
@@ -12006,14 +12082,63 @@ do
 		if not root then return nil end
 
 		local bestSkull = nil
-		local minD = 300
+		local minD = 350
+		local seen = {}
 
+		-- ลำดับ 1: ค้นหาจาก ProximityPrompt ใน workspace โดยตรง (Ground-Truth ชัดเจนที่สุด เช่น DudPumpkin "Kick" "Demon Skull")
+		for _, obj in ipairs(workspace:GetDescendants()) do
+			if obj:IsA("ProximityPrompt") and obj.Enabled then
+				local objText = obj.ObjectText:lower()
+				local actText = obj.ActionText:lower()
+				local pName = obj.Name:lower()
+				local parName = obj.Parent and obj.Parent.Name:lower() or ""
+				local parParName = (obj.Parent and obj.Parent.Parent) and obj.Parent.Parent.Name:lower() or ""
+
+				local isSkullPrompt = objText:find("skull") or actText:find("kick")
+					or parName:find("skull") or parName:find("pumpkin") or parName:find("demon")
+					or parParName:find("skull") or parParName:find("pumpkin") or parParName:find("demon")
+					or pName:find("skull")
+
+				if isSkullPrompt then
+					local part = obj.Parent
+					local pos = nil
+					if part:IsA("BasePart") then
+						pos = part.Position
+					elseif part:IsA("Model") then
+						pos = part.PrimaryPart and part.PrimaryPart.Position or (part:GetPivot() and part:GetPivot().Position)
+					end
+					if pos then
+						seen[part] = true
+						local dist = (pos - root.Position).Magnitude
+						if dist < minD then
+							minD = dist
+							bestSkull = { instance = part, prompt = obj, position = pos, distance = dist }
+						end
+					end
+				end
+			end
+		end
+
+		if bestSkull then
+			return bestSkull
+		end
+
+		-- ลำดับ 2: ค้นหาจาก Objects ใน Workspace / Halloween / Drops
 		local candidates = {}
+		for _, ch in ipairs(workspace:GetChildren()) do
+			if not seen[ch] then
+				local n = ch.Name:lower()
+				if n:find("skull") or n:find("pumpkin") or n:find("demon") or ch:GetAttribute("IsSkull") or ch:GetAttribute("Skull") then
+					table.insert(candidates, ch)
+				end
+			end
+		end
 		local hw = workspace:FindFirstChild("Halloween")
 		if hw then
 			for _, ch in ipairs(hw:GetChildren()) do
-				if ch.Name ~= "_Templates" and ch.Name ~= "Decor" and ch.Name ~= "Throne" and ch.Name ~= "Wall" and ch.Name ~= "Blockers" and ch.Name ~= "Ground" and ch.Name ~= "Atmos" and ch.Name ~= "Spawns" then
-					if ch.Name:lower():find("skull") or ch:GetAttribute("IsSkull") or ch:GetAttribute("Skull") then
+				if not seen[ch] and ch.Name ~= "_Templates" and ch.Name ~= "Decor" and ch.Name ~= "Throne" and ch.Name ~= "Wall" and ch.Name ~= "Blockers" and ch.Name ~= "Ground" and ch.Name ~= "Atmos" and ch.Name ~= "Spawns" and ch.Name ~= "BossDoor" then
+					local n = ch.Name:lower()
+					if n:find("skull") or n:find("pumpkin") or n:find("demon") or ch:GetAttribute("IsSkull") or ch:GetAttribute("Skull") then
 						table.insert(candidates, ch)
 					end
 				end
@@ -12022,16 +12147,19 @@ do
 		local drops = workspace:FindFirstChild("Drops")
 		if drops then
 			for _, ch in ipairs(drops:GetChildren()) do
-				if ch.Name:lower():find("skull") or ch:GetAttribute("IsSkull") or ch:GetAttribute("Skull") then
-					table.insert(candidates, ch)
+				if not seen[ch] then
+					local n = ch.Name:lower()
+					if n:find("skull") or n:find("pumpkin") or ch:GetAttribute("IsSkull") or ch:GetAttribute("Skull") then
+						table.insert(candidates, ch)
+					end
 				end
 			end
 		end
 		for _, ch in ipairs(CollectionService:GetTagged("Skull")) do
-			table.insert(candidates, ch)
+			if not seen[ch] then table.insert(candidates, ch) end
 		end
 		for _, ch in ipairs(CollectionService:GetTagged("BossSkull")) do
-			table.insert(candidates, ch)
+			if not seen[ch] then table.insert(candidates, ch) end
 		end
 
 		for _, item in ipairs(candidates) do
@@ -12040,7 +12168,8 @@ do
 				local dist = (pos - root.Position).Magnitude
 				if dist < minD then
 					minD = dist
-					bestSkull = { instance = item, position = pos, distance = dist }
+					local prompt = item:FindFirstChildWhichIsA("ProximityPrompt", true)
+					bestSkull = { instance = item, prompt = prompt, position = pos, distance = dist }
 				end
 			end
 		end
@@ -12122,6 +12251,78 @@ do
 		return nil
 	end
 
+	local function triggerPromptSafe(prompt)
+		if not prompt then return end
+		local fp = EXEC.fireproximityprompt or rawget(EXEC.env, "fireproximityprompt")
+		if type(fp) == "function" then
+			fp(prompt)
+		else
+			pcall(function()
+				prompt:InputHoldBegin()
+				task.wait(prompt.HoldDuration or 0.2)
+				prompt:InputHoldEnd()
+			end)
+		end
+	end
+
+	local function isDungeonStartingCountdown()
+		local pgui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		local lumiDungeon = pgui and pgui:FindFirstChild("LumiDungeon")
+		local countdownFrame = lumiDungeon and lumiDungeon:FindFirstChild("Frame")
+		if countdownFrame and countdownFrame.Visible == true then
+			local textLabel = countdownFrame:FindFirstChildOfClass("TextLabel")
+			local cdText = textLabel and textLabel.Text or ""
+			return true, cdText
+		end
+		return false, nil
+	end
+
+	local function getDungeonBossDoor()
+		local hw = workspace:FindFirstChild("Halloween")
+		if hw then
+			local bd = hw:FindFirstChild("BossDoor")
+			if bd then return bd end
+		end
+		for _, ch in ipairs(workspace:GetChildren()) do
+			if ch.Name == "BossDoor" then return ch end
+		end
+		return nil
+	end
+
+	local function isBossDoorClosed(bossDoor)
+		if not bossDoor then return false end
+		local slab = bossDoor:FindFirstChild("Slab")
+		if slab and (slab.CanCollide == true or slab.Position.Y > 50) then
+			return true
+		end
+		local prompt = bossDoor:FindFirstChildWhichIsA("ProximityPrompt", true)
+		if prompt and prompt.Enabled then
+			return true
+		end
+		return false
+	end
+
+	local function findBossDoorPrompt(bossDoor)
+		if not bossDoor then return nil end
+		local prompt = bossDoor:FindFirstChildWhichIsA("ProximityPrompt", true)
+		if prompt and prompt.Enabled then
+			return prompt
+		end
+		local slab = bossDoor:FindFirstChild("Slab")
+		local dPos = slab and slab.Position or Vector3.new(-4101.5, 46, -260)
+		for _, obj in ipairs(workspace:GetDescendants()) do
+			if obj:IsA("ProximityPrompt") and obj.Enabled then
+				local pPart = obj.Parent
+				if pPart and pPart:IsA("BasePart") then
+					if (pPart.Position - dPos).Magnitude <= 25 then
+						return obj
+					end
+				end
+			end
+		end
+		return nil
+	end
+
 	task.spawn(function()
 		local lastPatrolTime = 0
 		local visitedSpots = {}
@@ -12149,6 +12350,20 @@ do
 			if not root or not hum or hum.Health <= 0 then
 				visitedSpots = {}
 				task.wait(1.0)
+				continue
+			end
+
+			-- 0. ตรวจสอบเวลานับถอยหลังเริ่มดันเจี้ยน (Start Countdown Guard)
+			local isCounting, cdText = isDungeonStartingCountdown()
+			if isCounting then
+				if hum then
+					hum:Move(Vector3.zero, false)
+				end
+				if HUB.UI and HUB.UI.DungeonStatusLabel then
+					local secInfo = (cdText and cdText ~= "") and (" (" .. cdText .. " วิ)") or ""
+					HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอนับถอยหลังเริ่มดันเจี้ยน" .. secInfo .. "..."
+				end
+				task.wait(0.2)
 				continue
 			end
 
@@ -12187,12 +12402,7 @@ do
 							else
 								local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
 								if prompt then
-									local fp = EXEC.fireproximityprompt or rawget(EXEC.env, "fireproximityprompt")
-									if type(fp) == "function" then
-										fp(prompt)
-									else
-										pcall(function() prompt:InputHoldBegin() task.wait(0.1) prompt:InputHoldEnd() end)
-									end
+									triggerPromptSafe(prompt)
 								end
 							end
 						end
@@ -12202,24 +12412,40 @@ do
 				continue
 			end
 
-			-- 3. ตรวจจับหัวกะโหลกบอสดรอป (Priority 1 สูงสุดเหนือกว่า Auto Dodge)
+			-- 3. ตรวจจับหัวกะโหลกบอสเสก/ดรอป (Priority 1 สูงสุด)
 			if HUB.Config.dungeonCollectSkulls ~= false then
 				local skull = findActiveBossSkull()
 				if skull and skull.instance and skull.position then
 					HUB.CollectingSkull = true
 					HUB.ActiveSkullPos = skull.position
 
+					local prompt = skull.prompt or skull.instance:FindFirstChildWhichIsA("ProximityPrompt", true)
 					local dist = (skull.position - root.Position).Magnitude
-					if dist <= 3.5 then
-						local prompt = skull.instance:FindFirstChildWhichIsA("ProximityPrompt", true)
+					local actDist = prompt and (prompt.MaxActivationDistance - 0.5) or 7.5
+
+					if dist <= actDist then
+						-- ถึงระยะเตะ/กดแล้ว
+						if hum then hum:Move(Vector3.zero, false) end
 						if prompt then
-							local fp = EXEC.fireproximityprompt or rawget(EXEC.env, "fireproximityprompt")
-							if type(fp) == "function" then fp(prompt) end
+							triggerPromptSafe(prompt)
 						end
 						HUB.Stats.skullsCollected = (HUB.Stats.skullsCollected or 0) + 1
 						HUB.CollectingSkull = false
 						HUB.ActiveSkullPos = nil
-						task.wait(0.2)
+						task.wait(0.25)
+					else
+						-- ยังไม่ถึงระยะ: สั่งวิ่งตรงเข้าหากะโหลกทันที (Fallback รองรับกรณีไม่ได้เปิด Auto Dodge)
+						if not HUB.Navigating and not HUB.Dodging then
+							if hum then
+								local dir = Vector3.new(skull.position.X - root.Position.X, 0, skull.position.Z - root.Position.Z)
+								if dir.Magnitude > 0.1 then
+									hum:Move(dir.Unit, false)
+								end
+							end
+						end
+						if HUB.UI and HUB.UI.DungeonStatusLabel then
+							HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: วิ่งไปเตะหัวกะโหลกบอส (%d studs)...", math.floor(dist))
+						end
 					end
 					continue
 				else
@@ -12229,6 +12455,54 @@ do
 			else
 				HUB.CollectingSkull = false
 				HUB.ActiveSkullPos = nil
+			end
+
+			-- 3.5 ตรวจสอบและเปิดประตูห้องบอสอัตโนมัติ (เมื่อ Step >= 4 และประตูยังปิดอยู่)
+			if dStep >= 4 then
+				local bossDoor = getDungeonBossDoor()
+				if bossDoor and isBossDoorClosed(bossDoor) then
+					local doorFront = Vector3.new(-4112, 60, -260) -- จุดยืนหน้าประตูด้านนอก
+					local distToDoor = (doorFront - root.Position).Magnitude
+
+					if distToDoor > 6.0 then
+						if not HUB.Navigating and not HUB.Dodging then
+							if HUB.UI and HUB.UI.DungeonStatusLabel then
+								HUB.UI.DungeonStatusLabel.Text = "สถานะ: กำลังเดินไปเปิดประตูห้องบอส..."
+							end
+							task.spawn(function()
+								HUB.NavigatePath(doorFront, {
+									stopDistance = 4.0,
+									timeout = 15.0,
+									sprint = true,
+									emulatePlayerMove = true,
+									shouldAbort = function()
+										if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
+										if not isBossDoorClosed(bossDoor) then return true end
+										if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
+										return false
+									end
+								})
+							end)
+						end
+						task.wait(0.5)
+						continue
+					else
+						-- ถึงหน้าประตูแล้ว: ค้นหา Prompt และกดเปิด
+						if hum then hum:Move(Vector3.zero, false) end
+						if HUB.UI and HUB.UI.DungeonStatusLabel then
+							HUB.UI.DungeonStatusLabel.Text = "สถานะ: กำลังเปิดประตูห้องบอส..."
+						end
+						local doorPrompt = findBossDoorPrompt(bossDoor)
+						if doorPrompt then
+							triggerPromptSafe(doorPrompt)
+						else
+							local slab = bossDoor:FindFirstChild("Slab")
+							if slab then hum:MoveTo(slab.Position) end
+						end
+						task.wait(0.8)
+						continue
+					end
+				end
 			end
 
 			-- 4. ตรวจสอบมอนสเตอร์มีชีวิตในระยะต่อสู้ (45 studs)
