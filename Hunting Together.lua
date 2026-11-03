@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.49)
+-- Hunting Together Hub (v9.55)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.49"
+local VERSION = "9.55"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -357,6 +357,10 @@ local HUB = {
 		autoPlayDungeon = false,
 		dungeonCollectSkulls = true,
 		dungeonAutoExitChest = true,
+		dungeonOpenChests = true,
+		dungeonAttackBackBoss = true,
+		dungeonLightCandles = true,
+		dungeonCandleOrder = "nearest",
 		autoJoinDungeon = false,
 		dungeonDifficulty = "easy",
 		dungeonAutoBuyKey = true,
@@ -935,6 +939,10 @@ local function saveConfig()
 		autoPlayDungeon = (HUB.Config.autoPlayDungeon == true),
 		dungeonCollectSkulls = (HUB.Config.dungeonCollectSkulls ~= false),
 		dungeonAutoExitChest = (HUB.Config.dungeonAutoExitChest ~= false),
+		dungeonOpenChests = (HUB.Config.dungeonOpenChests ~= false),
+		dungeonAttackBackBoss = (HUB.Config.dungeonAttackBackBoss ~= false),
+		dungeonLightCandles = (HUB.Config.dungeonLightCandles ~= false),
+		dungeonCandleOrder = HUB.Config.dungeonCandleOrder or "nearest",
 		autoJoinDungeon = (HUB.Config.autoJoinDungeon == true),
 		dungeonDifficulty = HUB.Config.dungeonDifficulty or "easy",
 		dungeonAutoBuyKey = (HUB.Config.dungeonAutoBuyKey ~= false),
@@ -974,6 +982,10 @@ local function loadConfig()
 				if data.autoPlayDungeon ~= nil then HUB.Config.autoPlayDungeon = data.autoPlayDungeon end
 				if data.dungeonCollectSkulls ~= nil then HUB.Config.dungeonCollectSkulls = data.dungeonCollectSkulls end
 				if data.dungeonAutoExitChest ~= nil then HUB.Config.dungeonAutoExitChest = data.dungeonAutoExitChest end
+				if data.dungeonOpenChests ~= nil then HUB.Config.dungeonOpenChests = data.dungeonOpenChests end
+				if data.dungeonAttackBackBoss ~= nil then HUB.Config.dungeonAttackBackBoss = data.dungeonAttackBackBoss end
+				if data.dungeonLightCandles ~= nil then HUB.Config.dungeonLightCandles = data.dungeonLightCandles end
+				if data.dungeonCandleOrder ~= nil then HUB.Config.dungeonCandleOrder = data.dungeonCandleOrder end
 				if data.autoJoinDungeon ~= nil then HUB.Config.autoJoinDungeon = data.autoJoinDungeon end
 				if data.dungeonDifficulty ~= nil then HUB.Config.dungeonDifficulty = data.dungeonDifficulty end
 				if data.dungeonAutoBuyKey ~= nil then HUB.Config.dungeonAutoBuyKey = data.dungeonAutoBuyKey end
@@ -4121,9 +4133,9 @@ do
 		nil,
 		function(subPanel, card, cStatus, setExpandHeight)
 			if setExpandHeight then
-				setExpandHeight(182, 266)
+				setExpandHeight(306, 390)
 			end
-			subPanel.Size = UDim2.new(1, -24, 0, 182)
+			subPanel.Size = UDim2.new(1, -24, 0, 306)
 
 			-- =========================================================================
 			-- ส่วนที่ 1 (ด้านบน): ตั้งค่าการเข้าดันเจี้ยน (Dungeon Matchmaking Settings)
@@ -4382,12 +4394,205 @@ do
 				if HUB.Config.autoSave then saveConfig() end
 			end))
 
+			-- แถวที่ 6: วิ่งเปิดกล่องลับตามทาง (Pathway Secret Chests)
+			local lblSecret = Instance.new("TextLabel")
+			lblSecret.Size = UDim2.new(1, -165, 0, 26)
+			lblSecret.Position = UDim2.new(0, 10, 0, 180)
+			lblSecret.BackgroundTransparency = 1
+			lblSecret.Text = "🎁 วิ่งเปิดกล่องลับตามทาง (Secret Chests):"
+			lblSecret.TextColor3 = Color3.fromRGB(255, 220, 100)
+			lblSecret.TextSize = 12
+			lblSecret.TextXAlignment = Enum.TextXAlignment.Left
+			applyFont(lblSecret, true)
+			lblSecret.Parent = subPanel
+
+			local secretToggleBtn = Instance.new("TextButton")
+			secretToggleBtn.Size = UDim2.new(0, 145, 0, 26)
+			secretToggleBtn.Position = UDim2.new(1, -155, 0, 180)
+			secretToggleBtn.BorderSizePixel = 0
+			applyFont(secretToggleBtn, true)
+			secretToggleBtn.TextSize = 12
+			secretToggleBtn.Parent = subPanel
+			local stbCorner = Instance.new("UICorner")
+			stbCorner.CornerRadius = UDim.new(0, 6)
+			stbCorner.Parent = secretToggleBtn
+
+			local function refreshSecretBtn()
+				local on = (HUB.Config.dungeonOpenChests ~= false)
+				secretToggleBtn.BackgroundColor3 = on and THEME.BtnGreen or THEME.BtnOff
+				secretToggleBtn.TextColor3 = on and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+				secretToggleBtn.Text = on and "เปิดใช้งาน (ON)" or "ปิดใช้งาน (OFF)"
+			end
+			refreshSecretBtn()
+
+			HUB:AddConnection(secretToggleBtn.MouseButton1Click:Connect(function()
+				HUB.Config.dungeonOpenChests = not (HUB.Config.dungeonOpenChests ~= false)
+				refreshSecretBtn()
+				if HUB.Config.autoSave then saveConfig() end
+			end))
+
+			-- แถวที่ 7: พยายามโจมตีด้านหลังบอส (Attack Back Boss)
+			local lblBackBoss = Instance.new("TextLabel")
+			lblBackBoss.Size = UDim2.new(1, -165, 0, 26)
+			lblBackBoss.Position = UDim2.new(0, 10, 0, 210)
+			lblBackBoss.BackgroundTransparency = 1
+			lblBackBoss.Text = "🗡️ โจมตีด้านหลังบอส (Attack Back Boss):"
+			lblBackBoss.TextColor3 = Color3.fromRGB(255, 220, 100)
+			lblBackBoss.TextSize = 12
+			lblBackBoss.TextXAlignment = Enum.TextXAlignment.Left
+			applyFont(lblBackBoss, true)
+			lblBackBoss.Parent = subPanel
+
+			local backBossToggleBtn = Instance.new("TextButton")
+			backBossToggleBtn.Size = UDim2.new(0, 145, 0, 26)
+			backBossToggleBtn.Position = UDim2.new(1, -155, 0, 210)
+			backBossToggleBtn.BorderSizePixel = 0
+			applyFont(backBossToggleBtn, true)
+			backBossToggleBtn.TextSize = 12
+			backBossToggleBtn.Parent = subPanel
+			local bbtbCorner = Instance.new("UICorner")
+			bbtbCorner.CornerRadius = UDim.new(0, 6)
+			bbtbCorner.Parent = backBossToggleBtn
+
+			local function refreshBackBossBtn()
+				local on = (HUB.Config.dungeonAttackBackBoss ~= false)
+				backBossToggleBtn.BackgroundColor3 = on and THEME.BtnGreen or THEME.BtnOff
+				backBossToggleBtn.TextColor3 = on and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+				backBossToggleBtn.Text = on and "เปิดใช้งาน (ON)" or "ปิดใช้งาน (OFF)"
+			end
+			refreshBackBossBtn()
+
+			HUB:AddConnection(backBossToggleBtn.MouseButton1Click:Connect(function()
+				HUB.Config.dungeonAttackBackBoss = not (HUB.Config.dungeonAttackBackBoss ~= false)
+				refreshBackBossBtn()
+				if HUB.Config.autoSave then saveConfig() end
+			end))
+
+			-- แถวที่ 8: จุดเทียนมินิเกมบอสอัตโนมัติ (Auto Light Candles)
+			local lblCandles = Instance.new("TextLabel")
+			lblCandles.Size = UDim2.new(1, -165, 0, 26)
+			lblCandles.Position = UDim2.new(0, 10, 0, 240)
+			lblCandles.BackgroundTransparency = 1
+			lblCandles.Text = "🕯️ จุดเทียนบอส (Auto Light Candles):"
+			lblCandles.TextColor3 = Color3.fromRGB(255, 220, 100)
+			lblCandles.TextSize = 12
+			lblCandles.TextXAlignment = Enum.TextXAlignment.Left
+			applyFont(lblCandles, true)
+			lblCandles.Parent = subPanel
+
+			local candlesToggleBtn = Instance.new("TextButton")
+			candlesToggleBtn.Size = UDim2.new(0, 145, 0, 26)
+			candlesToggleBtn.Position = UDim2.new(1, -155, 0, 240)
+			candlesToggleBtn.BorderSizePixel = 0
+			applyFont(candlesToggleBtn, true)
+			candlesToggleBtn.TextSize = 12
+			candlesToggleBtn.Parent = subPanel
+			local ctb2Corner = Instance.new("UICorner")
+			ctb2Corner.CornerRadius = UDim.new(0, 6)
+			ctb2Corner.Parent = candlesToggleBtn
+
+			local function refreshCandlesBtn()
+				local on = (HUB.Config.dungeonLightCandles ~= false)
+				candlesToggleBtn.BackgroundColor3 = on and THEME.BtnGreen or THEME.BtnOff
+				candlesToggleBtn.TextColor3 = on and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+				candlesToggleBtn.Text = on and "เปิดใช้งาน (ON)" or "ปิดใช้งาน (OFF)"
+			end
+			refreshCandlesBtn()
+
+			HUB:AddConnection(candlesToggleBtn.MouseButton1Click:Connect(function()
+				HUB.Config.dungeonLightCandles = not (HUB.Config.dungeonLightCandles ~= false)
+				refreshCandlesBtn()
+				if HUB.Config.autoSave then saveConfig() end
+			end))
+
+			-- แถวที่ 9: เลือกลำดับการจุดเทียน (Candle Priority): [ใกล้สุดก่อน] [ไกลสุดก่อน] (ปุ่มติ๊กคู่)
+			local lblCandleOrder = Instance.new("TextLabel")
+			lblCandleOrder.Size = UDim2.new(1, -165, 0, 26)
+			lblCandleOrder.Position = UDim2.new(0, 10, 0, 270)
+			lblCandleOrder.BackgroundTransparency = 1
+			lblCandleOrder.Text = "📍 ลำดับการจุดเทียน (Priority):"
+			lblCandleOrder.TextColor3 = Color3.fromRGB(255, 220, 100)
+			lblCandleOrder.TextSize = 12
+			lblCandleOrder.TextXAlignment = Enum.TextXAlignment.Left
+			applyFont(lblCandleOrder, true)
+			lblCandleOrder.Parent = subPanel
+
+			local btnNear = Instance.new("TextButton")
+			btnNear.Size = UDim2.new(0, 70, 0, 26)
+			btnNear.Position = UDim2.new(1, -155, 0, 270)
+			btnNear.BorderSizePixel = 0
+			applyFont(btnNear, true)
+			btnNear.TextSize = 11
+			btnNear.Parent = subPanel
+			local bnearCorner = Instance.new("UICorner")
+			bnearCorner.CornerRadius = UDim.new(0, 6)
+			bnearCorner.Parent = btnNear
+			local bnearStroke = Instance.new("UIStroke")
+			bnearStroke.Thickness = 1.2
+			bnearStroke.Parent = btnNear
+
+			local btnFar = Instance.new("TextButton")
+			btnFar.Size = UDim2.new(0, 70, 0, 26)
+			btnFar.Position = UDim2.new(1, -80, 0, 270)
+			btnFar.BorderSizePixel = 0
+			applyFont(btnFar, true)
+			btnFar.TextSize = 11
+			btnFar.Parent = subPanel
+			local bfarCorner = Instance.new("UICorner")
+			bfarCorner.CornerRadius = UDim.new(0, 6)
+			bfarCorner.Parent = btnFar
+			local bfarStroke = Instance.new("UIStroke")
+			bfarStroke.Thickness = 1.2
+			bfarStroke.Parent = btnFar
+
+			local function refreshCandleOrderRadio()
+				local isFar = (HUB.Config.dungeonCandleOrder == "farthest")
+				if isFar then
+					btnFar.BackgroundColor3 = THEME.BtnOrange
+					btnFar.TextColor3 = Color3.fromRGB(255, 255, 255)
+					btnFar.Text = "✓ ไกลสุด"
+					bfarStroke.Color = Color3.fromRGB(255, 200, 120)
+
+					btnNear.BackgroundColor3 = THEME.BtnOff
+					btnNear.TextColor3 = THEME.TextDark
+					btnNear.Text = "ใกล้สุด"
+					bnearStroke.Color = THEME.BtnOffStroke
+				else
+					btnNear.BackgroundColor3 = THEME.BtnGreen
+					btnNear.TextColor3 = Color3.fromRGB(255, 255, 255)
+					btnNear.Text = "✓ ใกล้สุด"
+					bnearStroke.Color = THEME.BtnGreenStroke
+
+					btnFar.BackgroundColor3 = THEME.BtnOff
+					btnFar.TextColor3 = THEME.TextDark
+					btnFar.Text = "ไกลสุด"
+					bfarStroke.Color = THEME.BtnOffStroke
+				end
+			end
+			refreshCandleOrderRadio()
+
+			HUB:AddConnection(btnNear.MouseButton1Click:Connect(function()
+				HUB.Config.dungeonCandleOrder = "nearest"
+				refreshCandleOrderRadio()
+				if HUB.Config.autoSave then saveConfig() end
+			end))
+
+			HUB:AddConnection(btnFar.MouseButton1Click:Connect(function()
+				HUB.Config.dungeonCandleOrder = "farthest"
+				refreshCandleOrderRadio()
+				if HUB.Config.autoSave then saveConfig() end
+			end))
+
 			refreshAllDungeonSubBtns = function()
 				refreshDiffRadio()
 				refreshKeyBtn()
 				refreshReadyBtn()
 				refreshSkullBtn()
 				refreshChestBtn()
+				refreshSecretBtn()
+				refreshBackBossBtn()
+				refreshCandlesBtn()
+				refreshCandleOrderRadio()
 			end
 		end
 	)
@@ -10902,6 +11107,7 @@ do
 		local maxReach = math.max(4.5, atkRange + monRad - stopInside - 0.5)
 		return maxReach, atkRange, monRad
 	end
+	HUB.GetPlayerReach = getPlayerCombatReach
 
 	-- ตรวจสอบว่ามีกำแพง DungeonLosWall บังแนวสายตาระหว่างผู้เล่นกับเป้าหมายหรือไม่ (เฉพาะในดันเจี้ยน)
 	local function hasDungeonLos(fromPos, targetPos, character, targetMonster)
@@ -12233,6 +12439,87 @@ do
 		return workspace:FindFirstChild("Spawns")
 	end
 
+	local function findActiveBossCandles(myPos, order)
+		if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return nil end
+		local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+		if not root then return nil end
+		myPos = myPos or root.Position
+
+		local active = {}
+		local seen = {}
+
+		-- ลำดับ 1: ค้นหาจาก ProximityPrompt ใน Folder Braziers โดยตรง
+		local hw = workspace:FindFirstChild("Halloween")
+		local braziers = hw and hw:FindFirstChild("Braziers")
+		if braziers then
+			for _, p in ipairs(braziers:GetDescendants()) do
+				if p:IsA("ProximityPrompt") and p.Enabled then
+					local part = p.Parent
+					local pos = nil
+					if part:IsA("BasePart") then
+						pos = part.Position
+					elseif part:IsA("Model") then
+						pos = part.PrimaryPart and part.PrimaryPart.Position or (part:GetPivot() and part:GetPivot().Position)
+					end
+					if pos and not seen[p] then
+						seen[p] = true
+						table.insert(active, { instance = part, prompt = p, position = pos })
+					end
+				end
+			end
+		end
+
+		-- ลำดับ 2: ค้นหาจาก ProximityPrompt ทั่วทั้ง Workspace ที่มีคีย์เวิร์ดเกี่ยวกับเทียน/กระถางไฟ/จุดไฟ
+		if #active == 0 then
+			local container = hw or workspace
+			for _, p in ipairs(container:GetDescendants()) do
+				if p:IsA("ProximityPrompt") and p.Enabled and not seen[p] then
+					local objText = p.ObjectText:lower()
+					local actText = p.ActionText:lower()
+					local pName = p.Name:lower()
+					local parName = p.Parent and p.Parent.Name:lower() or ""
+					local isCandle = objText:find("brazier") or objText:find("candle") or objText:find("altar")
+						or actText:find("light") or actText:find("ignite") or actText:find("activate")
+						or pName:find("brazier") or pName:find("candle")
+						or parName:find("brazier") or parName:find("candle")
+
+					-- ตัดกรณีกล่องสมบัติ ประตู หรือหัวกะโหลกออก
+					if isCandle and not objText:find("chest") and not objText:find("door") and not objText:find("skull") and not actText:find("open") and not actText:find("kick") then
+						local part = p.Parent
+						local pos = nil
+						if part:IsA("BasePart") then
+							pos = part.Position
+						elseif part:IsA("Model") then
+							pos = part.PrimaryPart and part.PrimaryPart.Position or (part:GetPivot() and part:GetPivot().Position)
+						end
+						if pos then
+							seen[p] = true
+							table.insert(active, { instance = part, prompt = p, position = pos })
+						end
+					end
+				end
+			end
+		end
+
+		if #active == 0 then return nil end
+
+		if order == "farthest" then
+			table.sort(active, function(a, b)
+				local da = (Vector3.new(a.position.X - myPos.X, 0, a.position.Z - myPos.Z)).Magnitude
+				local db = (Vector3.new(b.position.X - myPos.X, 0, b.position.Z - myPos.Z)).Magnitude
+				return da > db -- ไกลสุดก่อน
+			end)
+		else
+			table.sort(active, function(a, b)
+				local da = (Vector3.new(a.position.X - myPos.X, 0, a.position.Z - myPos.Z)).Magnitude
+				local db = (Vector3.new(b.position.X - myPos.X, 0, b.position.Z - myPos.Z)).Magnitude
+				return da < db -- ใกล้สุดก่อน
+			end)
+		end
+
+		return active
+	end
+
 	local function findActiveBossSkull()
 		if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return nil end
 		local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
@@ -12363,7 +12650,9 @@ do
 						table.insert(candidates, { part = ch, order = order, dist = (ch.Position - myPos).Magnitude })
 					end
 				elseif step >= 4 then
-					if name == "BossSpot" or (name == "PackSpot" and order >= 9) then
+					if name == "BossSpot" then
+						table.insert(candidates, { part = ch, order = 0, dist = (ch.Position - myPos).Magnitude })
+					elseif name == "PackSpot" and order >= 9 and myPos.X < -4090 then
 						table.insert(candidates, { part = ch, order = order, dist = (ch.Position - myPos).Magnitude })
 					end
 				end
@@ -12380,8 +12669,11 @@ do
 			return candidates[1].part
 		elseif visitedSpots and next(visitedSpots) ~= nil then
 			-- หากสแกนครบทุกจุดใน Step แล้วแต่มอนสเตอร์ยังไม่เกิด ให้เคลียร์ visitedSpots เพื่อวนลาดตระเวนซ้ำ
-			for k in pairs(visitedSpots) do
-				visitedSpots[k] = nil
+			-- ยกเว้นถ้าอยู่ในห้องบอสแล้ว (Step 4 และ myPos.X >= -4090) ห้ามเคลียร์เพื่อกันการย้อนกลับไปจุดภายนอก
+			if not (step >= 4 and myPos.X >= -4090) then
+				for k in pairs(visitedSpots) do
+					visitedSpots[k] = nil
+				end
 			end
 		end
 		return nil
@@ -12480,6 +12772,266 @@ do
 		return nil
 	end
 
+	local openedChests = {}
+
+	local function isTargetReachable(myPos, targetPos, dStep)
+		if not myPos or not targetPos then return false end
+
+		-- ★ Proximity Bypass: หากมอนสเตอร์อยู่ในระยะประชิดตัว (<= 16.0 studs)
+		-- ถือว่าเข้าถึงได้เสมอ 100%! มอนสเตอร์ระยะนี้ไม่มีทางอยู่คนละฟากของบาเรียข้ามห้อง
+		-- ป้องกันบั๊กยืนมองมอนสเตอร์ตรงหน้าแล้วไม่ยอมตี หรือเดินหนีมอนตรงหน้าไปลาดตระเวน
+		local flatDist = (Vector3.new(myPos.X - targetPos.X, 0, myPos.Z - targetPos.Z)).Magnitude
+		if flatDist <= 16.0 then
+			return true
+		end
+
+		local hw = workspace:FindFirstChild("Halloween")
+		local barriers = hw and hw:FindFirstChild("Barriers")
+
+		-- ตรวจสอบว่าบาเรียทางกายภาพกำลังปิดกั้นอยู่จริงหรือไม่ (CanCollide และไม่โปร่งใสจนทะลุ)
+		local function isBarrierActive(bPart)
+			if not bPart or not bPart.Parent then return false end
+			return (bPart.CanCollide == true) and (bPart.Transparency < 0.9)
+		end
+
+		-- 1. บาเรียหน้าห้องแม่มด SealWitch (แกน Z ที่ -68)
+		local sealWitch = barriers and barriers:FindFirstChild("SealWitch")
+		if sealWitch and isBarrierActive(sealWitch) then
+			if (myPos.Z > -68 and targetPos.Z <= -68) or (myPos.Z <= -68 and targetPos.Z > -68) then
+				return false
+			end
+		end
+
+		-- 2. บาเรียลานพิธี SealPlaza (แกน X ที่ -4054)
+		local sealPlaza = barriers and barriers:FindFirstChild("SealPlaza")
+		if sealPlaza and isBarrierActive(sealPlaza) then
+			if (myPos.X > -4054 and targetPos.X <= -4054) or (myPos.X <= -4054 and targetPos.X > -4054) then
+				return false
+			end
+		end
+
+		-- 3. บาเรียห้องแรก SealCorridor (แกน X ที่ -3942)
+		local sealCorridor = barriers and barriers:FindFirstChild("SealCorridor")
+		if sealCorridor and isBarrierActive(sealCorridor) then
+			if (myPos.X > -3942 and targetPos.X <= -3942) or (myPos.X <= -3942 and targetPos.X > -3942) then
+				return false
+			end
+		end
+
+		-- 4. ประตูห้องบอส Boss Door (แกน X ที่ -4090)
+		if dStep and dStep >= 4 then
+			local bossDoor = getDungeonBossDoor()
+			local isDoorClosed = bossDoor and isBossDoorClosed(bossDoor)
+			-- อยู่ในห้องบอสแล้ว (X >= -4090): ถ้าประตูปิด ห้ามเล็งเป้าหมายนอกห้องบอส (X < -4090)
+			if isDoorClosed and myPos.X >= -4090 and targetPos.X < -4090 then
+				return false
+			end
+			-- อยู่นอกห้องบอส (X < -4090): ถ้าประตูปิดอยู่ ห้ามเล็งเป้าหมายข้างในห้องบอส
+			if isDoorClosed and myPos.X < -4090 and targetPos.X >= -4090 then
+				return false
+			end
+		end
+
+		return true
+	end
+
+	local function getBossBackPosition(bossModel, playerReach)
+		if not bossModel then return nil end
+		local bRoot = bossModel:FindFirstChild("HumanoidRootPart") or bossModel.PrimaryPart or bossModel:FindFirstChildWhichIsA("BasePart")
+		if not bRoot then return nil end
+
+		local bLook = bRoot.CFrame.LookVector
+		local flatLook = Vector3.new(bLook.X, 0, bLook.Z)
+		if flatLook.Magnitude < 0.05 then
+			flatLook = Vector3.new(0, 0, -1)
+		else
+			flatLook = flatLook.Unit
+		end
+
+		local bPos = bRoot.Position
+		local offsetDist = math.clamp((playerReach or 8.0) * 0.65, 5.5, 14.0)
+		local behindPos = bPos - (flatLook * offsetDist)
+		return behindPos
+	end
+
+	local function isPlayerBehindBoss(bossModel, playerPos)
+		if not bossModel or not playerPos then return false, 0 end
+		local bRoot = bossModel:FindFirstChild("HumanoidRootPart") or bossModel.PrimaryPart or bossModel:FindFirstChildWhichIsA("BasePart")
+		if not bRoot then return false, 0 end
+
+		local bLook = bRoot.CFrame.LookVector
+		local flatLook = Vector3.new(bLook.X, 0, bLook.Z)
+		if flatLook.Magnitude < 0.05 then return false, 0 end
+		flatLook = flatLook.Unit
+
+		local bPos = bRoot.Position
+		local toPlayer = Vector3.new(playerPos.X - bPos.X, 0, playerPos.Z - bPos.Z)
+		if toPlayer.Magnitude < 0.5 then return false, 0 end
+		toPlayer = toPlayer.Unit
+
+		local dot = toPlayer:Dot(flatLook)
+		return dot < -0.35, dot
+	end
+
+	local function isAreaSafeFromMonsters(centerPos, radius, dStep)
+		if not centerPos then return true end
+		radius = radius or 50
+		dStep = dStep or tonumber(workspace:GetAttribute("DungeonStep")) or 1
+
+		local candidates = {}
+		local hw = workspace:FindFirstChild("Halloween")
+		local mFolder = (hw and hw:FindFirstChild("Monsters")) or workspace:FindFirstChild("Monsters")
+
+		if mFolder then
+			for _, m in ipairs(mFolder:GetChildren()) do
+				if m:IsA("Model") and m.Parent then
+					local hum = m:FindFirstChildOfClass("Humanoid")
+					local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
+					if hp > 0 then
+						table.insert(candidates, m)
+					end
+				end
+			end
+		end
+
+		for _, m in ipairs(CollectionService:GetTagged("Monster")) do
+			if m:IsA("Model") and m.Parent and not table.find(candidates, m) then
+				local hum = m:FindFirstChildOfClass("Humanoid")
+				local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
+				if hp > 0 then
+					table.insert(candidates, m)
+				end
+			end
+		end
+
+		for _, m in ipairs(candidates) do
+			local mPos = m:GetPivot().Position
+			if (mPos - centerPos).Magnitude <= radius then
+				-- ต้องเป็นมอนสเตอร์ที่เข้าถึงได้จริง (ไม่ถูกประตูกั้น)
+				if isTargetReachable(centerPos, mPos, dStep) then
+					return false
+				end
+			end
+		end
+		return true
+	end
+
+	local function findNearestUnopenedChest(myPos, maxRadius, dStep)
+		local hw = workspace:FindFirstChild("Halloween")
+		if not hw then return nil, nil, nil end
+		maxRadius = maxRadius or 90
+		dStep = dStep or tonumber(workspace:GetAttribute("DungeonStep")) or 1
+		local bestChest, bestPrompt, minD = nil, nil, maxRadius
+		for _, ch in ipairs(hw:GetChildren()) do
+			if ch.Name == "SecretChest" and not openedChests[ch] and ch:GetAttribute("LidOpen") ~= true then
+				local prompt = ch:FindFirstChildWhichIsA("ProximityPrompt", true)
+				if prompt and prompt.Enabled then
+					local cPos = ch:GetPivot().Position
+					local dist = (cPos - myPos).Magnitude
+					if dist < minD then
+						-- ต้องเป็นกล่องที่เดินไปถึงได้ ไม่ติดบาเรีย
+						if isTargetReachable(myPos, cPos, dStep) then
+							minD = dist
+							bestChest = ch
+							bestPrompt = prompt
+						end
+					end
+				end
+			end
+		end
+		return bestChest, bestPrompt, minD
+	end
+
+	local function findBestDungeonMonster(myPos, dStep)
+		local candidates = {}
+		local hw = workspace:FindFirstChild("Halloween")
+		local mFolder = (hw and hw:FindFirstChild("Monsters")) or workspace:FindFirstChild("Monsters")
+
+		if mFolder then
+			for _, m in ipairs(mFolder:GetChildren()) do
+				if m:IsA("Model") and m.Parent then
+					local hum = m:FindFirstChildOfClass("Humanoid")
+					local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
+					if hp > 0 and not m:GetAttribute("AnimDead") and m:GetAttribute("IsDummy") ~= true then
+						table.insert(candidates, m)
+					end
+				end
+			end
+		end
+
+		for _, m in ipairs(CollectionService:GetTagged("Monster")) do
+			if m:IsA("Model") and m.Parent and not table.find(candidates, m) then
+				local hum = m:FindFirstChildOfClass("Humanoid")
+				local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
+				if hp > 0 and not m:GetAttribute("AnimDead") and m:GetAttribute("IsDummy") ~= true then
+					table.insert(candidates, m)
+				end
+			end
+		end
+
+		if #candidates == 0 then return nil, nil, false, false end
+
+		local myUserId = LocalPlayer.UserId
+		local ranked = {}
+		for _, m in ipairs(candidates) do
+			local mPos = m:GetPivot().Position
+			-- คัดกรองความสามารถในการเข้าถึง: ต้องเข้าถึงได้ ไม่ถูกบาเรียขวาง
+			if isTargetReachable(myPos, mPos, dStep) then
+				local dist = (mPos - myPos).Magnitude
+				local nameLower = m.Name:lower()
+				local isBoss = m:GetAttribute("IsBoss") == true or nameLower:find("king") or nameLower:find("boss")
+				local isMini = m:GetAttribute("IsMiniBoss") == true or nameLower:find("witch")
+				local isAggroOnMe = (m:GetAttribute("ThreatUserId") == myUserId)
+				local isImmediateProximity = (dist <= 16.0)
+
+				local weight = 100
+
+				-- ★ Immediate Threat Override: หากมอนสเตอร์อยู่ในระยะประชิดตัว (<= 16 studs)
+				-- หรือกำลังล็อกเป้าโจมตีเรา (ThreatUserId == myUserId)
+				-- ให้ความสำคัญสูงสุดระดับ 0 เหนือกว่าบอสที่อยู่ห่างออกไป เพื่อป้องกันไม่ให้ถูกรุมตาย!
+				if isImmediateProximity or isAggroOnMe then
+					weight = 0
+				elseif dStep >= 4 then
+					if isBoss then
+						weight = 1
+					elseif isMini then
+						weight = 2
+					else
+						weight = 10
+					end
+				elseif dStep == 3 then
+					if isMini then
+						weight = 1
+					else
+						weight = 10
+					end
+				else
+					weight = 10
+				end
+
+				table.insert(ranked, {
+					model = m,
+					dist = dist,
+					weight = weight,
+					isPriority = (isBoss or isMini),
+					isImmediate = (isImmediateProximity or isAggroOnMe)
+				})
+			end
+		end
+
+		if #ranked == 0 then return nil, nil, false, false end
+
+		table.sort(ranked, function(a, b)
+			if a.weight ~= b.weight then
+				return a.weight < b.weight
+			end
+			return a.dist < b.dist
+		end)
+
+		local best = ranked[1]
+		return best.model, best.dist, best.isPriority, best.isImmediate
+	end
+
 	task.spawn(function()
 		local lastPatrolTime = 0
 		local visitedSpots = {}
@@ -12497,6 +13049,7 @@ do
 			if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then
 				visitedSpots = {}
 				lastStep = nil
+				openedChests = {}
 				task.wait(2.0)
 				continue
 			end
@@ -12566,13 +13119,79 @@ do
 								local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
 								if prompt then
 									triggerPromptSafe(prompt)
+									if HUB.UI and HUB.UI.DungeonStatusLabel then
+										HUB.UI.DungeonStatusLabel.Text = "สถานะ: เปิดรับรางวัลกล่องจบสำเร็จ! รอดันเจี้ยนส่งตัวกลับเมือง... 🎁"
+									end
 								end
 							end
+						end
+					else
+						if HUB.UI and HUB.UI.DungeonStatusLabel then
+							HUB.UI.DungeonStatusLabel.Text = "สถานะ: เคลียร์ดันเจี้ยนสำเร็จ! รอดันเจี้ยนส่งตัวกลับเมือง... 🏛️"
 						end
 					end
 				end
 				task.wait(1.0)
 				continue
+			end
+
+			-- 2.8 จุดเทียนมินิเกมบอส (Auto Light Candles - Boss Ultimate Charge Mini-Game)
+			if (HUB.Config.dungeonLightCandles ~= false) and (dStep >= 4) then
+				local candles = findActiveBossCandles(root.Position, HUB.Config.dungeonCandleOrder)
+				if candles and #candles > 0 then
+					HUB.LightingCandle = true
+					local targetCandle = candles[1]
+					local cPos = targetCandle.position
+					local cPrompt = targetCandle.prompt or (targetCandle.instance and targetCandle.instance:FindFirstChildWhichIsA("ProximityPrompt", true))
+					local dist = (Vector3.new(cPos.X - root.Position.X, 0, cPos.Z - root.Position.Z)).Magnitude
+					local actDist = cPrompt and (cPrompt.MaxActivationDistance - 0.5) or 6.5
+
+					if dist <= actDist then
+						-- ถึงระยะจุดเทียนแล้ว: หยุดเดิน + กดจุดไฟ + ขยับขึ้นแท่นเล็กน้อย
+						if hum then
+							hum:Move(Vector3.zero, false)
+							hum:MoveTo(cPos)
+						end
+						if cPrompt then
+							triggerPromptSafe(cPrompt)
+						end
+						HUB.Stats.candlesLit = (HUB.Stats.candlesLit or 0) + 1
+						if HUB.UI and HUB.UI.DungeonStatusLabel then
+							local orderTxt = (HUB.Config.dungeonCandleOrder == "farthest") and "ไกลสุดก่อน" or "ใกล้สุดก่อน"
+							HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: กำลังจุดเทียนบอส (%s, เหลือ %d จุด)... 🕯️🔥", orderTxt, #candles)
+						end
+						task.wait(0.3)
+					else
+						-- ยังไม่ถึงระยะ: วิ่งเข้าหาเทียนทันที (สปริ้นต์เต็มสปีด)
+						if not HUB.Navigating and not HUB.Dodging then
+							if HUB.UI and HUB.UI.DungeonStatusLabel then
+								local orderTxt = (HUB.Config.dungeonCandleOrder == "farthest") and "ไกลสุดก่อน" or "ใกล้สุดก่อน"
+								HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: วิ่งไปจุดเทียนบอส (%s, %d studs, เหลือ %d จุด)... 🕯️", orderTxt, math.floor(dist), #candles)
+							end
+							task.spawn(function()
+								HUB.NavigatePath(cPos, {
+									stopDistance = math.max(3.0, actDist - 1.0),
+									timeout = 6.0,
+									sprint = true,
+									emulatePlayerMove = true,
+									shouldAbort = function()
+										if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
+										if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
+										if HUB.Dodging then return true end
+										if not cPrompt or not cPrompt.Enabled then return true end
+										return false
+									end
+								})
+							end)
+						end
+						task.wait(0.2)
+					end
+					continue
+				else
+					HUB.LightingCandle = false
+				end
+			else
+				HUB.LightingCandle = false
 			end
 
 			-- 3. ตรวจจับหัวกะโหลกบอสเสก/ดรอป (Priority 1 สูงสุด)
@@ -12620,90 +13239,378 @@ do
 				HUB.ActiveSkullPos = nil
 			end
 
-			-- 3.5 ตรวจสอบและเปิดประตูห้องบอสอัตโนมัติ (เมื่อ Step >= 4 และประตูยังปิดอยู่)
+			-- 3.5 ตรวจสอบและเปิดประตูห้องบอสอัตโนมัติ (เมื่อ Step >= 4)
 			if dStep >= 4 then
 				local bossDoor = getDungeonBossDoor()
-				if bossDoor and isBossDoorClosed(bossDoor) then
-					local doorFront = Vector3.new(-4112, 60, -260) -- จุดยืนหน้าประตูด้านนอก
-					local distToDoor = (doorFront - root.Position).Magnitude
+				local doorFront = Vector3.new(-4112, 60, -260) -- จุดยืนหน้าประตูด้านนอก
+				local bossRoomEntry = Vector3.new(-4040, 60, -260) -- จุดเป้าหมายใจกลางห้องบอส
 
-					if distToDoor > 6.0 then
+				-- ถ้าผู้เล่นยังอยู่นอกห้องบอส (X < -4090)
+				if root.Position.X < -4090 then
+					-- ★ ตรวจสอบว่ามีมอนสเตอร์ประชิดตัวในทางเดินหน้าประตูหรือไม่ หากมี ให้ข้ามไป Section 4 เพื่อกำจัดก่อน
+					local nearbyMob, mDist, _, isImm = findBestDungeonMonster(root.Position, dStep)
+					if not (isImm and nearbyMob and mDist and mDist <= 22) then
+						local closed = bossDoor and isBossDoorClosed(bossDoor)
+						if closed then
+							local distToDoor = (doorFront - root.Position).Magnitude
+							if distToDoor > 6.0 then
+								if not HUB.Navigating and not HUB.Dodging then
+									if HUB.UI and HUB.UI.DungeonStatusLabel then
+										HUB.UI.DungeonStatusLabel.Text = "สถานะ: กำลังเดินไปเปิดประตูห้องบอส..."
+									end
+									task.spawn(function()
+										HUB.NavigatePath(doorFront, {
+											stopDistance = 4.0,
+											timeout = 15.0,
+											sprint = true,
+											emulatePlayerMove = true,
+											shouldAbort = function()
+												if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
+												if not isBossDoorClosed(bossDoor) then return true end
+												if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
+												return false
+											end
+										})
+									end)
+								end
+								task.wait(0.5)
+								continue
+							else
+								-- ถึงหน้าประตูแล้ว: ค้นหา Prompt และกดเปิด
+								if hum then hum:Move(Vector3.zero, false) end
+								if HUB.UI and HUB.UI.DungeonStatusLabel then
+									HUB.UI.DungeonStatusLabel.Text = "สถานะ: กำลังเปิดประตูห้องบอส..."
+								end
+								local doorPrompt = findBossDoorPrompt(bossDoor)
+								if doorPrompt then
+									triggerPromptSafe(doorPrompt)
+								else
+									local slab = bossDoor:FindFirstChild("Slab")
+									if slab then hum:MoveTo(slab.Position) end
+								end
+								task.wait(0.4)
+								-- ★ สั่งวิ่งทะลุเข้ากลางห้องบอสทันทีหลังเปิดประตู!
+								if not HUB.Navigating then
+									task.spawn(function()
+										HUB.NavigatePath(bossRoomEntry, {
+											stopDistance = 5.0,
+											timeout = 10.0,
+											sprint = true,
+											emulatePlayerMove = true,
+										})
+									end)
+								end
+								task.wait(0.5)
+								continue
+							end
+						else
+							-- ประตูเปิดแล้วแต่ตัวละครยังอยู่นอกห้องบอส: สั่งวิ่งทะลุเข้าห้องบอสทันที!
+							if not HUB.Navigating and not HUB.Dodging then
+								if HUB.UI and HUB.UI.DungeonStatusLabel then
+									HUB.UI.DungeonStatusLabel.Text = "สถานะ: ประตูเปิดแล้ว! กำลังวิ่งทะลุเข้าห้องบอส..."
+								end
+								task.spawn(function()
+									HUB.NavigatePath(bossRoomEntry, {
+										stopDistance = 5.0,
+										timeout = 10.0,
+										sprint = true,
+										emulatePlayerMove = true,
+									})
+								end)
+							end
+							task.wait(0.5)
+							continue
+						end
+					end
+				end
+				-- ถ้า root.Position.X >= -4090 หรือมีมอนสเตอร์ประชิด: ให้ไหลลงไปต่อสู้ใน Section 4!
+			end
+
+			-- 4. ตรวจสอบมอนสเตอร์มีชีวิตในดันเจี้ยน (Live Monster Tracking & Immediate Threat Defense)
+			local targetMob, mobDist, isPriorityTarget, isImmediateTarget = findBestDungeonMonster(root.Position, dStep)
+			if targetMob and mobDist then
+				-- ★ Universal Target Lock: ยิง LumiLockTarget และตั้ง CurrentTarget ให้มอนสเตอร์ทุกตัวเสมอ (0 ms)
+				-- สิ่งนี้จะปลุก CombatClient (u2995 = true) ทันที ข้ามคูลดาวน์ 1.5s ของเกม ทำให้ตัวละครโจมตีทันทีไม่ยืนนิ่ง
+				local charNow = LocalPlayer.Character
+				local lumiLock = charNow and charNow:FindFirstChild("LumiLockTarget")
+				if lumiLock and lumiLock:IsA("BindableEvent") then
+					pcall(function() lumiLock:Fire(targetMob) end)
+				end
+				local ct = charNow and charNow:FindFirstChild("CurrentTarget")
+				if ct and ct:IsA("ObjectValue") then
+					pcall(function() ct.Value = targetMob end)
+				end
+
+				local reach = (HUB.GetPlayerReach and HUB.GetPlayerReach(targetMob)) or 9.0
+
+				if isPriorityTarget and not isImmediateTarget then
+					-- พบบอส/มินิบอส (และไม่มีมอนสเตอร์อื่นยืนรุมประชิดตัว): เข้าต่อสู้ด้วยระบบ Attack Back Boss
+					local doBackBoss = (HUB.Config.dungeonAttackBackBoss ~= false) and not HUB.Dodging and not HUB.CollectingSkull and not HUB.LightingCandle
+
+					if doBackBoss then
+						local isBehind, dotVal = isPlayerBehindBoss(targetMob, root.Position)
+						local behindPos = getBossBackPosition(targetMob, reach)
+
+						if behindPos and not isBehind then
+							-- ตัวละครยังไม่อยู่ด้านหลังบอส: สั่งอ้อมไปด้านหลังบอสทันที!
+							local distToBehind = (Vector3.new(behindPos.X - root.Position.X, 0, behindPos.Z - root.Position.Z)).Magnitude
+							if distToBehind > 5.5 then
+								if not HUB.Navigating then
+									if HUB.UI and HUB.UI.DungeonStatusLabel then
+										HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: กำลังอ้อมไปโจมตีด้านหลังบอส (%s, %d studs)... 🗡️", targetMob.Name, math.floor(distToBehind))
+									end
+									task.spawn(function()
+										HUB.NavigatePath(behindPos, {
+											stopDistance = 2.5,
+											timeout = 4.0,
+											sprint = true,
+											emulatePlayerMove = true,
+											shouldAbort = function()
+												if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
+												if not targetMob.Parent then return true end
+												local h = targetMob:FindFirstChildOfClass("Humanoid")
+												if h and h.Health <= 0 then return true end
+												if HUB.CollectingSkull or HUB.Dodging then return true end
+												if isPlayerBehindBoss(targetMob, root.Position) then return true end
+												-- หากมีมอนสเตอร์อื่นเข้าประชิดตัวรุมตีเรา ให้ยกเลิกการเดินอ้อมเพื่อจัดการมอนสเตอร์ก่อน
+												local mob, d, _, isImm = findBestDungeonMonster(root.Position, dStep)
+												if isImm and mob ~= targetMob then return true end
+												return false
+											end
+										})
+									end)
+								end
+								task.wait(0.3)
+								continue
+							else
+								-- ใกล้จุดหลังบอสมาก (<= 5.5 studs): ขยับ Micro-Step อ้อมประชิดหลัง
+								local moveDir = Vector3.new(behindPos.X - root.Position.X, 0, behindPos.Z - root.Position.Z)
+								if moveDir.Magnitude > 0.5 and hum then
+									hum:Move(moveDir.Unit, false)
+								end
+								if HUB.UI and HUB.UI.DungeonStatusLabel then
+									HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: กำลังอ้อมประชิดหลังบอส (%s)... 🗡️", targetMob.Name)
+								end
+								task.wait(0.2)
+								continue
+							end
+						else
+							-- อยู่ด้านหลังบอสเรียบร้อยแล้ว:
+							if mobDist > (reach + 3.0) then
+								-- ถ้าหลุดระยะโจมตี ให้เดินขยับเข้าหา behindPos
+								if not HUB.Navigating and behindPos then
+									task.spawn(function()
+										HUB.NavigatePath(behindPos, {
+											stopDistance = 2.5,
+											timeout = 3.0,
+											sprint = true,
+											emulatePlayerMove = true,
+											shouldAbort = function()
+												if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
+												if not targetMob.Parent then return true end
+												local h = targetMob:FindFirstChildOfClass("Humanoid")
+												if h and h.Health <= 0 then return true end
+												if HUB.CollectingSkull or HUB.Dodging then return true end
+												local mob, d, _, isImm = findBestDungeonMonster(root.Position, dStep)
+												if isImm and mob ~= targetMob then return true end
+												return false
+											end
+										})
+									end)
+								end
+								task.wait(0.3)
+								continue
+							else
+								-- อยู่ด้านหลังบอสและอยู่ในระยะโจมตี: ยืนหยัดฟันหลังบอสต่อเนื่อง!
+								if hum then hum:Move(Vector3.zero, false) end
+								if HUB.UI and HUB.UI.DungeonStatusLabel then
+									HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: กำลังโจมตีด้านหลังบอส (%s)... 🔥🗡️", targetMob.Name)
+								end
+								task.wait(0.35)
+								continue
+							end
+						end
+					else
+						-- กรณีไม่ได้เปิด Attack Back Boss หรือกำลัง Dodge: สู้ตามระยะปกติ
+						if mobDist > (reach + 2.0) then
+							if not HUB.Navigating and not HUB.Dodging then
+								if HUB.UI and HUB.UI.DungeonStatusLabel then
+									HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: กำลังประชิดตัวบอส (%s, %d studs)... ⚔️", targetMob.Name, math.floor(mobDist))
+								end
+								task.spawn(function()
+									HUB.NavigatePath(targetMob:GetPivot().Position, {
+										stopDistance = math.max(4.0, reach - 1.5),
+										timeout = 8.0,
+										sprint = true,
+										emulatePlayerMove = true,
+										shouldAbort = function()
+											if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
+											if not targetMob.Parent then return true end
+											local h = targetMob:FindFirstChildOfClass("Humanoid")
+											if h and h.Health <= 0 then return true end
+											if HUB.CollectingSkull or HUB.Dodging then return true end
+											local mob, d, _, isImm = findBestDungeonMonster(root.Position, dStep)
+											if isImm and mob ~= targetMob then return true end
+											return false
+										end
+									})
+								end)
+							end
+							task.wait(0.3)
+							continue
+						else
+							if hum then hum:Move(Vector3.zero, false) end
+							if HUB.UI and HUB.UI.DungeonStatusLabel then
+								HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: กำลังต่อสู้กับบอส (%s)... 🔥", targetMob.Name)
+							end
+							task.wait(0.35)
+							continue
+						end
+					end
+				else
+					-- มอนสเตอร์ทั่วไป หรือ มอนสเตอร์ประชิดตัว (Immediate Threat): จัดการทันที 100%!
+					if mobDist <= (reach + 2.0) then
+						-- อยู่ในระยะโจมตี: หยุดเดินทันที + หันหน้าประจันเป้าหมาย + โจมตีด้วย Auto Play ต่อเนื่อง
+						if hum then hum:Move(Vector3.zero, false) end
+						local mPos = targetMob:GetPivot().Position
+						local lookDir = Vector3.new(mPos.X - root.Position.X, 0, mPos.Z - root.Position.Z)
+						if lookDir.Magnitude > 0.1 then
+							root.CFrame = CFrame.lookAt(root.Position, root.Position + lookDir)
+						end
+						if HUB.UI and HUB.UI.DungeonStatusLabel then
+							local kindText = isImmediateTarget and "กำจัดมอนสเตอร์ประชิดตัว" or "กำลังต่อสู้กับมอนสเตอร์"
+							HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: %s (%s, %d studs)... 🔥⚔️", kindText, targetMob.Name, math.floor(mobDist))
+						end
+						task.wait(0.25)
+						continue
+					elseif mobDist <= 70.0 then
+						-- มอนสเตอร์ทั่วไปในระยะที่เข้าถึงได้: วิ่งประชิดตัวเพื่อเริ่มสู้ (Combat Priority 100%)
 						if not HUB.Navigating and not HUB.Dodging then
 							if HUB.UI and HUB.UI.DungeonStatusLabel then
-								HUB.UI.DungeonStatusLabel.Text = "สถานะ: กำลังเดินไปเปิดประตูห้องบอส..."
+								HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: กำลังเข้าตีมอนสเตอร์ (%s, %d studs)... ⚔️", targetMob.Name, math.floor(mobDist))
 							end
 							task.spawn(function()
-								HUB.NavigatePath(doorFront, {
-									stopDistance = 4.0,
-									timeout = 15.0,
+								HUB.NavigatePath(targetMob:GetPivot().Position, {
+									stopDistance = math.max(4.0, reach - 1.5),
+									timeout = 8.0,
 									sprint = true,
 									emulatePlayerMove = true,
 									shouldAbort = function()
 										if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
-										if not isBossDoorClosed(bossDoor) then return true end
-										if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
+										if not targetMob.Parent then return true end
+										local h = targetMob:FindFirstChildOfClass("Humanoid")
+										if h and h.Health <= 0 then return true end
+										if HUB.CollectingSkull or HUB.Dodging then return true end
+										-- หากมีมอนสเตอร์ตัวอื่นเข้าประชิดตัวใกล้กว่า ให้ยกเลิกการเดินเพื่อหันมาสู้ตัวที่ใกล้กว่าทันที!
+										local mob, d, _, isImm = findBestDungeonMonster(root.Position, dStep)
+										if isImm and mob ~= targetMob then return true end
 										return false
 									end
 								})
 							end)
 						end
-						task.wait(0.5)
-						continue
-					else
-						-- ถึงหน้าประตูแล้ว: ค้นหา Prompt และกดเปิด
-						if hum then hum:Move(Vector3.zero, false) end
-						if HUB.UI and HUB.UI.DungeonStatusLabel then
-							HUB.UI.DungeonStatusLabel.Text = "สถานะ: กำลังเปิดประตูห้องบอส..."
-						end
-						local doorPrompt = findBossDoorPrompt(bossDoor)
-						if doorPrompt then
-							triggerPromptSafe(doorPrompt)
-						else
-							local slab = bossDoor:FindFirstChild("Slab")
-							if slab then hum:MoveTo(slab.Position) end
-						end
-						task.wait(0.8)
+						task.wait(0.3)
 						continue
 					end
 				end
 			end
 
-			-- 4. ตรวจสอบมอนสเตอร์มีชีวิตในระยะต่อสู้ (45 studs)
-			if isMonsterWithinRadius(45) then
-				task.wait(0.5)
-				continue
+			-- 4.5 ตรวจสอบและเปิดกล่องลับตามทาง (Pathway Secret Chests)
+			-- เงื่อนไขเข้มงวด: ต้องปลอดภัย 100% (ไม่มีมอนสเตอร์ที่เข้าถึงได้ในรัศมีรอบตัวผู้เล่นและรอบกล่อง)
+			if (HUB.Config.dungeonOpenChests ~= false) and isAreaSafeFromMonsters(root.Position, 60, dStep) then
+				local sChest, sPrompt, cDist = findNearestUnopenedChest(root.Position, 90, dStep)
+				if sChest and sPrompt then
+					local cPos = sChest:GetPivot().Position
+					-- ตรวจสอบว่าบริเวณรอบกล่องปลอดภัยจริง ไม่มีมอนสเตอร์เฝ้าอยู่
+					if isAreaSafeFromMonsters(cPos, 50, dStep) then
+						if cDist > 5.0 then
+							if not HUB.Navigating and not HUB.Dodging then
+								if HUB.UI and HUB.UI.DungeonStatusLabel then
+									HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: เดินไปเปิดกล่องลับตามทาง (%d studs)... 🎁", math.floor(cDist))
+								end
+								task.spawn(function()
+									HUB.NavigatePath(cPos, {
+										stopDistance = 4.0,
+										timeout = 12.0,
+										sprint = true,
+										emulatePlayerMove = true,
+										shouldAbort = function()
+											if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
+											if openedChests[sChest] or sChest:GetAttribute("LidOpen") == true or not sPrompt.Enabled then return true end
+											-- หากมีมอนสเตอร์ที่เข้าถึงได้เข้ามารบกวนในระยะ 25 studs หรือมีภัยคุกคาม: ยกเลิกการเดินไปกล่องทันทีเพื่อเข้าสู้!
+											local mob, d, _, isImm = findBestDungeonMonster(root.Position, dStep)
+											if isImm or (d and d <= 25.0) then return true end
+											if not isAreaSafeFromMonsters(root.Position, 25, dStep) then return true end
+											if HUB.CollectingSkull or HUB.Dodging then return true end
+											return false
+										end
+									})
+								end)
+							end
+							task.wait(0.4)
+							continue
+						else
+							-- ถึงกล่องแล้ว: ทำการเปิดกล่อง
+							if hum then hum:Move(Vector3.zero, false) end
+							if HUB.UI and HUB.UI.DungeonStatusLabel then
+								HUB.UI.DungeonStatusLabel.Text = "สถานะ: กำลังเปิดกล่องลับ... 🎁"
+							end
+							triggerPromptSafe(sPrompt)
+							task.wait(0.65)
+							-- ★ Ground-Truth Verification: มาร์กสำเร็จเฉพาะเมื่อเซิร์ฟเวอร์เปิดฝากล่องจริงเท่านั้น
+							if sChest:GetAttribute("LidOpen") == true or not sPrompt.Enabled then
+								openedChests[sChest] = true
+								if HUB.UI and HUB.UI.DungeonStatusLabel then
+									HUB.UI.DungeonStatusLabel.Text = "สถานะ: เปิดกล่องลับสำเร็จ! กำลังเก็บสมบัติ... ✨"
+								end
+							end
+							task.wait(0.5)
+							continue
+						end
+					end
+				end
 			end
 
 			-- 5. หากไม่มีมอนสเตอร์ให้สู้: วิ่งนำทางไปยังจุดเกิดมอนสเตอร์ถัดไป (Step-Aware Spawn Patrol)
 			if not HUB.Navigating and not HUB.Dodging and (tick() - lastPatrolTime >= 1.0) then
-				local nextSpot = resolveNextDungeonSpot(dStep, visitedSpots)
-				if nextSpot then
-					lastPatrolTime = tick()
-					HUB.Stats.dungeonPatrols = (HUB.Stats.dungeonPatrols or 0) + 1
-					if HUB.UI.DungeonStatusLabel then
-						local dId = workspace:GetAttribute("DungeonId") or "Dungeon"
-						HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: เปิดใช้งาน · %s (Step %d) · นำทางแล้ว %d ครั้ง", tostring(dId), dStep, HUB.Stats.dungeonPatrols)
-					end
-
-					task.spawn(function()
-						local arrived = HUB.NavigatePath(nextSpot.Position, {
-							stopDistance = 5.0,
-							timeout = 15.0,
-							sprint = true,
-							emulatePlayerMove = true,
-							shouldAbort = function()
-								if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
-								if isMonsterWithinRadius(45) then return true end
-								if HUB.CollectingSkull then return true end
-								if HUB.Dodging then return true end
-								if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
-								return false
-							end
-						})
-						if arrived or (nextSpot.Position - root.Position).Magnitude <= 8.0 then
-							visitedSpots[nextSpot] = true
+				-- ป้องกันเดินหามอนทั้งที่มอนอยู่ตรงหน้า: ตรวจสอบอีกครั้งว่าไม่มีมอนสเตอร์ที่มีชีวิตในระยะ 70 studs จริงๆ
+				local checkMob, checkDist = findBestDungeonMonster(root.Position, dStep)
+				if not checkMob then
+					local nextSpot = resolveNextDungeonSpot(dStep, visitedSpots)
+					if nextSpot then
+						lastPatrolTime = tick()
+						HUB.Stats.dungeonPatrols = (HUB.Stats.dungeonPatrols or 0) + 1
+						if HUB.UI.DungeonStatusLabel then
+							local dId = workspace:GetAttribute("DungeonId") or "Dungeon"
+							HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: เปิดใช้งาน · %s (Step %d) · นำทางแล้ว %d ครั้ง", tostring(dId), dStep, HUB.Stats.dungeonPatrols)
 						end
-					end)
+
+						task.spawn(function()
+							local arrived = HUB.NavigatePath(nextSpot.Position, {
+								stopDistance = 5.0,
+								timeout = 15.0,
+								sprint = true,
+								emulatePlayerMove = true,
+								shouldAbort = function()
+									if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
+									-- หากพบมอนสเตอร์ที่มีชีวิตและเข้าถึงได้: ตัดจบการลาดตระเวนทันทีเพื่อเข้าสู้!
+									local mob, d, isPri, isImm = findBestDungeonMonster(root.Position, dStep)
+									if mob and (isImm or isPri or (d and d <= 50.0)) then return true end
+									if (HUB.Config.dungeonOpenChests ~= false) and isAreaSafeFromMonsters(root.Position, 50, dStep) then
+										local ch, pr = findNearestUnopenedChest(root.Position, 50, dStep)
+										if ch and pr and isAreaSafeFromMonsters(ch:GetPivot().Position, 40, dStep) then return true end
+									end
+									if HUB.CollectingSkull then return true end
+									if HUB.Dodging then return true end
+									if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
+									return false
+								end
+							})
+							if arrived or (nextSpot.Position - root.Position).Magnitude <= 8.0 then
+								visitedSpots[nextSpot] = true
+							end
+						end)
+					end
 				end
 			end
 		end
@@ -12713,12 +13620,17 @@ end
 -- ===== 10.6 Auto Join Dungeon Worker (Key Check & Buy + Party Role + Auto Ready) =====
 do
 	local latestReadyId = nil
+	local latestDungeonInfo = nil
 	local remotes = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
 	local da = remotes and remotes:FindFirstChild("DungeonAction")
-	if da and da:IsA("RemoteEvent") then
-		HUB:AddConnection(da.OnClientEvent:Connect(function(action, payload)
+	local dp = remotes and remotes:FindFirstChild("DungeonPrompt")
+
+	if dp and dp:IsA("RemoteEvent") then
+		HUB:AddConnection(dp.OnClientEvent:Connect(function(action, payload)
 			if action == "ready" and type(payload) == "table" and payload.Id then
 				latestReadyId = payload.Id
+			elseif action == "dungeonselect" and type(payload) == "table" then
+				latestDungeonInfo = payload
 			end
 		end))
 	end
@@ -12730,6 +13642,23 @@ do
 			return tonumber(items.dungeon_key) or 0
 		end
 		return 0
+	end
+
+	local function hasFreeRuns()
+		if latestDungeonInfo and type(latestDungeonInfo.Dungeons) == "table" then
+			for _, d in ipairs(latestDungeonInfo.Dungeons) do
+				if d.Id == "halloween" or d.Id == "crypt" then
+					local free = tonumber(d.Free) or 2
+					local used = tonumber(d.Used) or 0
+					if used < free then
+						return true, (free - used)
+					end
+				end
+			end
+			return false, 0
+		end
+		-- หากยังไม่มีข้อมูล handshake: อนุญาตให้เดินไปเช็คที่ประตูก่อน (เพราะเกมแจกฟรีวันละ 2 รอบ)
+		return true, 2
 	end
 
 	local function getPartyRoleInfo()
@@ -12747,36 +13676,45 @@ do
 		local ldw = pg and pg:FindFirstChild("LumiDungeonWindows")
 		local rc = ldw and ldw:FindFirstChild("ReadyCheck")
 		local pressed = false
+
+		-- ช่องทางหลัก 1: ส่งคำสั่งตรงผ่าน RemoteEvent da:ready เมื่อมี readyId (100% Guaranteed)
+		if latestReadyId and da then
+			da:FireServer("ready", latestReadyId, true)
+			pressed = true
+		end
+
+		-- ช่องทางเสริม 2: กดปุ่ม "Ready" สีเขียวบน GUI (เฉพาะปุ่มที่มี Label ข้อความว่า "Ready" เท่านั้น ป้องกันกดโดน Not Ready)
 		if rc and rc.Visible then
-			local kitBtn = rc:FindFirstChild("KitButton", true)
-			if kitBtn then
-				local conns = getconnections and getconnections(kitBtn.Activated)
-				if conns and #conns > 0 then
-					for _, c in ipairs(conns) do
-						c:Fire()
-						pressed = true
-					end
-				end
-				if not pressed then
-					local fs = EXEC.firesignal or rawget(EXEC.env, "firesignal")
-					if type(fs) == "function" then
-						fs(kitBtn.MouseButton1Click)
-						fs(kitBtn.Activated)
-						pressed = true
+			for _, descendant in ipairs(rc:GetDescendants()) do
+				if (descendant:IsA("TextButton") or descendant:IsA("ImageButton")) and descendant.Name == "KitButton" then
+					local lbl = descendant:FindFirstChild("Label") or descendant:FindFirstChildWhichIsA("TextLabel")
+					if lbl and lbl.Text == "Ready" then
+						local conns = getconnections and getconnections(descendant.Activated)
+						if conns and #conns > 0 then
+							for _, c in ipairs(conns) do
+								c:Fire()
+								pressed = true
+							end
+						end
+						if not pressed then
+							local fs = EXEC.firesignal or rawget(EXEC.env, "firesignal")
+							if type(fs) == "function" then
+								fs(descendant.MouseButton1Click)
+								fs(descendant.Activated)
+								pressed = true
+							end
+						end
+						break
 					end
 				end
 			end
 		end
 
-		if latestReadyId and da then
-			da:FireServer("ready", latestReadyId, true)
-			pressed = true
-		end
 		return pressed
 	end
 
 	task.spawn(function()
-		local DUNGEON_GATE_POS = Vector3.new(0, 36.15, 115.65)
+		local DUNGEON_GATE_POS = Vector3.new(4.8, 4.82, 108.0) -- จุดยืนหน้า NPC GateKeeper พอดี (ระยะห่าง <= 4 studs)
 		local lastEnterAttempt = 0
 		local lastBuyAttempt = 0
 		local lastReadyCheck = 0
@@ -12828,6 +13766,7 @@ do
 			-- 2. ตรวจสอบบทบาทปาร์ตี้ก่อน (Leader vs Member)
 			local isLeader, inParty, partyData = getPartyRoleInfo()
 			local keyCount = getDungeonKeyCount()
+			local freeAvailable, freeCount = hasFreeRuns()
 			local silver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
 
 			if not isLeader then
@@ -12837,8 +13776,8 @@ do
 					HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: สมาชิกปาร์ตี้ (%s คน) · รอหัวหน้ากดเริ่ม... · กุญแจ x%d", tostring(partyCount), keyCount)
 				end
 
-				-- ซื้อกุญแจเตรียมไว้ล่วงหน้า (ถ้าเปิด Auto Buy และ Silver พอ) แบบเบื้องหลัง ไม่บล็อก
-				if keyCount <= 0 and HUB.Config.dungeonAutoBuyKey ~= false and silver >= 500000 then
+				-- ซื้อกุญแจเตรียมไว้ล่วงหน้า (ถ้าไม่มีรอบฟรี และเปิด Auto Buy และ Silver พอ)
+				if not freeAvailable and keyCount <= 0 and HUB.Config.dungeonAutoBuyKey ~= false and silver >= 500000 then
 					if tick() - lastBuyAttempt >= 5.0 then
 						lastBuyAttempt = tick()
 						if da then
@@ -12851,8 +13790,9 @@ do
 				continue
 			end
 
-			-- 3. กรณีเป็นหัวหน้าปาร์ตี้ หรือเล่นคนเดียว (Solo Leader): ต้องมีกุญแจก่อนสร้างห้อง
-			if keyCount <= 0 then
+			-- 3. กรณีเป็นหัวหน้าปาร์ตี้ หรือเล่นคนเดียว (Solo Leader):
+			-- ถ้าไม่มีรอบฟรีเหลือ และกุญแจหมด -> ตรวจสอบซื้อกุญแจ
+			if not freeAvailable and keyCount <= 0 then
 				if HUB.Config.dungeonAutoBuyKey ~= false then
 					if silver >= 500000 then
 						if tick() - lastBuyAttempt >= 3.0 then
@@ -12876,15 +13816,15 @@ do
 					end
 				else
 					if HUB.UI.JoinDungeonStatusLabel then
-						HUB.UI.JoinDungeonStatusLabel.Text = "สถานะ: กุญแจหมด (ปิดระบบซื้อกุญแจอัตโนมัติ)"
+						HUB.UI.JoinDungeonStatusLabel.Text = "สถานะ: กุญแจหมดและไม่มีรอบฟรี (ปิดระบบซื้อกุญแจอัตโนมัติ)"
 					end
 					task.wait(3.0)
 					continue
 				end
 			end
 
-			-- 4. กรณีมีกุญแจพร้อม และเป็นหัวหน้า: เดินทางเข้าหาประตูดันเจี้ยน
-			-- ตรวจสอบว่าอยู่นอกเขตเมืองหรือไม่ (Z <= -200): ต้องวาร์ปกลับเมืองก่อน ไม่เดินลุยอากาศข้ามเกาะ
+			-- 4. กรณีพร้อมเข้า (มีรอบฟรี หรือ มีกุญแจ) และเป็นหัวหน้า: เดินทางเข้าหา GateKeeper
+			-- ตรวจสอบว่าอยู่นอกเขตเมืองหรือไม่ (Z <= -200): ต้องวาร์ปกลับเมืองก่อน
 			if root.Position.Z <= -200 then
 				if HUB.UI.JoinDungeonStatusLabel then
 					HUB.UI.JoinDungeonStatusLabel.Text = "สถานะ: กำลังเดินทางกลับเมืองเพื่อไปประตูดันเจี้ยน... 🏛️"
@@ -12898,42 +13838,67 @@ do
 				continue
 			end
 
-			-- เมื่ออยู่ในเมืองแล้ว (Z > -200): ตรวจระยะห่างจากประตูทางเข้าดันเจี้ยน (DungeonGate_Village)
+			-- เมื่ออยู่ในเมืองแล้ว (Z > -200): ตรวจระยะห่างจาก NPC GateKeeper
 			local gateDist = (root.Position - DUNGEON_GATE_POS).Magnitude
 			local diff = HUB.Config.dungeonDifficulty or "easy"
 			local diffLabel = (diff == "normal") and "Hard" or "Easy"
 
-			if gateDist > 65.0 then
+			if gateDist > 8.0 then
 				if not HUB.Navigating then
 					if HUB.UI.JoinDungeonStatusLabel then
-						HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: เดินทางไปประตูเข้าดันเจี้ยน (ห่าง %.0fm)... 🏃", gateDist / 3.57)
+						HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: เดินทางไปหา NPC เข้าดันเจี้ยน (ห่าง %.0fm)... 🏃", gateDist / 3.57)
 					end
 					HUB.NavigatePath(DUNGEON_GATE_POS, {
-						stopDistance = 25.0,
-						timeout = 30.0,
+						stopDistance = 4.0,
+						timeout = 25.0,
 						sprint = true,
 						emulatePlayerMove = true,
 						shouldAbort = function()
 							if not HUB.Alive or not HUB.Config.autoJoinDungeon or (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
 							local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-							if r and (r.Position - DUNGEON_GATE_POS).Magnitude <= 50.0 then return true end
+							if r and (r.Position - DUNGEON_GATE_POS).Magnitude <= 6.0 then return true end
 							return false
 						end
 					})
 				end
-				task.wait(1.0)
+				task.wait(0.5)
 				continue
 			end
 
-			-- อยู่ในระยะหน้าประตู <= 65 studs: สั่งสร้างห้องเริ่มเล่นทันที
-			if tick() - lastEnterAttempt >= 4.0 then
+			-- อยู่ในระยะหน้า NPC <= 8 studs: ส่ง Handshake ผ่าน ProximityPrompt ก่อน
+			pcall(function()
+				local gk = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Village") and workspace.Map.Village:FindFirstChild("DungeonGate_Village") and workspace.Map.Village.DungeonGate_Village:FindFirstChild("GateKeeper")
+				local prompt = gk and gk:FindFirstChild("Torso") and gk.Torso:FindFirstChild("DungeonPrompt")
+				if prompt and prompt:IsA("ProximityPrompt") then
+					local fs = fireproximityprompt or rawget(EXEC.env, "fireproximityprompt")
+					if type(fs) == "function" then
+						fs(prompt)
+					end
+				end
+			end)
+			task.wait(0.3)
+
+			-- สั่งสร้างห้องเริ่มเล่นทันที
+			if tick() - lastEnterAttempt >= 3.5 then
 				lastEnterAttempt = tick()
 				if da then
 					da:FireServer("selectEnter", "halloween", diff)
 					HUB.Stats.dungeonRoomsEntered = (HUB.Stats.dungeonRoomsEntered or 0) + 1
-					if HUB.UI.JoinDungeonStatusLabel then
-						HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: สั่งเข้าดันเจี้ยน (%s) แล้ว! รอ Ready... ⚔️", diffLabel)
+					if not inParty then
+						if HUB.UI.JoinDungeonStatusLabel then
+							HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: สั่งเข้าแบบ Solo (%s) สำเร็จ! รอนับถอยหลังเข้าดันเจี้ยน... ⚔️", diffLabel)
+						end
+					else
+						if HUB.UI.JoinDungeonStatusLabel then
+							HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: สั่งเข้าดันเจี้ยน (%s) แล้ว! รอ Ready... ⚔️", diffLabel)
+						end
 					end
+					-- ปิดหน้าต่าง HuntDungeonSelect ไม่ให้บดบังจอ
+					pcall(function()
+						local pg = LocalPlayer:FindFirstChild("PlayerGui")
+						local hds = pg and pg:FindFirstChild("HuntDungeonSelect")
+						if hds then hds.Enabled = false end
+					end)
 					task.wait(1.5)
 				end
 			end
