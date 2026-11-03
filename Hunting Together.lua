@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.70)
+-- Hunting Together Hub (v9.71)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.70"
+local VERSION = "9.71"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -601,6 +601,7 @@ end
 function HUB.EnsureGameAutoActive(maxRetries, retryInterval)
 	-- ลำดับความสำคัญสูงสุด: ระหว่างจุดเทียนบอสห้ามเปิด Auto Play แย่งการเดิน
 	if HUB.BrazierPriority then return HUB.IsGameAutoActive() end
+	if HUB.DungeonCountdownHold or HUB.DungeonClearHold then return HUB.IsGameAutoActive() end
 	-- Town Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากตัวละครอยู่ในเมือง (ในเมืองไม่มีมอนสเตอร์ป่าเด็ดขาด มีเฉพาะ TrainingDummy)
 	if HUB.IsInTown and HUB.IsInTown() then
 		return false
@@ -13681,6 +13682,8 @@ do
 
 			-- 0. ตรวจสอบเวลานับถอยหลังเริ่มดันเจี้ยน (Start Countdown Guard)
 			local isCounting, cdText = isDungeonStartingCountdown()
+			HUB.DungeonCountdownHold = isCounting == true
+			if isCounting and HUB.IsGameAutoActive() then HUB.DisableGameAutoPlay() end
 			if isCounting then
 				if hum then
 					hum:Move(Vector3.zero, false)
@@ -13705,54 +13708,43 @@ do
 			end
 
 			local dState = workspace:GetAttribute("DungeonState")
-			if dState ~= "cleared" then HUB.AfterClear = nil end
+			if dState ~= "cleared" then HUB.AfterClear = nil; HUB.DungeonClearHold = false end
 			local dStep = tonumber(workspace:GetAttribute("DungeonStep")) or 1
 			if dStep ~= lastStep then
 				lastStep = dStep
 				visitedSpots = {}
 			end
 
-			-- 2. เมื่อเคลียร์ดันเจี้ยนสำเร็จ (State == 'cleared'): ทำตามตัวเลือกหลังเคลียร์ (Replay / Leave / รอให้ดันพาออกเอง)
+			-- 2. เมื่อเคลียร์ดันเจี้ยนสำเร็จ (State == 'cleared'): เปิดกล่องจบ → รอสัตว์เลี้ยงเก็บของ → ค่อยทำ action หลังจบ (Replay / Leave / รอ)
 			if dState == "cleared" then
 				local afterClear = HUB.Config.dungeonAfterClear or "wait"
 				local ac = HUB.AfterClear
 				if not ac then
-					ac = { replayFired = false, popupVoted = false, leaveFired = false, chestTriggeredAt = nil, startedAt = os.clock() }
+					ac = { replayFired = false, popupVoted = false, leaveFired = false, chestTriggeredAt = nil, chestDoneAt = nil, startedAt = os.clock() }
 					HUB.AfterClear = ac
 				end
 				local remaining = getReplayRemaining()
 				local statusTxt = nil
 
-				-- A) Replay: หัวหน้าปาร์ตี้ขอ replay ก่อนเวลาส่งกลับ (ทำก่อนเปิดกล่องเพราะเวลามีจำกัด)
-				if afterClear == "replay" then
-					if isReplayLeader() then
-						if not ac.replayFired and remaining > REPLAY_MIN_REMAINING then
-							ac.replayFired = fireDungeonAction("replayStart") and true or false
-							if ac.replayFired then
-								HUB.Stats.replayRequests = (HUB.Stats.replayRequests or 0) + 1
-							end
+				-- ตัวช่วย: มีของที่ตกอยู่ใกล้จุดนี้หรือไม่ (สัตว์เลี้ยงจะเก็บของจากจุดเหล่านี้)
+				local function lootNearby(pos, radius)
+					local drops = workspace:FindFirstChild("Drops")
+					if not drops then return false end
+					for _, d in ipairs(drops:GetChildren()) do
+						local p = nil
+						if d:IsA("BasePart") then
+							p = d.Position
+						elseif d:IsA("Model") then
+							p = d:GetPivot().Position
 						end
-						if ac.replayFired then
-							statusTxt = "สถานะ: ขอ Replay แล้ว รอสมาชิกตอบรับ 🔁"
-						elseif remaining <= REPLAY_MIN_REMAINING then
-							statusTxt = string.format("สถานะ: Replay ไม่ทัน (เหลือ %d วิ) รอให้ดันพาออก ⏳", math.max(0, math.floor(remaining)))
-						end
-					else
-						-- สมาชิกที่ไม่ใช่หัวหน้า: เมื่อมีป๊อปอัปขอ replay ให้ตอบรับ (ทำครั้งเดียวต่อป๊อปอัป)
-						local pop = getReplayPopup()
-						if pop then
-							if not ac.popupVoted then
-								ac.popupVoted = fireDungeonAction("replayVote", true) and true or false
-							end
-							statusTxt = "สถานะ: ตอบรับ Replay ที่หัวหน้าขอแล้ว 🔁"
-						else
-							ac.popupVoted = false
-							statusTxt = "สถานะ: รอหัวหน้าปาร์ตี้ขอ Replay (ถ้าไม่มีจะรอให้ดันพาออก) ⏳"
+						if p and (p - pos).Magnitude <= radius then
+							return true
 						end
 					end
+					return false
 				end
 
-				-- B) เปิดกล่องจบดันเจี้ยน (ทำคู่ขนานกับ Replay เหมือนเดิม) และบันทึกเวลาที่กดเพื่อใช้ตัดสินว่าเปิดเสร็จ
+				-- B) เปิดกล่องจบดันเจี้ยนก่อนทุกอย่าง (กล่องของผู้เล่นคนนี้)
 				local chestFinished = true
 				if HUB.Config.dungeonAutoExitChest ~= false then
 					local chest = findExitChest()
@@ -13775,34 +13767,75 @@ do
 								end
 							else
 								local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
-								if prompt then
-									triggerPromptSafe(prompt)
-									if not ac.chestTriggeredAt then ac.chestTriggeredAt = os.clock() end
+								if not prompt then
+									chestFinished = true
+								else
+									if prompt.Enabled then
+										triggerPromptSafe(prompt)
+										if not ac.chestTriggeredAt then ac.chestTriggeredAt = os.clock() end
+									end
+									local trig = ac.chestTriggeredAt
+									-- ถือว่าเปิดเสร็จเมื่อ prompt ดับ หรือครบ 4 วิหลังกด (กันค้างถ้า prompt ไม่ดับ)
+									chestFinished = trig ~= nil and (os.clock() - trig >= 1.5) and ((not prompt.Enabled) or (os.clock() - trig >= 4))
 								end
-								chestFinished = (ac.chestTriggeredAt ~= nil and os.clock() - ac.chestTriggeredAt >= 2.0)
 							end
 						end
 					end
 				end
 				if os.clock() - ac.startedAt >= 25 then chestFinished = true end
 
-				-- C) Leave: ออกหลังเปิดกล่องเสร็จเท่านั้น (ไม่ออกก่อนเพื่อไม่ให้เสียรางวัลกล่องจบ)
-				if afterClear == "leave" then
-					if chestFinished and not ac.leaveFired then
-						ac.leaveFired = fireDungeonAction("leave") and true or false
-					end
-					if not chestFinished then
-						statusTxt = "สถานะ: กำลังเปิดกล่องจบก่อนออก 🎁"
-					elseif ac.leaveFired then
-						statusTxt = "สถานะ: กำลังออกจากดันเจี้ยนตามที่ตั้งไว้ 🚪"
-					else
-						statusTxt = "สถานะ: เปิดกล่องจบแล้ว กำลังส่งคำสั่งออก 🚪"
-					end
+				-- C) รอให้สัตว์เลี้ยงเก็บของที่ตกหลังเปิดกล่องเสร็จ (หยุดเมื่อไม่มีของใกล้ตัว หรือครบ 8 วิ)
+				local petFinished = false
+				if chestFinished then
+					ac.chestDoneAt = ac.chestDoneAt or os.clock()
+					petFinished = (not lootNearby(root.Position, 45)) or (os.clock() - ac.chestDoneAt >= 8)
 				end
 
-				-- D) Wait: ไม่ทำอะไรเพิ่ม รอให้เกมส่งกลับเมืองเอง
-				if afterClear == "wait" then
-					statusTxt = "สถานะ: เคลียร์ดันเจี้ยนสำเร็จ! รอดันเจี้ยนส่งตัวกลับเมือง... 🏛️"
+				-- ระหว่างยังเปิดกล่อง/รอสัตว์เลี้ยง ห้ามให้ Auto Play พาวิ่งไปไหน
+				HUB.DungeonClearHold = not petFinished
+				if HUB.DungeonClearHold and HUB.IsGameAutoActive() then
+					HUB.DisableGameAutoPlay()
+				end
+
+				-- D) action หลังจบดัน: ทำเฉพาะเมื่อเปิดกล่องและเก็บของเสร็จแล้ว
+				if petFinished then
+					if afterClear == "replay" then
+						if isReplayLeader() then
+							if not ac.replayFired and remaining > REPLAY_MIN_REMAINING then
+								ac.replayFired = fireDungeonAction("replayStart") and true or false
+								if ac.replayFired then
+									HUB.Stats.replayRequests = (HUB.Stats.replayRequests or 0) + 1
+								end
+							end
+							if ac.replayFired then
+								statusTxt = "สถานะ: ขอ Replay แล้ว รอสมาชิกตอบรับ 🔁"
+							elseif remaining <= REPLAY_MIN_REMAINING then
+								statusTxt = string.format("สถานะ: Replay ไม่ทัน (เหลือ %d วิ) รอให้ดันพาออก ⏳", math.max(0, math.floor(remaining)))
+							end
+						else
+							local pop = getReplayPopup()
+							if pop then
+								if not ac.popupVoted then
+									ac.popupVoted = fireDungeonAction("replayVote", true) and true or false
+								end
+								statusTxt = "สถานะ: ตอบรับ Replay ที่หัวหน้าขอแล้ว 🔁"
+							else
+								ac.popupVoted = false
+								statusTxt = "สถานะ: รอหัวหน้าปาร์ตี้ขอ Replay (ถ้าไม่มีจะรอให้ดันพาออก) ⏳"
+							end
+						end
+					elseif afterClear == "leave" then
+						if not ac.leaveFired then
+							ac.leaveFired = fireDungeonAction("leave") and true or false
+						end
+						statusTxt = ac.leaveFired and "สถานะ: กำลังออกจากดันเจี้ยนตามที่ตั้งไว้ 🚪" or "สถานะ: ส่งคำสั่งออกจากดันเจี้ยน... 🚪"
+					else
+						statusTxt = "สถานะ: เคลียร์ดันเจี้ยนสำเร็จ! รอดันเจี้ยนส่งตัวกลับเมือง... 🏛️"
+					end
+				elseif not chestFinished then
+					statusTxt = "สถานะ: กำลังเปิดกล่องจบดันเจี้ยน... 🎁"
+				else
+					statusTxt = "สถานะ: รอสัตว์เลี้ยงเก็บของที่ตกอยู่ก่อนทำ action 🐾"
 				end
 
 				if HUB.UI and HUB.UI.DungeonStatusLabel and statusTxt then
