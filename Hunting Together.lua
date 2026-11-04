@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.72)
+-- Hunting Together Hub (v9.73)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.72"
+local VERSION = "9.73"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -8211,21 +8211,24 @@ HUB.NavigatePath = navigatePath
 -- =========================================================================
 -- Central Pillar Warp Synchronization Engine (Zero Silver Drain & Handshake Guaranteed)
 -- =========================================================================
--- ขอ Streaming รอบตัวแบบมี Deadline: RequestStreamAroundAsync บางครั้งค้างไม่คืนค่าเลย (เคสจริง 04/11/2026: รูทีนบอสค้างหลังวาร์ป)
--- ยิงในเธรดแยกแล้วรอไม่เกิน maxWait วินาที ⇒ รูทีนหลักไม่ค้างตาม (เธรดที่ค้างจะอยู่เฉย ๆ ไม่กระทบการทำงาน)
-HUB.RequestStreamBounded = function(pos, radius, maxWait)
-	local done = false
-	task.spawn(function()
-		pcall(function()
-			LocalPlayer:RequestStreamAroundAsync(pos, radius)
-		end)
-		done = true
-	end)
+-- รอพื้นใต้ตัวละครโหลดเสร็จหลังวาร์ป (ไม่ยิงคำขอเข้า engine)
+-- เดิมใช้ RequestStreamAroundAsync(root.Position, 3) ซึ่งซ้ำกับที่ engine โหลดรอบตัวละครให้อยู่แล้ว
+-- และบางครั้งไม่คืนค่าเลย ⇒ คำขอค้างสะสมตลอดการฟาร์ม (v9.73 เลิกเรียกแล้ว)
+-- คืน true เมื่อ raycast ลงไปเจอพื้นที่ชนได้ · false เมื่อหมดเวลา (ให้ทำงานต่อได้เลย)
+HUB.WaitGroundReady = function(root, maxWait)
 	local t0 = os.clock()
-	while not done and os.clock() - t0 < maxWait do
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	while os.clock() - t0 < maxWait do
+		if not root or not root.Parent then return false end
+		rp.FilterDescendantsInstances = { root.Parent }
+		local hit = workspace:Raycast(root.Position + Vector3.new(0, 2, 0), Vector3.new(0, -32, 0), rp)
+		if hit and hit.Instance and hit.Instance.CanCollide then
+			return true
+		end
 		task.wait(0.1)
 	end
-	return done
+	return false
 end
 
 local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
@@ -8422,9 +8425,7 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 			while (root.Anchored and os.clock() - tWarpDone < 1.8) do
 				task.wait(0.08)
 			end
-			pcall(function()
-				HUB.RequestStreamBounded(root.Position, 3, 2.5)
-			end)
+			HUB.WaitGroundReady(root, 2.5)
 			task.wait(0.15)
 		end
 	end
@@ -9881,14 +9882,12 @@ do
 					return
 				end
 
-				-- รอ WarpLandClient ปล่อย Anchored และ RequestStreamAroundAsync พื้นที่เมืองรอบตัว
+				-- รอ WarpLandClient ปล่อย Anchored และรอพื้นเมืองใต้ตัวโหลดเสร็จ
 				local tWarpDone = os.clock()
 				while (root and root.Anchored and os.clock() - tWarpDone < 1.8) do
 					task.wait(0.08)
 				end
-				pcall(function()
-					HUB.RequestStreamBounded(root.Position, 3, 2.5)
-				end)
+				HUB.WaitGroundReady(root, 2.5)
 				task.wait(0.15)
 			end
 
@@ -12190,25 +12189,9 @@ do
 		HUB.Dodging = false
 	end
 
-	-- Metamethod Interceptor: บล็อกคำสั่ง Jump = true บน Humanoid ทุกกรณี (CombatClient Anti-Stuck Jump Elimination 100%)
-	local function installJumpBlockHook()
-		local hookFn = EXEC.hookmetamethod or (hookmetamethod and hookmetamethod)
-		if type(hookFn) == "function" and not rawget(EXEC.env, "HuntingTogetherHub_JumpHookInstalled") then
-			local oldNewIndex
-			oldNewIndex = hookFn(game, "__newindex", function(self, key, value)
-				if (key == "Jump" or key == "jump") and value == true then
-					local ch = LocalPlayer.Character
-					local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-					if self == hum then
-						return -- บล็อกคำสั่งกระโดดของ CombatClient และสคริปต์ภายนอก 100%!
-					end
-				end
-				return oldNewIndex(self, key, value)
-			end)
-			rawset(EXEC.env, "HuntingTogetherHub_JumpHookInstalled", true)
-		end
-	end
-	installJumpBlockHook()
+	-- v9.73: ไม่บล็อกการกระโดดอีกแล้ว (เลิก hook __newindex · เลิกล้าง hum.Jump ทุกเฟรม · เลิกปิด state Jumping)
+	-- hub ไม่มีคำสั่งกระโดดเลย (Pathfinding ตั้ง AgentCanJump = false) และคำสั่งกระโดดเดียวของเกมอยู่ใน
+	-- CombatClient.navStep (ระบบนำทางไปหา NPC เดินติดเกิน 1.2 วิ) ⇒ ไม่มีอะไรต้องบล็อก
 
 	local function hookHumanoid(char)
 		if not char then return end
@@ -12222,17 +12205,18 @@ do
 		end
 		if hum then
 			HUB:AddConnection(hum.Died:Connect(onCharacterDied))
-			-- Anti-Ragdoll & Jump Elimination Vaccine 5 ชั้น (ป้องกันสะดุดล้มและยกเลิก State ทุกชนิด 100%)
+			-- Anti-Ragdoll (ป้องกันสะดุดล้ม) — ไม่รวม Jumping
 			local disabledStates = {
 				Enum.HumanoidStateType.Ragdoll,
 				Enum.HumanoidStateType.FallingDown,
-				Enum.HumanoidStateType.Jumping,
 				Enum.HumanoidStateType.PlatformStanding,
 				Enum.HumanoidStateType.Physics,
 			}
 			for _, st in ipairs(disabledStates) do
 				pcall(function() hum:SetStateEnabled(st, false) end)
 			end
+			-- คืนค่า Jumping ที่ hub เวอร์ชันก่อน v9.73 เคยปิดไว้บนตัวละครเดิม (กรณีโหลดทับในเซิร์ฟเดิม)
+			pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true) end)
 
 			-- Auto-Recovery ในเสี้ยววินาที: ดักจับ StateChanged กู้คืนสถานะเป็น Running ทันทีหากเอนจินพยายามเปลี่ยน State
 			HUB:AddConnection(hum.StateChanged:Connect(function(old, new)
@@ -12243,13 +12227,6 @@ do
 					pcall(function()
 						hum:ChangeState(Enum.HumanoidStateType.Running)
 					end)
-				end
-			end))
-
-			-- Fallback Watcher: บังคับล้าง hum.Jump ทุกเฟรม Heartbeat ป้องกันการรั่วไหล
-			HUB:AddConnection(RunService.Heartbeat:Connect(function()
-				if hum.Jump then
-					hum.Jump = false
 				end
 			end))
 		end
@@ -12280,7 +12257,6 @@ do
 					local disabledStates = {
 						Enum.HumanoidStateType.Ragdoll,
 						Enum.HumanoidStateType.FallingDown,
-						Enum.HumanoidStateType.Jumping,
 						Enum.HumanoidStateType.PlatformStanding,
 						Enum.HumanoidStateType.Physics,
 					}
@@ -12288,14 +12264,11 @@ do
 						pcall(hum.SetStateEnabled, hum, st, false)
 					end
 					local curSt = hum:GetState()
-					if curSt == Enum.HumanoidStateType.Ragdoll 
-						or curSt == Enum.HumanoidStateType.FallingDown 
-						or curSt == Enum.HumanoidStateType.PlatformStanding 
+					if curSt == Enum.HumanoidStateType.Ragdoll
+						or curSt == Enum.HumanoidStateType.FallingDown
+						or curSt == Enum.HumanoidStateType.PlatformStanding
 						or curSt == Enum.HumanoidStateType.Physics then
 						hum:ChangeState(Enum.HumanoidStateType.Running)
-					end
-					if hum.Jump then
-						hum.Jump = false
 					end
 				end
 
