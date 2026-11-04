@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.75)
+-- Hunting Together Hub (v9.76)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.75"
+local VERSION = "9.76"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -13788,10 +13788,8 @@ do
 				local afterClear = HUB.Config.dungeonAfterClear or "wait"
 				local ac = HUB.AfterClear
 				if not ac then
-					ac = { replayFired = false, popupVoted = false, leaveFired = false, lastChestTrigger = 0, chestDoneAt = nil, startedAt = os.clock() }
+					ac = { replayFired = false, popupVoted = false, leaveFired = false, lastChestTrigger = 0, chestDoneAt = nil, startedAt = os.clock(), navCancelled = false }
 					HUB.AfterClear = ac
-					-- ฆ่าบอสจบ = หยุดการเดินที่ค้างอยู่ (ลาดตระเวน/กล่องลับ/ไล่มอน) เพื่อเดินไปเปิดกล่องจบดันทันที
-					HUB.CancelNavigation()
 				end
 				local remaining = getReplayRemaining()
 				-- เวลาที่เหลือก่อนเกมส่งกลับเมือง (ถ้าไม่มี DungeonReturnAt ใช้ 60 วิจากตอนเคลียร์)
@@ -13834,6 +13832,12 @@ do
 						local promptPart = prompt and prompt.Parent
 						if promptPart and promptPart:IsA("BasePart") then cPos = promptPart.Position end
 						local dist = (cPos - root.Position).Magnitude
+						-- บอสตายจบดันจริง (DungeonState = cleared + กล่องจบดันของเราโผล่แล้ว) ⇒ หยุดการเดินที่ค้าง 1 ครั้ง
+						-- แล้วเดินไปกล่องทันที · ระหว่างดันไม่มีจุดไหนเรียก CancelNavigation
+						if dist > 6.0 and not ac.navCancelled then
+							ac.navCancelled = true
+							if HUB.Navigating then HUB.CancelNavigation() end
+						end
 						if dist > 6.0 then
 							if not HUB.Navigating then
 								HUB.NavigatePath(cPos, {
