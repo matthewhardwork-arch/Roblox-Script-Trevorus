@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.71)
+-- Hunting Together Hub (v9.72)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.71"
+local VERSION = "9.72"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -8211,6 +8211,23 @@ HUB.NavigatePath = navigatePath
 -- =========================================================================
 -- Central Pillar Warp Synchronization Engine (Zero Silver Drain & Handshake Guaranteed)
 -- =========================================================================
+-- ขอ Streaming รอบตัวแบบมี Deadline: RequestStreamAroundAsync บางครั้งค้างไม่คืนค่าเลย (เคสจริง 04/11/2026: รูทีนบอสค้างหลังวาร์ป)
+-- ยิงในเธรดแยกแล้วรอไม่เกิน maxWait วินาที ⇒ รูทีนหลักไม่ค้างตาม (เธรดที่ค้างจะอยู่เฉย ๆ ไม่กระทบการทำงาน)
+HUB.RequestStreamBounded = function(pos, radius, maxWait)
+	local done = false
+	task.spawn(function()
+		pcall(function()
+			LocalPlayer:RequestStreamAroundAsync(pos, radius)
+		end)
+		done = true
+	end)
+	local t0 = os.clock()
+	while not done and os.clock() - t0 < maxWait do
+		task.wait(0.1)
+	end
+	return done
+end
+
 local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 	if not nearPillar or not targetPillarId then return false end
 	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -8406,7 +8423,7 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 				task.wait(0.08)
 			end
 			pcall(function()
-				LocalPlayer:RequestStreamAroundAsync(root.Position, 3)
+				HUB.RequestStreamBounded(root.Position, 3, 2.5)
 			end)
 			task.wait(0.15)
 		end
@@ -9870,7 +9887,7 @@ do
 					task.wait(0.08)
 				end
 				pcall(function()
-					LocalPlayer:RequestStreamAroundAsync(root.Position, 3)
+					HUB.RequestStreamBounded(root.Position, 3, 2.5)
 				end)
 				task.wait(0.15)
 			end
