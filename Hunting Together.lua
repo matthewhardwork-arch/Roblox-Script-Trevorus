@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.76)
+-- Hunting Together Hub (v9.77)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.76"
+local VERSION = "9.77"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -13788,7 +13788,7 @@ do
 				local afterClear = HUB.Config.dungeonAfterClear or "wait"
 				local ac = HUB.AfterClear
 				if not ac then
-					ac = { replayFired = false, popupVoted = false, leaveFired = false, lastChestTrigger = 0, chestDoneAt = nil, startedAt = os.clock(), navCancelled = false }
+					ac = { leaveFired = false, replayStarts = 0, lastReplayStart = 0, lastReplayVote = 0, lastReplayBuy = 0, lastChestTrigger = 0, chestDoneAt = nil, startedAt = os.clock(), navCancelled = false }
 					HUB.AfterClear = ac
 				end
 				local remaining = getReplayRemaining()
@@ -13887,29 +13887,51 @@ do
 					statusTxt = string.format("สถานะ: รอเพื่อนเปิดกล่องจบดัน (%s) · เหลือ %d วิ 🎁", table.concat(partyPending, ", "), math.max(0, math.floor(timeLeft)))
 				elseif petFinished then
 					if afterClear == "replay" then
+						-- ตามโค้ดเกม (DungeonClient.refreshReplayBtn): ปุ่ม REPLAY โชว์เฉพาะคนที่ DungeonReplayLeader == UserId ตัวเอง
+						-- (ลงเดี่ยว = ตัวเรา · ลงปาร์ตี้ = หัวตี้) · ยังไม่มีคำขอค้าง (ป๊อปอัปปิด) · เหลือ > 4 วิ
+						local pop = getReplayPopup()
+						local soloRun = #Players:GetPlayers() <= 1
 						if isReplayLeader() then
-							if not ac.replayFired and remaining > REPLAY_MIN_REMAINING then
-								ac.replayFired = fireDungeonAction("replayStart") and true or false
-								if ac.replayFired then
+							if not pop and remaining > REPLAY_MIN_REMAINING and os.clock() - (ac.lastReplayStart or 0) >= 3 and (ac.replayStarts or 0) < 3 then
+								-- คำขอเดิมถูกยกเลิก (ป๊อปอัปปิด) เกมจะโชว์ปุ่มให้กดใหม่ ⇒ ขอซ้ำได้ เว้น 3 วิ สูงสุด 3 ครั้ง
+								if fireDungeonAction("replayStart") then
+									ac.lastReplayStart = os.clock()
+									ac.replayStarts = (ac.replayStarts or 0) + 1
 									HUB.Stats.replayRequests = (HUB.Stats.replayRequests or 0) + 1
 								end
 							end
-							if ac.replayFired then
-								statusTxt = "สถานะ: ขอ Replay แล้ว รอสมาชิกตอบรับ 🔁"
+							if pop then
+								statusTxt = soloRun and "สถานะ: กด Replay แล้ว รอเริ่มรอบใหม่ 🔁" or "สถานะ: ขอ Replay แล้ว รอสมาชิกกด Accept 🔁"
 							elseif remaining <= REPLAY_MIN_REMAINING then
 								statusTxt = string.format("สถานะ: Replay ไม่ทัน (เหลือ %d วิ) รอให้ดันพาออก ⏳", math.max(0, math.floor(remaining)))
+							elseif (ac.replayStarts or 0) >= 3 then
+								statusTxt = "สถานะ: ขอ Replay ครบ 3 ครั้งแล้วไม่สำเร็จ รอให้ดันพาออก ⏳"
+							else
+								statusTxt = "สถานะ: กำลังกด Replay... 🔁"
+							end
+						elseif pop then
+							-- สมาชิก: ป๊อปอัป "X wants to replay!" · ReplayAccept (attribute Voted) · ReplayBuyKey (โชว์เมื่อไม่มีสิทธิ์ลง · attribute CanBuy)
+							local acceptBtn = pop:FindFirstChild("ReplayAccept")
+							local buyBtn = pop:FindFirstChild("ReplayBuyKey")
+							local voted = acceptBtn and acceptBtn:GetAttribute("Voted") == true
+							local needKey = buyBtn and buyBtn.Visible
+							if voted then
+								statusTxt = "สถานะ: กด Accept Replay แล้ว รอหัวตี้เริ่มรอบใหม่ 🔁"
+							elseif needKey then
+								if HUB.Config.dungeonAutoBuyKey ~= false and buyBtn:GetAttribute("CanBuy") == true and os.clock() - (ac.lastReplayBuy or 0) >= 2 then
+									ac.lastReplayBuy = os.clock()
+									fireDungeonAction("replayBuyKey")
+								end
+								statusTxt = "สถานะ: ไม่มีรอบฟรี/กุญแจสำหรับ Replay " .. ((HUB.Config.dungeonAutoBuyKey ~= false) and "· กำลังซื้อกุญแจ 🔑" or "· ปิดซื้อกุญแจอัตโนมัติอยู่ ⏳")
+							else
+								if os.clock() - (ac.lastReplayVote or 0) >= 1.5 then
+									ac.lastReplayVote = os.clock()
+									fireDungeonAction("replayVote", true)
+								end
+								statusTxt = "สถานะ: กำลังกด Accept Replay ที่หัวตี้ขอ... 🔁"
 							end
 						else
-							local pop = getReplayPopup()
-							if pop then
-								if not ac.popupVoted then
-									ac.popupVoted = fireDungeonAction("replayVote", true) and true or false
-								end
-								statusTxt = "สถานะ: ตอบรับ Replay ที่หัวหน้าขอแล้ว 🔁"
-							else
-								ac.popupVoted = false
-								statusTxt = "สถานะ: รอหัวหน้าปาร์ตี้ขอ Replay (ถ้าไม่มีจะรอให้ดันพาออก) ⏳"
-							end
+							statusTxt = "สถานะ: รอหัวตี้กด Replay (ถ้าไม่กดจะรอให้ดันพาออก) ⏳"
 						end
 					elseif afterClear == "leave" then
 						if not ac.leaveFired then
