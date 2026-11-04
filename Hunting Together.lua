@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.73)
+-- Hunting Together Hub (v9.75)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.73"
+local VERSION = "9.75"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -366,6 +366,7 @@ local HUB = {
 		speedBoostPct = 15,
 		speedBaseClean = 0,
 		autoJoinDungeon = false,
+		dungeonAutoJoin = true,
 		dungeonDifficulty = "easy",
 		dungeonAutoBuyKey = true,
 		dungeonAutoReady = true,
@@ -972,6 +973,7 @@ local function saveConfig()
 		speedBoostPct = HUB.Config.speedBoostPct or 15,
 		speedBaseClean = HUB.Config.speedBaseClean or 0,
 		autoJoinDungeon = (HUB.Config.autoJoinDungeon == true),
+		dungeonAutoJoin = (HUB.Config.dungeonAutoJoin ~= false),
 		dungeonDifficulty = HUB.Config.dungeonDifficulty or "easy",
 		dungeonAutoBuyKey = (HUB.Config.dungeonAutoBuyKey ~= false),
 		dungeonAutoReady = (HUB.Config.dungeonAutoReady ~= false),
@@ -1019,6 +1021,7 @@ local function loadConfig()
 				if tonumber(data.speedBoostPct) then HUB.Config.speedBoostPct = math.clamp(tonumber(data.speedBoostPct), 0, 30) end
 				if tonumber(data.speedBaseClean) then HUB.Config.speedBaseClean = tonumber(data.speedBaseClean) end
 				if data.autoJoinDungeon ~= nil then HUB.Config.autoJoinDungeon = data.autoJoinDungeon end
+				if data.dungeonAutoJoin ~= nil then HUB.Config.dungeonAutoJoin = (data.dungeonAutoJoin ~= false) end
 				if data.dungeonDifficulty ~= nil then HUB.Config.dungeonDifficulty = data.dungeonDifficulty end
 				if data.dungeonAutoBuyKey ~= nil then HUB.Config.dungeonAutoBuyKey = data.dungeonAutoBuyKey end
 				if data.dungeonAutoReady ~= nil then HUB.Config.dungeonAutoReady = data.dungeonAutoReady end
@@ -4168,18 +4171,57 @@ do
 		nil,
 		function(subPanel, card, cStatus, setExpandHeight)
 			if setExpandHeight then
-				setExpandHeight(360, 444)
+				setExpandHeight(390, 474)
 			end
-			subPanel.Size = UDim2.new(1, -24, 0, 360)
+			subPanel.Size = UDim2.new(1, -24, 0, 390)
 
 			-- =========================================================================
 			-- ส่วนที่ 1 (ด้านบน): ตั้งค่าการเข้าดันเจี้ยน (Dungeon Matchmaking Settings)
 			-- =========================================================================
 
+			-- แถวที่ 0 (v9.75): Auto Join ดันเจี้ยน — ปิดไว้ได้เมื่อออกจากดันแล้วไม่อยากให้ hub พากลับเข้าไปอีก
+			-- ปิดเฉพาะการเข้าดัน (สร้างห้อง/ซื้อกุญแจ/Ready/เดินไปประตู) · Auto Play ในดันยังทำงานตามสวิตช์หลัก
+			local lblAutoJoin = Instance.new("TextLabel")
+			lblAutoJoin.Size = UDim2.new(1, -165, 0, 26)
+			lblAutoJoin.Position = UDim2.new(0, 10, 0, 6)
+			lblAutoJoin.BackgroundTransparency = 1
+			lblAutoJoin.Text = "🚪 Auto Join ดันเจี้ยน:"
+			lblAutoJoin.TextColor3 = Color3.fromRGB(255, 220, 100)
+			lblAutoJoin.TextSize = 12
+			lblAutoJoin.TextXAlignment = Enum.TextXAlignment.Left
+			applyFont(lblAutoJoin, true)
+			lblAutoJoin.Parent = subPanel
+
+			local autoJoinToggleBtn = Instance.new("TextButton")
+			autoJoinToggleBtn.Size = UDim2.new(0, 145, 0, 26)
+			autoJoinToggleBtn.Position = UDim2.new(1, -155, 0, 6)
+			autoJoinToggleBtn.BorderSizePixel = 0
+			applyFont(autoJoinToggleBtn, true)
+			autoJoinToggleBtn.TextSize = 12
+			autoJoinToggleBtn.Parent = subPanel
+			local ajCorner = Instance.new("UICorner")
+			ajCorner.CornerRadius = UDim.new(0, 6)
+			ajCorner.Parent = autoJoinToggleBtn
+
+			local function refreshAutoJoinBtn()
+				local on = (HUB.Config.dungeonAutoJoin ~= false)
+				autoJoinToggleBtn.BackgroundColor3 = on and THEME.BtnGreen or THEME.BtnOff
+				autoJoinToggleBtn.TextColor3 = on and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+				autoJoinToggleBtn.Text = on and "เปิดใช้งาน (ON)" or "ปิดใช้งาน (OFF)"
+			end
+			refreshAutoJoinBtn()
+
+			HUB:AddConnection(autoJoinToggleBtn.MouseButton1Click:Connect(function()
+				HUB.Config.dungeonAutoJoin = not (HUB.Config.dungeonAutoJoin ~= false)
+				refreshAutoJoinBtn()
+				if HUB.Config.autoSave then saveConfig() end
+				if refreshDungeonStatus then refreshDungeonStatus() end
+			end))
+
 			-- แถวที่ 1: เลือกระดับความยาก (Difficulty): [Easy] [Normal] (ปุ่มติ๊กคู่)
 			local lblDiff = Instance.new("TextLabel")
 			lblDiff.Size = UDim2.new(1, -165, 0, 26)
-			lblDiff.Position = UDim2.new(0, 10, 0, 6)
+			lblDiff.Position = UDim2.new(0, 10, 0, 36)
 			lblDiff.BackgroundTransparency = 1
 			lblDiff.Text = "🎯 ระดับความยาก (Difficulty):"
 			lblDiff.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4190,7 +4232,7 @@ do
 
 			local btnEasy = Instance.new("TextButton")
 			btnEasy.Size = UDim2.new(0, 70, 0, 26)
-			btnEasy.Position = UDim2.new(1, -155, 0, 6)
+			btnEasy.Position = UDim2.new(1, -155, 0, 36)
 			btnEasy.BorderSizePixel = 0
 			applyFont(btnEasy, true)
 			btnEasy.TextSize = 12
@@ -4204,7 +4246,7 @@ do
 
 			local btnNormal = Instance.new("TextButton")
 			btnNormal.Size = UDim2.new(0, 70, 0, 26)
-			btnNormal.Position = UDim2.new(1, -80, 0, 6)
+			btnNormal.Position = UDim2.new(1, -80, 0, 36)
 			btnNormal.BorderSizePixel = 0
 			applyFont(btnNormal, true)
 			btnNormal.TextSize = 12
@@ -4259,7 +4301,7 @@ do
 			-- แถวที่ 2: ซื้อกุญแจอัตโนมัติ (500K Silver เมื่อกุญแจหมด)
 			local lblKey = Instance.new("TextLabel")
 			lblKey.Size = UDim2.new(1, -165, 0, 26)
-			lblKey.Position = UDim2.new(0, 10, 0, 36)
+			lblKey.Position = UDim2.new(0, 10, 0, 66)
 			lblKey.BackgroundTransparency = 1
 			lblKey.Text = "🔑 ซื้อกุญแจอัตโนมัติ (500K Silver):"
 			lblKey.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4270,7 +4312,7 @@ do
 
 			local keyToggleBtn = Instance.new("TextButton")
 			keyToggleBtn.Size = UDim2.new(0, 145, 0, 26)
-			keyToggleBtn.Position = UDim2.new(1, -155, 0, 36)
+			keyToggleBtn.Position = UDim2.new(1, -155, 0, 66)
 			keyToggleBtn.BorderSizePixel = 0
 			applyFont(keyToggleBtn, true)
 			keyToggleBtn.TextSize = 12
@@ -4296,7 +4338,7 @@ do
 			-- แถวที่ 3: กด Ready อัตโนมัติ (เมื่อเป็นสมาชิกปาร์ตี้)
 			local lblReady = Instance.new("TextLabel")
 			lblReady.Size = UDim2.new(1, -165, 0, 26)
-			lblReady.Position = UDim2.new(0, 10, 0, 66)
+			lblReady.Position = UDim2.new(0, 10, 0, 96)
 			lblReady.BackgroundTransparency = 1
 			lblReady.Text = "✅ กด Ready อัตโนมัติ (สมาชิก):"
 			lblReady.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4307,7 +4349,7 @@ do
 
 			local readyToggleBtn = Instance.new("TextButton")
 			readyToggleBtn.Size = UDim2.new(0, 145, 0, 26)
-			readyToggleBtn.Position = UDim2.new(1, -155, 0, 66)
+			readyToggleBtn.Position = UDim2.new(1, -155, 0, 96)
 			readyToggleBtn.BorderSizePixel = 0
 			applyFont(readyToggleBtn, true)
 			readyToggleBtn.TextSize = 12
@@ -4335,14 +4377,14 @@ do
 			-- =========================================================================
 			local divFrame = Instance.new("Frame")
 			divFrame.Size = UDim2.new(1, -20, 0, 1)
-			divFrame.Position = UDim2.new(0, 10, 0, 98)
+			divFrame.Position = UDim2.new(0, 10, 0, 128)
 			divFrame.BackgroundColor3 = Color3.fromRGB(60, 80, 120)
 			divFrame.BorderSizePixel = 0
 			divFrame.Parent = subPanel
 
 			local divTitle = Instance.new("TextLabel")
 			divTitle.Size = UDim2.new(1, -20, 0, 14)
-			divTitle.Position = UDim2.new(0, 10, 0, 102)
+			divTitle.Position = UDim2.new(0, 10, 0, 132)
 			divTitle.BackgroundTransparency = 1
 			divTitle.Text = "⚔️ ระบบตะลุยดันเจี้ยน (DUNGEON COMBAT & CLEAR)"
 			divTitle.TextColor3 = Color3.fromRGB(150, 185, 240)
@@ -4358,7 +4400,7 @@ do
 			-- แถวที่ 4: วิ่งเก็บหัวกะโหลกบอส (Priority เหนือกว่า Dodge)
 			local lblSkull = Instance.new("TextLabel")
 			lblSkull.Size = UDim2.new(1, -165, 0, 26)
-			lblSkull.Position = UDim2.new(0, 10, 0, 120)
+			lblSkull.Position = UDim2.new(0, 10, 0, 150)
 			lblSkull.BackgroundTransparency = 1
 			lblSkull.Text = "💀 วิ่งเก็บหัวกะโหลกบอส (Priority > Dodge):"
 			lblSkull.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4369,7 +4411,7 @@ do
 
 			local skullToggleBtn = Instance.new("TextButton")
 			skullToggleBtn.Size = UDim2.new(0, 145, 0, 26)
-			skullToggleBtn.Position = UDim2.new(1, -155, 0, 120)
+			skullToggleBtn.Position = UDim2.new(1, -155, 0, 150)
 			skullToggleBtn.BorderSizePixel = 0
 			applyFont(skullToggleBtn, true)
 			skullToggleBtn.TextSize = 12
@@ -4395,7 +4437,7 @@ do
 			-- แถวที่ 5: วิ่งไปเปิดกล่องจบดันเจี้ยน (Auto Exit Chest)
 			local lblChest = Instance.new("TextLabel")
 			lblChest.Size = UDim2.new(1, -165, 0, 26)
-			lblChest.Position = UDim2.new(0, 10, 0, 150)
+			lblChest.Position = UDim2.new(0, 10, 0, 180)
 			lblChest.BackgroundTransparency = 1
 			lblChest.Text = "📦 วิ่งเปิดกล่องจบดันเจี้ยน (BossChest):"
 			lblChest.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4406,7 +4448,7 @@ do
 
 			local chestToggleBtn = Instance.new("TextButton")
 			chestToggleBtn.Size = UDim2.new(0, 145, 0, 26)
-			chestToggleBtn.Position = UDim2.new(1, -155, 0, 150)
+			chestToggleBtn.Position = UDim2.new(1, -155, 0, 180)
 			chestToggleBtn.BorderSizePixel = 0
 			applyFont(chestToggleBtn, true)
 			chestToggleBtn.TextSize = 12
@@ -4432,7 +4474,7 @@ do
 			-- แถวที่ 6: วิ่งเปิดกล่องลับตามทาง (Pathway Secret Chests)
 			local lblSecret = Instance.new("TextLabel")
 			lblSecret.Size = UDim2.new(1, -165, 0, 26)
-			lblSecret.Position = UDim2.new(0, 10, 0, 180)
+			lblSecret.Position = UDim2.new(0, 10, 0, 210)
 			lblSecret.BackgroundTransparency = 1
 			lblSecret.Text = "🎁 วิ่งเปิดกล่องลับตามทาง (Secret Chests):"
 			lblSecret.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4443,7 +4485,7 @@ do
 
 			local secretToggleBtn = Instance.new("TextButton")
 			secretToggleBtn.Size = UDim2.new(0, 145, 0, 26)
-			secretToggleBtn.Position = UDim2.new(1, -155, 0, 180)
+			secretToggleBtn.Position = UDim2.new(1, -155, 0, 210)
 			secretToggleBtn.BorderSizePixel = 0
 			applyFont(secretToggleBtn, true)
 			secretToggleBtn.TextSize = 12
@@ -4469,7 +4511,7 @@ do
 			-- แถวที่ 7: พยายามโจมตีด้านหลังบอส (Attack Back Boss)
 			local lblBackBoss = Instance.new("TextLabel")
 			lblBackBoss.Size = UDim2.new(1, -165, 0, 26)
-			lblBackBoss.Position = UDim2.new(0, 10, 0, 210)
+			lblBackBoss.Position = UDim2.new(0, 10, 0, 240)
 			lblBackBoss.BackgroundTransparency = 1
 			lblBackBoss.Text = "🗡️ โจมตีด้านหลังบอส (Attack Back Boss):"
 			lblBackBoss.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4480,7 +4522,7 @@ do
 
 			local backBossToggleBtn = Instance.new("TextButton")
 			backBossToggleBtn.Size = UDim2.new(0, 145, 0, 26)
-			backBossToggleBtn.Position = UDim2.new(1, -155, 0, 210)
+			backBossToggleBtn.Position = UDim2.new(1, -155, 0, 240)
 			backBossToggleBtn.BorderSizePixel = 0
 			applyFont(backBossToggleBtn, true)
 			backBossToggleBtn.TextSize = 12
@@ -4506,7 +4548,7 @@ do
 			-- แถวที่ 8: จุดเทียนมินิเกมบอสอัตโนมัติ (Auto Light Candles)
 			local lblCandles = Instance.new("TextLabel")
 			lblCandles.Size = UDim2.new(1, -165, 0, 26)
-			lblCandles.Position = UDim2.new(0, 10, 0, 240)
+			lblCandles.Position = UDim2.new(0, 10, 0, 270)
 			lblCandles.BackgroundTransparency = 1
 			lblCandles.Text = "🕯️ จุดเทียนบอส (Auto Light Candles):"
 			lblCandles.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4517,7 +4559,7 @@ do
 
 			local candlesToggleBtn = Instance.new("TextButton")
 			candlesToggleBtn.Size = UDim2.new(0, 145, 0, 26)
-			candlesToggleBtn.Position = UDim2.new(1, -155, 0, 240)
+			candlesToggleBtn.Position = UDim2.new(1, -155, 0, 270)
 			candlesToggleBtn.BorderSizePixel = 0
 			applyFont(candlesToggleBtn, true)
 			candlesToggleBtn.TextSize = 12
@@ -4543,7 +4585,7 @@ do
 			-- แถวที่ 9: เลือกลำดับการจุดเทียน (Candle Priority): [ใกล้สุดก่อน] [ไกลสุดก่อน] (ปุ่มติ๊กคู่)
 			local lblCandleOrder = Instance.new("TextLabel")
 			lblCandleOrder.Size = UDim2.new(1, -165, 0, 26)
-			lblCandleOrder.Position = UDim2.new(0, 10, 0, 270)
+			lblCandleOrder.Position = UDim2.new(0, 10, 0, 300)
 			lblCandleOrder.BackgroundTransparency = 1
 			lblCandleOrder.Text = "📍 ลำดับการจุดเทียน (Priority):"
 			lblCandleOrder.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4554,7 +4596,7 @@ do
 
 			local btnNear = Instance.new("TextButton")
 			btnNear.Size = UDim2.new(0, 70, 0, 26)
-			btnNear.Position = UDim2.new(1, -155, 0, 270)
+			btnNear.Position = UDim2.new(1, -155, 0, 300)
 			btnNear.BorderSizePixel = 0
 			applyFont(btnNear, true)
 			btnNear.TextSize = 11
@@ -4568,7 +4610,7 @@ do
 
 			local btnFar = Instance.new("TextButton")
 			btnFar.Size = UDim2.new(0, 70, 0, 26)
-			btnFar.Position = UDim2.new(1, -80, 0, 270)
+			btnFar.Position = UDim2.new(1, -80, 0, 300)
 			btnFar.BorderSizePixel = 0
 			applyFont(btnFar, true)
 			btnFar.TextSize = 11
@@ -4621,7 +4663,7 @@ do
 			-- แถวที่ 10-11: เลือกการทำงานหลังเคลียร์ดันเจี้ยน (After Clear): [Replay] [Leave] [รอให้ดันพาออกเอง] (ปุ่มติ๊กเดี่ยว)
 			local lblAfterClear = Instance.new("TextLabel")
 			lblAfterClear.Size = UDim2.new(1, -20, 0, 22)
-			lblAfterClear.Position = UDim2.new(0, 10, 0, 300)
+			lblAfterClear.Position = UDim2.new(0, 10, 0, 330)
 			lblAfterClear.BackgroundTransparency = 1
 			lblAfterClear.Text = "🔁 หลังเคลียร์ดันเจี้ยน (After Clear):"
 			lblAfterClear.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4639,7 +4681,7 @@ do
 			for i, opt in ipairs(afterClearOptions) do
 				local b = Instance.new("TextButton")
 				b.Size = UDim2.new(1 / 3, -8, 0, 26)
-				b.Position = UDim2.new((i - 1) / 3, 4, 0, 326)
+				b.Position = UDim2.new((i - 1) / 3, 4, 0, 356)
 				b.BorderSizePixel = 0
 				applyFont(b, true)
 				b.TextSize = 11
@@ -4673,6 +4715,7 @@ do
 				end))
 			end
 			refreshAllDungeonSubBtns = function()
+				refreshAutoJoinBtn()
 				refreshDiffRadio()
 				refreshKeyBtn()
 				refreshReadyBtn()
@@ -4712,7 +4755,11 @@ do
 			local iOk, iData = pcall(HttpService.JSONDecode, HttpService, rawItems or "{}")
 			local keys = (iOk and type(iData) == "table" and tonumber(iData.dungeon_key)) or 0
 			local diffLabel = (HUB.Config.dungeonDifficulty == "normal") and "Normal" or "Easy"
-			unifiedDungeonStatus.Text = string.format("สถานะ: พร้อมลงดัน · กุญแจ x%d · ความยาก [%s] · %s", keys, diffLabel, roleStr)
+			if HUB.Config.dungeonAutoJoin == false then
+				unifiedDungeonStatus.Text = string.format("สถานะ: ปิด Auto Join — ไม่พาเข้าดัน · กุญแจ x%d · %s", keys, roleStr)
+			else
+				unifiedDungeonStatus.Text = string.format("สถานะ: พร้อมลงดัน · กุญแจ x%d · ความยาก [%s] · %s", keys, diffLabel, roleStr)
+			end
 		end
 	end
 
@@ -7840,8 +7887,11 @@ local function navigatePath(goalPos, options)
 		activeMoveDir = Vector3.zero
 	end
 
+	-- v9.74: HUB.CancelNavigation() เพิ่มค่า NavCancelSerial ⇒ การเดินทุกตัวที่เริ่มก่อนหน้านั้นหยุดทันที
+	local myCancelSerial = HUB.NavCancelSerial or 0
 	local function checkAbort()
 		if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
+		if (HUB.NavCancelSerial or 0) ~= myCancelSerial then return true end
 		if isPlayerManualInput() then return true end
 		if shouldAbort and shouldAbort() then return true end
 		char = LocalPlayer.Character
@@ -8207,6 +8257,10 @@ local function navigatePath(goalPos, options)
 	return reached
 end
 HUB.NavigatePath = navigatePath
+-- หยุดการเดินที่กำลังทำอยู่ทั้งหมด (ตัวที่เริ่มหลังจากเรียกฟังก์ชันนี้จะไม่ถูกกระทบ)
+HUB.CancelNavigation = function()
+	HUB.NavCancelSerial = (HUB.NavCancelSerial or 0) + 1
+end
 
 -- =========================================================================
 -- Central Pillar Warp Synchronization Engine (Zero Silver Drain & Handshake Guaranteed)
@@ -12897,25 +12951,49 @@ do
 		return nil
 	end
 
-	local function findExitChest()
-		local myUserId = LocalPlayer.UserId
-		local chestName = "BossChest_" .. tostring(myUserId)
+	-- กล่องจบดันเจี้ยนเป็นของแต่ละคน: Workspace.Halloween.BossChest_<UserId> (Model · ChestKind=boss)
+	-- โผล่พร้อม DungeonState = "cleared" · เปิดแล้ว = attribute LidOpen = true และ BossChestPrompt ดับ (วัดจริง 05/11/2026)
+	-- ★ หาเฉพาะชื่อของเจ้าของเท่านั้น — ห้ามหยิบกล่องของคนอื่นในปาร์ตี้
+	local function findExitChestOf(userId)
+		local chestName = "BossChest_" .. tostring(userId)
 		local hw = workspace:FindFirstChild("Halloween")
-		if hw then
-			local c = hw:FindFirstChild(chestName)
-			if c then return c end
-			for _, ch in ipairs(hw:GetChildren()) do
-				if ch.Name:find("BossChest") or ch.Name:lower():find("exitchest") then
-					return ch
-				end
+		return (hw and hw:FindFirstChild(chestName)) or workspace:FindFirstChild(chestName)
+	end
+
+	local function isExitChestOpened(chest)
+		if chest:GetAttribute("LidOpen") == true then return true end
+		local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
+		return prompt ~= nil and not prompt.Enabled
+	end
+
+	-- ชื่อสมาชิกที่ยังไม่ได้เปิดกล่องจบดัน (เซิร์ฟดันเจี้ยน = ปาร์ตี้เดียวกัน เหมือนที่เกมนับ Party = #Players)
+	-- graceOver = false: ยังไม่เห็นกล่องของใคร ให้ถือว่ายังรออยู่ (อาจยังโหลดไม่ถึง)
+	-- graceOver = true: ไม่มีกล่อง = คนนั้นไม่ได้รับกล่อง ไม่ต้องรอ
+	-- skipSelf = true: ผู้ใช้ปิดการเปิดกล่องอัตโนมัติ ⇒ ไม่รอกล่องของตัวเอง
+	local function getPartyChestPending(graceOver, skipSelf)
+		local pending = {}
+		-- สมาชิกจาก PartyJson ({Id, Leader, Members = {{UserId, Name}}}) ที่อยู่ในเซิร์ฟนี้ · อ่านไม่ได้ = ทุกคนในเซิร์ฟดัน
+		local members = {}
+		local ok, party = pcall(function()
+			return game:GetService("HttpService"):JSONDecode(LocalPlayer:GetAttribute("PartyJson"))
+		end)
+		if ok and type(party) == "table" and type(party.Members) == "table" then
+			for _, m in ipairs(party.Members) do
+				local p = type(m) == "table" and Players:GetPlayerByUserId(tonumber(m.UserId) or 0)
+				if p then table.insert(members, p) end
 			end
 		end
-		for _, ch in ipairs(workspace:GetChildren()) do
-			if ch.Name == chestName or ch.Name:lower():find("exitchest") then
-				return ch
+		if #members == 0 then members = Players:GetPlayers() end
+		for _, p in ipairs(members) do
+			if skipSelf and p == LocalPlayer then continue end
+			local c = findExitChestOf(p.UserId)
+			if c then
+				if not isExitChestOpened(c) then table.insert(pending, p.DisplayName) end
+			elseif not graceOver then
+				table.insert(pending, p.DisplayName)
 			end
 		end
-		return nil
+		return pending
 	end
 
 	local function triggerPromptSafe(prompt)
@@ -13710,10 +13788,18 @@ do
 				local afterClear = HUB.Config.dungeonAfterClear or "wait"
 				local ac = HUB.AfterClear
 				if not ac then
-					ac = { replayFired = false, popupVoted = false, leaveFired = false, chestTriggeredAt = nil, chestDoneAt = nil, startedAt = os.clock() }
+					ac = { replayFired = false, popupVoted = false, leaveFired = false, lastChestTrigger = 0, chestDoneAt = nil, startedAt = os.clock() }
 					HUB.AfterClear = ac
+					-- ฆ่าบอสจบ = หยุดการเดินที่ค้างอยู่ (ลาดตระเวน/กล่องลับ/ไล่มอน) เพื่อเดินไปเปิดกล่องจบดันทันที
+					HUB.CancelNavigation()
 				end
 				local remaining = getReplayRemaining()
+				-- เวลาที่เหลือก่อนเกมส่งกลับเมือง (ถ้าไม่มี DungeonReturnAt ใช้ 60 วิจากตอนเคลียร์)
+				local timeLeft = workspace:GetAttribute("DungeonReturnAt") ~= nil and remaining or (60 - (os.clock() - ac.startedAt))
+				-- โอกาสสุดท้าย: ใกล้ถูกส่งกลับแล้ว กล่องที่ยังไม่เปิดจะหายอยู่ดี ⇒ เลิกรอแล้วทำ action
+				local lastChance = timeLeft <= REPLAY_MIN_REMAINING + 1.5
+				local CHEST_SPAWN_GRACE = 8
+				local graceOver = (os.clock() - ac.startedAt) >= CHEST_SPAWN_GRACE
 				local statusTxt = nil
 
 				-- ตัวช่วย: มีของที่ตกอยู่ใกล้จุดนี้หรือไม่ (สัตว์เลี้ยงจะเก็บของจากจุดเหล่านี้)
@@ -13734,51 +13820,50 @@ do
 					return false
 				end
 
-				-- B) เปิดกล่องจบดันเจี้ยนก่อนทุกอย่าง (กล่องของผู้เล่นคนนี้)
+				-- B) เปิดกล่องจบดันเจี้ยนของตัวเองก่อนทุกอย่าง (BossChest_<UserId> เท่านั้น)
 				local chestFinished = true
 				if HUB.Config.dungeonAutoExitChest ~= false then
-					local chest = findExitChest()
-					if chest then
-						local cPos = chest:IsA("BasePart") and chest.Position or (chest:IsA("Model") and (chest.PrimaryPart and chest.PrimaryPart.Position or (chest:GetPivot() and chest:GetPivot().Position)))
-						if cPos then
-							local dist = (cPos - root.Position).Magnitude
-							if dist > 6.0 then
-								chestFinished = false
-								if not HUB.Navigating then
-									HUB.NavigatePath(cPos, {
-										stopDistance = 5.0,
-										timeout = 15.0,
-										sprint = true,
-										emulatePlayerMove = true,
-										shouldAbort = function()
-											return not HUB.Alive or not HUB.Config.autoPlayDungeon or dState ~= "cleared" or not (HUB.IsDungeonPlace and HUB.IsDungeonPlace())
-										end
-									})
-								end
-							else
-								local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
-								if not prompt then
-									chestFinished = true
-								else
-									if prompt.Enabled then
-										triggerPromptSafe(prompt)
-										if not ac.chestTriggeredAt then ac.chestTriggeredAt = os.clock() end
+					local chest = findExitChestOf(LocalPlayer.UserId)
+					if not chest then
+						-- ยังไม่เห็นกล่อง: รอให้โผล่/โหลดถึงก่อน · พ้นช่วงรอแล้วยังไม่มี = รอบนี้ไม่ได้รับกล่อง
+						chestFinished = graceOver
+					elseif not isExitChestOpened(chest) then
+						chestFinished = false
+						local cPos = chest:GetPivot().Position
+						local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
+						local promptPart = prompt and prompt.Parent
+						if promptPart and promptPart:IsA("BasePart") then cPos = promptPart.Position end
+						local dist = (cPos - root.Position).Magnitude
+						if dist > 6.0 then
+							if not HUB.Navigating then
+								HUB.NavigatePath(cPos, {
+									stopDistance = 5.0,
+									timeout = 15.0,
+									sprint = true,
+									emulatePlayerMove = true,
+									shouldAbort = function()
+										return not HUB.Alive or not HUB.Config.autoPlayDungeon
+											or workspace:GetAttribute("DungeonState") ~= "cleared"
+											or not chest.Parent or isExitChestOpened(chest)
+										or (workspace:GetAttribute("DungeonReturnAt") ~= nil and getReplayRemaining() <= REPLAY_MIN_REMAINING + 1.5)
+											or not (HUB.IsDungeonPlace and HUB.IsDungeonPlace())
 									end
-									local trig = ac.chestTriggeredAt
-									-- ถือว่าเปิดเสร็จเมื่อ prompt ดับ หรือครบ 4 วิหลังกด (กันค้างถ้า prompt ไม่ดับ)
-									chestFinished = trig ~= nil and (os.clock() - trig >= 1.5) and ((not prompt.Enabled) or (os.clock() - trig >= 4))
-								end
+								})
 							end
+						elseif prompt and prompt.Enabled and os.clock() - ac.lastChestTrigger >= 1.0 then
+							-- กดซ้ำทุก 1 วิจนกว่ากล่องจะเปิดจริง (LidOpen) — ไม่ใช้ตัวจับเวลาแทนผลจริง
+							ac.lastChestTrigger = os.clock()
+							triggerPromptSafe(prompt)
 						end
 					end
 				end
-				if os.clock() - ac.startedAt >= 25 then chestFinished = true end
+				if lastChance then chestFinished = true end
 
 				-- C) รอให้สัตว์เลี้ยงเก็บของที่ตกหลังเปิดกล่องเสร็จ (หยุดเมื่อไม่มีของใกล้ตัว หรือครบ 8 วิ)
 				local petFinished = false
 				if chestFinished then
 					ac.chestDoneAt = ac.chestDoneAt or os.clock()
-					petFinished = (not lootNearby(root.Position, 45)) or (os.clock() - ac.chestDoneAt >= 8)
+					petFinished = lastChance or (not lootNearby(root.Position, 45)) or (os.clock() - ac.chestDoneAt >= 8)
 				end
 
 				-- ระหว่างยังเปิดกล่อง/รอสัตว์เลี้ยง ห้ามให้ Auto Play พาวิ่งไปไหน
@@ -13787,8 +13872,16 @@ do
 					HUB.DisableGameAutoPlay()
 				end
 
-				-- D) action หลังจบดัน: ทำเฉพาะเมื่อเปิดกล่องและเก็บของเสร็จแล้ว
-				if petFinished then
+				-- C2) ลงเป็นปาร์ตี้: รอให้ทุกคนเปิดกล่องของตัวเองก่อน (Replay/Leave ก่อนนั้นทำให้กล่องของเพื่อนหาย)
+				local partyPending = {}
+				if petFinished and not lastChance then
+					partyPending = getPartyChestPending(graceOver, HUB.Config.dungeonAutoExitChest == false)
+				end
+
+				-- D) action หลังจบดัน: ทำเฉพาะเมื่อเปิดกล่องและเก็บของเสร็จแล้ว และทุกคนในปาร์ตี้เปิดกล่องครบ
+				if petFinished and #partyPending > 0 then
+					statusTxt = string.format("สถานะ: รอเพื่อนเปิดกล่องจบดัน (%s) · เหลือ %d วิ 🎁", table.concat(partyPending, ", "), math.max(0, math.floor(timeLeft)))
+				elseif petFinished then
 					if afterClear == "replay" then
 						if isReplayLeader() then
 							if not ac.replayFired and remaining > REPLAY_MIN_REMAINING then
@@ -14322,7 +14415,7 @@ do
 			task.wait(0.5)
 			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
 
-			if not HUB.Config.autoJoinDungeon then
+			if not HUB.Config.autoJoinDungeon or HUB.Config.dungeonAutoJoin == false then
 				task.wait(1.5)
 				continue
 			end
@@ -14369,7 +14462,7 @@ do
 				end
 				if HUB.WarpToTown then
 					HUB.WarpToTown(function()
-						return not HUB.Alive or not HUB.Config.autoJoinDungeon or (HUB.IsDungeonPlace and HUB.IsDungeonPlace())
+						return not HUB.Alive or not HUB.Config.autoJoinDungeon or HUB.Config.dungeonAutoJoin == false or (HUB.IsDungeonPlace and HUB.IsDungeonPlace())
 					end)
 				end
 				task.wait(1.0)
@@ -14400,7 +14493,7 @@ do
 						sprint = true,
 						emulatePlayerMove = true,
 						shouldAbort = function()
-							if not HUB.Alive or not HUB.Config.autoJoinDungeon or (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
+							if not HUB.Alive or not HUB.Config.autoJoinDungeon or HUB.Config.dungeonAutoJoin == false or (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
 							local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 							if r and (r.Position - DUNGEON_GATE_POS).Magnitude <= 6.0 then return true end
 							return false
