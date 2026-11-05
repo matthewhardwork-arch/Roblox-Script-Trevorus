@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.80)
+-- Hunting Together Hub (v9.83)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.80"
+local VERSION = "9.83"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -12968,68 +12968,40 @@ do
 		return bestSkull
 	end
 
-	local function resolveNextDungeonSpot(step, visitedSpots)
+	-- v9.81: เลือกจุดเกิดมอนที่ "ใกล้ตัวที่สุด" ทุกชนิด (ไม่เรียงตาม Step/Order แล้ว)
+	-- ข้าม: จุดที่ไปถึงแล้วใน Step นี้ · จุดที่บาเรีย/ประตูบอสกั้นอยู่ (canReach) · อยู่ในห้องบอสแล้วห้ามออกไปจุดข้างนอก
+	local function resolveNextDungeonSpot(step, visitedSpots, canReach)
 		local spawns = getDungeonSpawnsFolder()
 		if not spawns then return nil end
 		visitedSpots = visitedSpots or {}
 
 		local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-		local myPos = root and root.Position or Vector3.zero
+		if not root then return nil end
+		local myPos = root.Position
 
 		step = step or tonumber(workspace:GetAttribute("DungeonStep")) or 1
+		local inBossRoom = step >= 4 and myPos.X >= -4090
 
-		local candidates = {}
+		-- เฉพาะจุดเกิดมอน (probe จริง 05/11/2026 · Halloween.Spawns 31 จุด) — ข้ามจุดที่ไม่ใช่มอน:
+		-- DungeonSpawn (จุดเกิดผู้เล่น) · DungeonZone/Zone_* (ขอบเขตโซน) · SecretChestSpot/ExitChestSpot (กล่อง) · PlazaSpot (กลางลาน)
+		local MOB_SPOTS = { PackSpot = true, AmbushSpot = true, PillarSpot = true, WitchSpot = true, BossSpot = true }
+		local best, bestDist = nil, math.huge
 		for _, ch in ipairs(spawns:GetChildren()) do
-			if ch:IsA("BasePart") and not visitedSpots[ch] then
-				local name = ch.Name
-				local chStep = tonumber(ch:GetAttribute("Step"))
-				local order = tonumber(ch:GetAttribute("Order")) or 999
-
-				if step == 1 then
-					if name == "PackSpot" and (chStep == 1 or order <= 5) then
-						table.insert(candidates, { part = ch, order = order, dist = (ch.Position - myPos).Magnitude })
-					end
-				elseif step == 2 then
-					if name == "PillarSpot" then
-						table.insert(candidates, { part = ch, order = order, dist = (ch.Position - myPos).Magnitude })
-					end
-				elseif step == 3 then
-					if name == "WitchSpot" or (name == "PackSpot" and order >= 6 and order <= 8) then
-						table.insert(candidates, { part = ch, order = order, dist = (ch.Position - myPos).Magnitude })
-					end
-				elseif step >= 4 then
-					if myPos.X < -4090 then
-						-- อยู่ในทางเดิน: ลาดตระเวนเคลียร์ฝูงทางเดิน PackSpot 9, 10, 11 ก่อน
-						if name == "PackSpot" and order >= 9 then
-							table.insert(candidates, { part = ch, order = order, dist = (ch.Position - myPos).Magnitude })
-						elseif name == "BossSpot" then
-							table.insert(candidates, { part = ch, order = 99, dist = (ch.Position - myPos).Magnitude })
-						end
-					else
-						-- อยู่ในห้องบอสแล้ว: โฟกัส BossSpot
-						if name == "BossSpot" then
-							table.insert(candidates, { part = ch, order = 0, dist = (ch.Position - myPos).Magnitude })
-						end
-					end
+			if ch:IsA("BasePart") and MOB_SPOTS[ch.Name] and not visitedSpots[ch] then
+				local d = (ch.Position - myPos).Magnitude
+				if d <= 8.0 then
+					visitedSpots[ch] = true -- ยืนอยู่ที่จุดนี้แล้ว ไม่ต้องเดินไปอีก
+				elseif (not inBossRoom or ch.Position.X >= -4090) and (not canReach or canReach(ch.Position)) and d < bestDist then
+					best, bestDist = ch, d
 				end
 			end
 		end
+		if best then return best end
 
-		if #candidates > 0 then
-			table.sort(candidates, function(a, b)
-				if a.order ~= b.order then
-					return a.order < b.order
-				end
-				return a.dist < b.dist
-			end)
-			return candidates[1].part
-		elseif visitedSpots and next(visitedSpots) ~= nil then
-			-- หากสแกนครบทุกจุดใน Step แล้วแต่มอนสเตอร์ยังไม่เกิด ให้เคลียร์ visitedSpots เพื่อวนลาดตระเวนซ้ำ
-			-- ยกเว้นถ้าอยู่ในห้องบอสแล้ว (Step 4 และ myPos.X >= -4090) ห้ามเคลียร์เพื่อกันการย้อนกลับไปจุดภายนอก
-			if not (step >= 4 and myPos.X >= -4090) then
-				for k in pairs(visitedSpots) do
-					visitedSpots[k] = nil
-				end
+		-- ไปครบทุกจุดแล้วแต่ยังไม่มีมอนเกิด ⇒ ล้างรายการเพื่อวนใหม่ (ยกเว้นในห้องบอส กันย้อนกลับออกไปข้างนอก)
+		if next(visitedSpots) ~= nil and not inBossRoom then
+			for k in pairs(visitedSpots) do
+				visitedSpots[k] = nil
 			end
 		end
 		return nil
@@ -13467,6 +13439,7 @@ do
 	end
 
 	local openedChests = {}
+	local chestSeek = setmetatable({}, { __mode = "k" }) -- v9.83: เวลาที่พยายามไปเปิดกล่องลับแต่ละใบ
 
 	-- v9.78: เลิกล็อคมอนทั่วไปที่ตีอยู่แต่เลือดไม่ลดเลย 10 วิ (เช่น มอนเกิดในกำแพง)
 	-- โครงสร้างจริง (decompile PlayerScripts.CombatClient):
@@ -13619,6 +13592,7 @@ do
 				if hp > 0 and not m:GetAttribute("AnimDead") and m:GetAttribute("IsDummy") ~= true then
 					local pos = m:GetPivot().Position
 					-- มอนสเตอร์อยู่ในทางเดินนอกห้องบอส (X < -4090) และสามารถเข้าถึงได้ใน Step 4
+					-- มอนที่ Auto Play ตีอยู่แต่เลือดไม่ลด 10 วิ ถูก STALL.update ตั้ง IsDummy ไว้แล้ว ⇒ ข้ามด้วยเงื่อนไข IsDummy ข้างบน
 					if pos.X < -4090 and isTargetReachable(myPos, pos, 4) then
 						return true
 					end
@@ -13718,11 +13692,16 @@ do
 		return true
 	end
 
+	-- v9.83: ค้นกล่องลับทั้งดัน (เดิมแค่ 90 studs ⇒ กล่องที่เดินไม่ผ่านใกล้ ๆ ไม่เคยถูกเลือก)
+	-- กล่องลับมี 4 ใบ อยู่ที่ Spawns.SecretChestSpot (probe จริง 05/11/2026) · บาเรีย/ประตูกั้นอยู่ = ข้าม (isTargetReachable)
+	-- อยู่ในห้องบอสแล้ว (Step 4 · X >= -4090) ไม่ย้อนออกไปเปิดกล่องข้างนอก ⇒ ประตูบอสรอให้เปิดกล่องทางเดินครบก่อน (ข้อ 3.5)
+	local CHEST_SEEK_RADIUS = 2000
 	local function findNearestUnopenedChest(myPos, maxRadius, dStep)
 		local hw = workspace:FindFirstChild("Halloween")
 		if not hw then return nil, nil, nil end
-		maxRadius = maxRadius or 90
+		maxRadius = maxRadius or CHEST_SEEK_RADIUS
 		dStep = dStep or tonumber(workspace:GetAttribute("DungeonStep")) or 1
+		local inBossRoom = dStep >= 4 and myPos.X >= -4090
 		local bestChest, bestPrompt, minD = nil, nil, maxRadius
 		for _, ch in ipairs(hw:GetChildren()) do
 			if ch.Name == "SecretChest" and not openedChests[ch] and ch:GetAttribute("LidOpen") ~= true then
@@ -13730,7 +13709,7 @@ do
 				if prompt and prompt.Enabled then
 					local cPos = ch:GetPivot().Position
 					local dist = (cPos - myPos).Magnitude
-					if dist < minD then
+					if dist < minD and not (inBossRoom and cPos.X < -4090) then
 						-- ต้องเป็นกล่องที่เดินไปถึงได้ ไม่ติดบาเรีย
 						if isTargetReachable(myPos, cPos, dStep) then
 							minD = dist
@@ -13765,6 +13744,7 @@ do
 			if m:IsA("Model") and m.Parent and not table.find(candidates, m) then
 				local hum = m:FindFirstChildOfClass("Humanoid")
 				local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
+				-- มอนที่ Auto Play ตีอยู่แต่เลือดไม่ลด 10 วิ ถูก STALL.update ตั้ง IsDummy ⇒ ไม่นับ ⇒ เหลือแต่ตัวแบบนี้ = "ไม่มีมอน"
 				if hp > 0 and not m:GetAttribute("AnimDead") and m:GetAttribute("IsDummy") ~= true then
 					table.insert(candidates, m)
 				end
@@ -14203,7 +14183,14 @@ do
 					-- ★ Safe Corridor Protocol: ตรวจสอบว่ายังมีมอนสเตอร์ในทางเดินหรือไม่
 					-- หากยังมีมอนสเตอร์ในทางเดิน ห้ามเดินไปเปิดประตู และห้ามวิ่งเข้าห้องบอสเด็ดขาด!
 					-- ปล่อยให้ตกไปที่ Section 4 เพื่อกำจัดมอนสเตอร์ทางเดินให้ปลอดภัย 100% ก่อน
-					if not hasCorridorMonsters(root.Position) then
+					-- v9.83: ยังมีกล่องลับในทางเดินที่ไปถึงได้ ⇒ ยังไม่ไปประตู ให้ข้อ 4.5 พาไปเปิดก่อน
+					-- (เดิมข้อนี้ทำก่อนข้อ 4.5 ⇒ ทางเดินโล่งเมื่อไรก็เข้าห้องบอสทันที กล่องหน้าประตูถูกทิ้ง · เจอจริง 05/11/2026 กล่องที่ -4174,-296)
+					local chestFirst = false
+					if HUB.Config.dungeonOpenChests ~= false then
+						local cc = findNearestUnopenedChest(root.Position, CHEST_SEEK_RADIUS, dStep)
+						chestFirst = cc ~= nil and cc:GetPivot().Position.X < -4090
+					end
+					if not chestFirst and not hasCorridorMonsters(root.Position) then
 						local closed = bossDoor and isBossDoorClosed(bossDoor)
 						if closed then
 							local distToDoor = (doorFront - root.Position).Magnitude
@@ -14324,11 +14311,30 @@ do
 			-- 4.5 ตรวจสอบและเปิดกล่องลับตามทาง (Pathway Secret Chests)
 			-- HUB จะเข้าควบคุมการเดินก็ต่อเมื่อเจอกล่อง และพื้นที่รอบตัวปลอดภัย (ไม่มีมอนสเตอร์ประชิด <= 25 studs)
 			if (HUB.Config.dungeonOpenChests ~= false) and isAreaSafeFromMonsters(root.Position, 25, dStep) then
-				local sChest, sPrompt, cDist = findNearestUnopenedChest(root.Position, 90, dStep)
+				local sChest, sPrompt, cDist = findNearestUnopenedChest(root.Position, CHEST_SEEK_RADIUS, dStep)
 				if sChest and sPrompt then
 					local cPos = sChest:GetPivot().Position
 					-- ตรวจสอบว่าบริเวณรอบกล่องปลอดภัย ไม่มีมอนสเตอร์เฝ้าอยู่
 					if isAreaSafeFromMonsters(cPos, 25, dStep) then
+						-- v9.83: นับเวลาที่พยายามไปเปิดกล่องนี้จริง (ช่วงไปสู้มอนไม่นับ) · เกิน 45 วิยังเปิดไม่ได้ ⇒ ข้าม
+						-- กันประตูบอสรอกล่องที่ไปไม่ถึง/กดไม่ติดตลอดกาล (ข้อ 3.5 รอกล่องทางเดินก่อนเปิดประตู)
+						local seekNow = os.clock()
+						local sk = chestSeek[sChest]
+						if not sk then
+							sk = { t = 0, last = seekNow }
+							chestSeek[sChest] = sk
+						end
+						if seekNow - sk.last < 1.5 then sk.t = sk.t + (seekNow - sk.last) end
+						sk.last = seekNow
+						if sk.t >= 45 then
+							openedChests[sChest] = true
+							warn(string.format("[Hunting Together] ข้ามกล่องลับที่ (%d, %d) — พยายามไปเปิด 45 วิแล้วไม่สำเร็จ", cPos.X, cPos.Z))
+							if HUB.UI and HUB.UI.DungeonStatusLabel then
+								HUB.UI.DungeonStatusLabel.Text = "สถานะ: ข้ามกล่องลับที่ไปเปิดไม่ได้ 45 วิ → ทำต่อ ⏭️"
+							end
+							task.wait(0.35)
+							continue
+						end
 						if cDist > 5.0 then
 							if not HUB.Navigating and not HUB.Dodging then
 								if HUB.UI and HUB.UI.DungeonStatusLabel then
@@ -14376,50 +14382,29 @@ do
 				end
 			end
 
-			-- 4.8 นำทางเข้าหามอนสเตอร์ที่อยู่ไกล (เมื่อ Auto Play ยืนนิ่งเพราะมองไม่เห็นมอนสเตอร์ > 25 studs)
-			if targetMob and mobDist and mobDist > 25.0 then
-				if not HUB.Navigating and not HUB.Dodging then
-					if HUB.UI and HUB.UI.DungeonStatusLabel then
-						local actionText = isPillarTarget and "นำทางไปหาเสาพิธีกรรม" or (isPriorityTarget and "นำทางไปหาบอส" or "นำทางไปหามอนสเตอร์")
-						HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: %s (%s, %d studs)... 🧭", actionText, targetMob.Name, math.floor(mobDist))
-					end
-					task.spawn(function()
-						HUB.NavigatePath(targetMob:GetPivot().Position, {
-							stopDistance = 18.0, -- หยุดก่อนถึง 18 studs เพื่อส่งมอบให้ Auto Play เข้าสู้ต่อทันที
-							timeout = 8.0,
-							sprint = true,
-							emulatePlayerMove = true,
-							shouldAbort = function()
-								if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
-								if not targetMob.Parent then return true end
-								local h = targetMob:FindFirstChildOfClass("Humanoid")
-								if h and h.Health <= 0 then return true end
-								if HUB.CollectingSkull or HUB.Dodging or HUB.LightingCandle then return true end
-								-- ★ ส่งมอบการเดินให้ Auto Play ทันทีที่เข้าถึงระยะ <= 22 studs!
-								local curDist = (targetMob:GetPivot().Position - root.Position).Magnitude
-								if curDist <= 22.0 then return true end
-								local mNear, dNear = findBestDungeonMonster(root.Position, dStep)
-								if mNear and dNear and dNear <= 22.0 then return true end
-								return false
-							end
-						})
-					end)
+			-- (v9.81: เอาข้อ 4.8 "นำทางเข้าหามอนที่อยู่ไกลกว่า 25 studs" ออก — Auto Play ของเกมมองเห็นและเดินไปหาเอง
+			--  มอนที่ไกลแต่ยังนับอยู่ ⇒ HUB ไม่แตะการเดิน ปล่อยให้ Auto Play จัดการ)
+			if targetMob then
+				if HUB.UI and HUB.UI.DungeonStatusLabel then
+					HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: ปล่อยให้ Auto Play เดินไปหา %s (%d studs)... 🎮", targetMob.Name, math.floor(mobDist or 0))
 				end
 				task.wait(0.3)
 				continue
 			end
 
-			-- 5. หากไม่มีมอนสเตอร์ให้สู้: วิ่งนำทางไปยังจุดเกิดมอนสเตอร์ถัดไป (Step-Aware Spawn Patrol)
+			-- 5. ไม่มีมอนให้สู้ (นับเฉพาะมอนที่ยังตีได้ · ตัวที่ตีไม่ได้เกิน 10 วิ ไม่นับ): เดินไปจุดเกิดมอนที่ใกล้ที่สุด
 			if not HUB.Navigating and not HUB.Dodging and (tick() - lastPatrolTime >= 1.0) then
-				local checkMob, checkDist = findBestDungeonMonster(root.Position, dStep)
+				local checkMob = findBestDungeonMonster(root.Position, dStep)
 				if not checkMob then
-					local nextSpot = resolveNextDungeonSpot(dStep, visitedSpots)
+					local myPosNow = root.Position
+					local nextSpot = resolveNextDungeonSpot(dStep, visitedSpots, function(pos)
+						return isTargetReachable(myPosNow, pos, dStep)
+					end)
 					if nextSpot then
 						lastPatrolTime = tick()
 						HUB.Stats.dungeonPatrols = (HUB.Stats.dungeonPatrols or 0) + 1
 						if HUB.UI and HUB.UI.DungeonStatusLabel then
-							local dId = workspace:GetAttribute("DungeonId") or "Dungeon"
-							HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: นำทางค้นหามอนสเตอร์ · %s (Step %d)... 🧭", tostring(dId), dStep)
+							HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: ไม่มีมอนที่ตีได้ → เดินไปจุดเกิดมอนที่ใกล้สุด (%s, %d studs)... 🧭", nextSpot.Name, math.floor((nextSpot.Position - root.Position).Magnitude))
 						end
 
 						task.spawn(function()
@@ -14430,11 +14415,10 @@ do
 								emulatePlayerMove = true,
 								shouldAbort = function()
 									if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
-									-- ★ เมื่อพบมอนสเตอร์ที่เข้าถึงได้และอยู่ในระยะ <= 25 studs: ส่งมอบให้ Auto Play ทันที!
-									local mob, d = findBestDungeonMonster(root.Position, dStep)
-									if mob and d and d <= 25.0 then return true end
+									-- v9.81: เจอมอนที่ตีได้ (ระยะไหนก็ได้) ⇒ หยุดเดินทันที ปล่อยให้ Auto Play ของเกมเดินไปหาเอง ไม่แย่งกันเดิน
+									if findBestDungeonMonster(root.Position, dStep) then return true end
 									if (HUB.Config.dungeonOpenChests ~= false) and isAreaSafeFromMonsters(root.Position, 25, dStep) then
-										local ch, pr = findNearestUnopenedChest(root.Position, 50, dStep)
+										local ch, pr = findNearestUnopenedChest(root.Position, CHEST_SEEK_RADIUS, dStep)
 										if ch and pr and isAreaSafeFromMonsters(ch:GetPivot().Position, 25, dStep) then return true end
 									end
 									if HUB.CollectingSkull or HUB.Dodging or HUB.LightingCandle then return true end
