@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.79)
+-- Hunting Together Hub (v9.80)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.79"
+local VERSION = "9.80"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -5025,6 +5025,32 @@ do
 				ForbiddenCandidates = { "SP", "INT", "STR", "MDEF" }
 			}
 		}
+
+		-- v9.80: เติม Special Option ที่เกมสุ่มได้จริงแต่ไม่อยู่ในรายการ (โดยเฉพาะ T6 ที่สุ่มจากกลุ่ม weapon/ring/armor ทั้งกลุ่ม)
+		-- ไม่งั้นไอเทมที่ได้ออปชันนอกรายการ จะไม่มีวันถูกล็อคเมื่อเปิดเงื่อนไขหมวด (เลือกออปชันนั้นไม่ได้)
+		do
+			local GD = HUB.GearData
+			local optSpecial = GD and GD.Options and GD.Options.Special
+			local t6Special = GD and GD.T6 and GD.T6.Special
+			for _, catDef in ipairs(CATEGORY_DEFS) do
+				if catDef.Specials then
+					local have = {}
+					for _, k in ipairs(catDef.Specials) do have[k] = true end
+					local gameGroup = (catDef.Id == "WeaponPhysMelee" or catDef.Id == "WeaponPhysRanged") and "WeaponPhys" or catDef.Id
+					local t6Group = (string.sub(catDef.Id, 1, 6) == "Weapon" and "weapon") or (string.sub(catDef.Id, 1, 4) == "Ring" and "ring") or "armor"
+					for _, src in ipairs({ optSpecial and optSpecial[gameGroup] or false, t6Special and t6Special[t6Group] or false }) do
+						if type(src) == "table" then
+							for _, k in ipairs(src) do
+								if type(k) == "string" and not have[k] then
+									have[k] = true
+									table.insert(catDef.Specials, k)
+								end
+							end
+						end
+					end
+				end
+			end
+		end
 
 		local OPTION_LABELS = {
 			CRIT = "CRIT (คริ)",
