@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.77)
+-- Hunting Together Hub (v9.79)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.77"
+local VERSION = "9.79"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -501,6 +501,9 @@ function HUB.Unload(self, isShuttingDown, isReloading)
 		end
 		if self.CancelAutoBossRoutine then
 			pcall(self.CancelAutoBossRoutine)
+		end
+		if self.ClearStalledMobs then
+			pcall(self.ClearStalledMobs)
 		end
 		pcall(function()
 			LocalPlayer:SetAttribute("LumiSprintLock", false)
@@ -3474,6 +3477,43 @@ do
 	HUB.UI.StatAfkCount = statAfkCount
 	HUB.UI.StatBoxCount = statBoxCount
 
+	-- v9.79: ปุ่ม Unload อยู่เหนือปุ่ม Save (ตามที่ผู้ใช้ขอ) · กดครั้งแรก = ถามยืนยัน · กดซ้ำใน 3 วิ = ปลดสคริปต์
+	local leftUnloadBtn = Instance.new("TextButton")
+	leftUnloadBtn.Name = "LeftUnloadBtn"
+	leftUnloadBtn.Size = UDim2.new(1, -24, 0, 34)
+	leftUnloadBtn.Position = UDim2.new(0, 12, 1, -122)
+	leftUnloadBtn.BackgroundColor3 = Color3.fromRGB(48, 22, 30)
+	leftUnloadBtn.BorderSizePixel = 0
+	leftUnloadBtn.Text = "⛔ ปลดสคริปต์ (Unload)"
+	leftUnloadBtn.TextColor3 = Color3.fromRGB(248, 113, 113)
+	leftUnloadBtn.TextSize = 14
+	applyFont(leftUnloadBtn, true)
+	leftUnloadBtn.Parent = leftBody
+	local lubCorner = Instance.new("UICorner")
+	lubCorner.CornerRadius = UDim.new(0, 4)
+	lubCorner.Parent = leftUnloadBtn
+	local lubStroke = Instance.new("UIStroke")
+	lubStroke.Color = Color3.fromRGB(239, 68, 68)
+	lubStroke.Thickness = 1.5
+	lubStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	lubStroke.Parent = leftUnloadBtn
+
+	local unloadArmedAt = 0
+	HUB:AddConnection(leftUnloadBtn.MouseButton1Click:Connect(function()
+		local now = os.clock()
+		if now - unloadArmedAt > 3 then
+			unloadArmedAt = now
+			leftUnloadBtn.Text = "⚠️ กดอีกครั้งเพื่อยืนยัน Unload"
+			task.delay(3, function()
+				if leftUnloadBtn.Parent and os.clock() - unloadArmedAt >= 2.9 then
+					leftUnloadBtn.Text = "⛔ ปลดสคริปต์ (Unload)"
+				end
+			end)
+			return
+		end
+		HUB:Unload()
+	end))
+
 	local leftSaveBtn = Instance.new("TextButton")
 	leftSaveBtn.Name = "LeftSaveBtn"
 	leftSaveBtn.Size = UDim2.new(1, -24, 0, 34)
@@ -3659,7 +3699,9 @@ do
 		cStroke.Parent = card
 
 		local hasSettings = (settingPanelBuilder ~= nil or customGearAction ~= nil)
-		local rightOffset = (extraBtnData and hasSettings and -220) or (extraBtnData and -180) or (hasSettings and -135) or -95
+		-- v9.79: ขอบขวาของข้อความต้องจบก่อนปุ่มซ้ายสุด ≥ 8px (เดิมชนขอบปุ่มพอดี แล้วข้อความยาวล้นไปอยู่ใต้ปุ่ม)
+		-- ปุ่มซ้ายสุด: extra (+gear) = -210 · extra = -170 · gear = -124 · toggle = -84 ⇒ ลบ 12 (ระยะซ้าย) + 8 (ช่องว่าง)
+		local rightOffset = (extraBtnData and hasSettings and -230) or (extraBtnData and -190) or (hasSettings and -144) or -104
 
 		local cTitle = Instance.new("TextLabel")
 		cTitle.Name = "Title"
@@ -3670,9 +3712,11 @@ do
 		cTitle.TextColor3 = THEME.TextDark
 		cTitle.TextSize = 14
 		cTitle.TextXAlignment = Enum.TextXAlignment.Left
+		cTitle.TextTruncate = Enum.TextTruncate.AtEnd
 		applyFont(cTitle, true)
 		cTitle.Parent = card
 
+		-- คำอธิบายยาวเกินช่อง ⇒ ย่อขนาดตัวอักษรลงเอง (11 → ต่ำสุด 9) แทนการล้นไปทับปุ่ม
 		local cDesc = Instance.new("TextLabel")
 		cDesc.Name = "Desc"
 		cDesc.Size = UDim2.new(1, rightOffset, 0, 20)
@@ -3681,9 +3725,14 @@ do
 		cDesc.Text = descText
 		cDesc.TextColor3 = THEME.TextSub
 		cDesc.TextSize = 11
+		cDesc.TextScaled = true
 		cDesc.TextXAlignment = Enum.TextXAlignment.Left
 		applyFont(cDesc, false)
 		cDesc.Parent = card
+		local cDescSize = Instance.new("UITextSizeConstraint")
+		cDescSize.MaxTextSize = 11
+		cDescSize.MinTextSize = 9
+		cDescSize.Parent = cDesc
 
 		local cStatus = Instance.new("TextLabel")
 		cStatus.Name = "Status"
@@ -3694,6 +3743,7 @@ do
 		cStatus.TextColor3 = THEME.TextAmber
 		cStatus.TextSize = 11
 		cStatus.TextXAlignment = Enum.TextXAlignment.Left
+		cStatus.TextTruncate = Enum.TextTruncate.AtEnd -- ข้อความสถานะเปลี่ยนตลอด ⇒ ตัดท้ายด้วย … แทนการล้นทับปุ่ม
 		applyFont(cStatus, false)
 		cStatus.Parent = card
 
@@ -5176,7 +5226,15 @@ do
 		end
 
 		table.insert(modalConns, closeBtn.MouseButton1Click:Connect(closeModal))
-		table.insert(modalConns, backdrop.MouseButton1Click:Connect(closeModal))
+		-- v9.79: เดิมคลิกที่ว่างในหน้าต่างตั้งค่า (Frame ไม่กินคลิก) แล้วคลิกทะลุไปโดน backdrop ⇒ หน้าต่างปิด
+		-- ⇒ ให้ dialog กินคลิกเอง + backdrop ปิดเฉพาะเมื่อคลิกนอกกรอบ dialog จริง (ScreenGui IgnoreGuiInset = true ⇒ พิกัดตรงกับ GetMouseLocation)
+		dialog.Active = true
+		table.insert(modalConns, backdrop.MouseButton1Click:Connect(function()
+			local p = UIS:GetMouseLocation()
+			local a, s = dialog.AbsolutePosition, dialog.AbsoluteSize
+			if p.X >= a.X and p.X <= a.X + s.X and p.Y >= a.Y and p.Y <= a.Y + s.Y then return end
+			closeModal()
+		end))
 
 		local bodyArea = Instance.new("Frame")
 		bodyArea.Name = "BodyArea"
@@ -13384,6 +13442,86 @@ do
 
 	local openedChests = {}
 
+	-- v9.78: เลิกล็อคมอนทั่วไปที่ตีอยู่แต่เลือดไม่ลดเลย 10 วิ (เช่น มอนเกิดในกำแพง)
+	-- โครงสร้างจริง (decompile PlayerScripts.CombatClient):
+	--   · เป้าที่เกมตีอยู่ = LocalPlayer.CurrentTarget (ObjectValue) · ตั้ง nil = ปลดล็อค (Changed → SetTarget:FireServer(nil))
+	--   · บอท Auto Play (findBotTarget) ข้ามมอนที่ IsDummy == true ⇒ ตั้ง IsDummy ฝั่ง client ให้บอทของเกมไม่กลับไปล็อคตัวนั้นอีก
+	--   · ตัวจับ stuckHp ของเกมเองแค่ดันเข้าใกล้ทุก 2.5 วิ ไม่เปลี่ยนเป้า ⇒ ติดกำแพงไม่จบ
+	-- ไม่แตะบอส/มินิบอส (IsBoss/IsMiniBoss) · เสาพิธีกรรม · มอนติดโล่ SealShield (เกมจัดการเอง)
+	local STALL = { seconds = 10, maxDist = 40, marked = setmetatable({}, { __mode = "k" }), model = nil, hp = nil, since = 0, lastSample = 0 }
+	function STALL.release(m)
+		STALL.marked[m] = nil
+		pcall(function()
+			if m:GetAttribute("HT_StallSkip") == true then
+				m:SetAttribute("HT_StallSkip", nil)
+				m:SetAttribute("IsDummy", nil)
+			end
+		end)
+	end
+	function STALL.clearAll()
+		local list = {}
+		for m in pairs(STALL.marked) do list[#list + 1] = m end
+		-- เครื่องหมายค้างจากรอบ inject ก่อน (ตารางเดิมหายไปแล้ว แต่ attribute ยังอยู่บนมอน)
+		for _, m in ipairs(CollectionService:GetTagged("Monster")) do
+			if m:GetAttribute("HT_StallSkip") == true then list[#list + 1] = m end
+		end
+		local hw = workspace:FindFirstChild("Halloween")
+		for _, folder in pairs({ workspace:FindFirstChild("Monsters") or false, (hw and hw:FindFirstChild("Monsters")) or false }) do
+			if folder then
+				for _, m in ipairs(folder:GetChildren()) do
+					if m:GetAttribute("HT_StallSkip") == true then list[#list + 1] = m end
+				end
+			end
+		end
+		for _, m in ipairs(list) do STALL.release(m) end
+		STALL.model = nil
+	end
+	HUB.ClearStalledMobs = STALL.clearAll
+	-- เรียกทุกรอบของลูปดัน · คืนชื่อมอนที่เพิ่งเลิกล็อค (ถ้ามี)
+	function STALL.update(rootPos)
+		local now = os.clock()
+		for m, pos in pairs(STALL.marked) do
+			if not m.Parent then
+				STALL.marked[m] = nil
+			elseif (m:GetPivot().Position - pos).Magnitude > 12 then
+				STALL.release(m) -- มอนขยับออกจากจุดเดิมแล้ว = ไม่ได้ติดกำแพง ⇒ ให้ตีได้ตามปกติ
+			end
+		end
+		local ctv = LocalPlayer:FindFirstChild("CurrentTarget")
+		local m = ctv and ctv:IsA("ObjectValue") and ctv.Value or nil
+		local gap = now - STALL.lastSample
+		STALL.lastSample = now
+		if not (m and m:IsA("Model") and m.Parent) then
+			STALL.model = nil
+			return nil
+		end
+		local hp = tonumber(m:GetAttribute("HP"))
+		local mId = tostring(m:GetAttribute("MonsterId") or ""):lower()
+		local exempt = m:GetAttribute("IsBoss") == true or m:GetAttribute("IsMiniBoss") == true
+			or m:GetAttribute("SealShield") == true or mId == "dgn_ritual_pillar" or m.Name:lower():find("pillar") ~= nil
+		local dist = (m:GetPivot().Position - rootPos).Magnitude
+		-- เริ่มนับใหม่: เปลี่ยนเป้า · ยกเว้น · ยังไม่ถึงระยะสู้ (กำลังเดินไปหา) · ลูปขาดช่วง
+		if exempt or not hp or hp <= 0 or dist > STALL.maxDist or gap > 2 or m ~= STALL.model then
+			STALL.model, STALL.hp, STALL.since = m, hp, now
+			return nil
+		end
+		if hp < STALL.hp then
+			STALL.hp, STALL.since = hp, now -- เลือดลด = ตีเข้า ⇒ เริ่มนับใหม่
+			return nil
+		end
+		STALL.hp = hp -- เลือดเพิ่มเอง (regen) ไม่นับเป็นดาเมจ แต่ใช้เป็นฐานใหม่
+		if now - STALL.since < STALL.seconds then return nil end
+		STALL.marked[m] = m:GetPivot().Position
+		pcall(function()
+			m:SetAttribute("HT_StallSkip", true)
+			m:SetAttribute("IsDummy", true)
+		end)
+		if ctv.Value == m then pcall(function() ctv.Value = nil end) end
+		STALL.model = nil
+		HUB.Stats.dungeonStallUnlocks = (HUB.Stats.dungeonStallUnlocks or 0) + 1
+		return tostring(m:GetAttribute("DisplayName") or m.Name)
+	end
+
 	local function isTargetReachable(myPos, targetPos, dStep)
 		if not myPos or not targetPos then return false end
 
@@ -13522,7 +13660,7 @@ do
 
 		if mFolder then
 			for _, m in ipairs(mFolder:GetChildren()) do
-				if m:IsA("Model") and m.Parent then
+				if m:IsA("Model") and m.Parent and m:GetAttribute("IsDummy") ~= true then
 					local hum = m:FindFirstChildOfClass("Humanoid")
 					local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
 					if hp > 0 then
@@ -13533,7 +13671,7 @@ do
 		end
 
 		for _, m in ipairs(CollectionService:GetTagged("Monster")) do
-			if m:IsA("Model") and m.Parent and not table.find(candidates, m) then
+			if m:IsA("Model") and m.Parent and m:GetAttribute("IsDummy") ~= true and not table.find(candidates, m) then
 				local hum = m:FindFirstChildOfClass("Humanoid")
 				local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
 				if hp > 0 then
@@ -13727,6 +13865,8 @@ do
 			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
 
 			if not HUB.Config.autoPlayDungeon then
+				-- ปิด Auto Play Dungeon ⇒ คืนมอนที่เลิกล็อคไว้ ให้ผู้เล่น/Auto ของเกมตีได้ตามปกติ
+				if next(STALL.marked) then STALL.clearAll() end
 				task.wait(1.5)
 				continue
 			end
@@ -13735,6 +13875,7 @@ do
 				visitedSpots = {}
 				lastStep = nil
 				openedChests = {}
+				STALL.model = nil
 				task.wait(2.0)
 				continue
 			end
@@ -13781,6 +13922,18 @@ do
 			if dStep ~= lastStep then
 				lastStep = dStep
 				visitedSpots = {}
+			end
+
+			-- 1.5 เลิกล็อคมอนทั่วไปที่ตีแล้วเลือดไม่ลดเลย 10 วิ (มอนในกำแพง) — v9.78
+			if dState ~= "cleared" then
+				local unlockedName = STALL.update(root.Position)
+				if unlockedName then
+					if HUB.UI and HUB.UI.DungeonStatusLabel then
+						HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: เลิกล็อค %s (ตี %d วิ เลือดไม่ลด) → หาเป้าใหม่ 🚫", unlockedName, STALL.seconds)
+					end
+					task.wait(0.35)
+					continue
+				end
 			end
 
 			-- 2. เมื่อเคลียร์ดันเจี้ยนสำเร็จ (State == 'cleared'): เปิดกล่องจบ → รอสัตว์เลี้ยงเก็บของ → ค่อยทำ action หลังจบ (Replay / Leave / รอ)
