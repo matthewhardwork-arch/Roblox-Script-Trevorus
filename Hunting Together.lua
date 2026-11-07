@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.83)
+-- Hunting Together Hub (v9.85)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.83"
+local VERSION = "9.85"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -570,6 +570,35 @@ function HUB.IsInTown()
 	return root.Position.Z > -150
 end
 
+-- Ground-Truth Live Monster Radius Checker (ตรวจสอบมอนสเตอร์ที่มีชีวิตในรัศมีที่กำหนด)
+function HUB.IsMonsterWithinRadius(radius)
+	if HUB.IsInTown and HUB.IsInTown() then
+		return false
+	end
+	local char = LocalPlayer.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then return false end
+
+	radius = radius or 40
+	local monsters = CollectionService:GetTagged("Monster")
+	for _, m in ipairs(monsters) do
+		if m and m:IsA("Model") and m.Parent then
+			local mName = m.Name:lower()
+			if not mName:find("dummy") and not mName:find("training") and m:GetAttribute("IsDummy") ~= true then
+				local hum = m:FindFirstChildOfClass("Humanoid")
+				local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
+				if hp > 0 then
+					local mPos = m.PrimaryPart and m.PrimaryPart.Position or (m:GetPivot() and m:GetPivot().Position)
+					if mPos and (mPos - root.Position).Magnitude <= radius then
+						return true
+					end
+				end
+			end
+		end
+	end
+	return false
+end
+
 -- Ground-Truth HomeWarp Active Checker (ตรวจสอบสถานะการร่าย HomeWarp ทุกมิติเพื่อป้องกันการขัดจังหวะ 100%)
 function HUB.IsHomeWarpActive()
 	if HUB.IsHomeWarping == true then
@@ -609,6 +638,16 @@ function HUB.EnsureGameAutoActive(maxRetries, retryInterval)
 	-- Town Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากตัวละครอยู่ในเมือง (ในเมืองไม่มีมอนสเตอร์ป่าเด็ดขาด มีเฉพาะ TrainingDummy)
 	if HUB.IsInTown and HUB.IsInTown() then
 		return false
+	end
+
+	-- Dungeon & 40-Stud Monster Guard:
+	-- หากไม่อยู่ในดันเจี้ยน และไม่มีมอนสเตอร์ที่มีชีวิตในระยะ 40 studs ห้ามเปิด Auto Play เองเด็ดขาด
+	local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
+	if not isDungeon then
+		local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
+		if not hasMonster then
+			return false
+		end
 	end
 
 	-- HomeWarp Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากตัวละครกำลังร่าย HomeWarp (ทั้งผู้เล่นกดเองหรือระบบฮับ)
@@ -1199,7 +1238,7 @@ do
 				return "ranged_phys"
 			elseif isFlask then
 				return "flask_magic"
-			elseif id:find("rod") or id:find("staff") or resolved.MATK ~= nil then
+			elseif id:find("rod") or id:find("staff") or id:find("skullstaff") or resolved.MATK ~= nil then
 				return "magic_weapon"
 			else
 				return "melee_phys"
@@ -1395,7 +1434,7 @@ do
 			if setId then
 				if setId == "bloodlord" then
 					sSet = 15
-				elseif setId == "luckystar" then
+				elseif setId == "luckystar" or setId == "azurestar" or setId == "blackstar" then
 					sSet = 13
 				else
 					sSet = 10
@@ -1409,6 +1448,10 @@ do
 				elseif setId == "gale" and (options.AGI or options.ASPD or options.Speed or options.FLEE) then
 					sSet = math.min(15, sSet + 2)
 				elseif setId == "luckystar" and (options.LUK or options.CRIT) then
+					sSet = math.min(15, sSet + 2)
+				elseif setId == "azurestar" and (options.INT or options.MATK or options.CastSpeed or options.SP) then
+					sSet = math.min(15, sSet + 2)
+				elseif setId == "blackstar" and (options.Pierce or options.MPierce or options.CRIT or options.ATK or options.MATK) then
 					sSet = math.min(15, sSet + 2)
 				end
 			end
@@ -4957,7 +5000,7 @@ do
 			{
 				Id = "WeaponMagic",
 				Name = "🪄 อาวุธเวทย์ (Magic Weapon)",
-				Sub = "กลุ่ม: WeaponMagic · คทา / คัมภีร์เวทย์",
+				Sub = "กลุ่ม: WeaponMagic · คทา / คัมภีร์เวทย์ / คทากะโหลก (Skull Staff)",
 				SampleKey = "Items/rod_t5",
 				FallbackIcon = "rbxassetid://97000273852760",
 				Specials = { "CRIT", "MatkPercent", "AtkMatkPercent", "MPierce", "Cooldown", "CastSpeed", "CritDmg", "SkillSingle", "SkillAoe" },
@@ -7767,8 +7810,12 @@ local function isPlayerInActiveCombat()
 	return false
 end
 
--- ตรวจสอบว่ามีมอนสเตอร์ที่มีชีวิตอยู่ในรัศมีที่กำหนดหรือไม่ (ค่าเริ่มต้น 30 studs)
+-- ตรวจสอบว่ามีมอนสเตอร์ที่มีชีวิตอยู่ในรัศมีที่กำหนดหรือไม่ (ค่าเริ่มต้น 40 studs)
 local function isMonsterWithinRadius(radius)
+	if HUB.IsMonsterWithinRadius then
+		return HUB.IsMonsterWithinRadius(radius or 40)
+	end
+
 	-- Guard: หากอยู่ในเมือง ให้คืนค่า false ทันที (ในเมืองไม่มีมอนสเตอร์ป่าเด็ดขาด มีเฉพาะ TrainingDummy)
 	if HUB.IsInTown and HUB.IsInTown() then
 		return false
@@ -7778,13 +7825,13 @@ local function isMonsterWithinRadius(radius)
 	local root = char and char:FindFirstChild("HumanoidRootPart")
 	if not root then return false end
 
-	radius = radius or 30
+	radius = radius or 40
 	local monsters = CollectionService:GetTagged("Monster")
 	for _, m in ipairs(monsters) do
 		if m:IsA("Model") and m.Parent then
 			local mName = m.Name:lower()
 			-- ไม่นับ TrainingDummy หรือหุ่นซ้อมในเมืองเป็นมอนสเตอร์เด็ดขาด
-			if not mName:find("dummy") and not mName:find("training") then
+			if not mName:find("dummy") and not mName:find("training") and m:GetAttribute("IsDummy") ~= true then
 				local hum = m:FindFirstChildOfClass("Humanoid")
 				local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
 				if hp > 0 then
@@ -8790,7 +8837,9 @@ local function resumeFarmOrFollow(targetPos)
 	end
 
 	if not restoredFollow then
-		if (targetPos and targetPos.Z < -300) or (HUB.OriginAutoOn and not (HUB.IsInTown and HUB.IsInTown())) then
+		local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
+		local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
+		if isDungeon or hasMonster then
 			if HUB.EnsureGameAutoActive then
 				HUB.EnsureGameAutoActive(6, 0.25)
 			end
@@ -11079,12 +11128,14 @@ do
 				HUB.SellRoutineStartTime = nil
 			end
 
-			-- 3. Monster Zone Idle Self-Healing: ยืนนิ่งในทุ่งมอนสเตอร์ (Z <= -300) โดยไม่ได้ติดรูทีนใดๆ แต่ Auto Play ปิดอยู่
+			-- 3. Monster Zone Idle Self-Healing: ยืนนิ่งในทุ่งมอนสเตอร์ โดยไม่ได้ติดรูทีนใดๆ แต่ Auto Play ปิดอยู่ (เฉพาะในดันเจี้ยน หรือพบมอนสเตอร์ในระยะ 40 studs)
 			if not _isBossRoutine and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.Navigating and not HUB.Dodging then
 				local ch = LocalPlayer.Character
 				local rt = ch and ch:FindFirstChild("HumanoidRootPart")
 				local hm = ch and ch:FindFirstChildOfClass("Humanoid")
-				if rt and hm and hm.Health > 0 and rt.Position.Z <= -300 then
+				local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
+				local hasNearbyMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
+				if rt and hm and hm.Health > 0 and (isDungeon or hasNearbyMonster) then
 					if not isHomeWarpActive() and not HUB.UserDisabledAuto and not HUB.IsGameAutoActive() and HUB.Config.autoResumeGamePlay ~= false then
 						_stuckBossCount = _stuckBossCount + 1
 						if _stuckBossCount >= 3 then -- ยืนนิ่งเกิน 15 วินาที
@@ -12410,10 +12461,12 @@ do
 					end
 				end
 
-				-- 3. มอนสเตอร์อยู่รอบตัวแต่ Auto Play ดับเอง (Continuous Auto Play Health Monitor — ยกเว้นอยู่ในเมืองหลวง)
+				-- 3. มอนสเตอร์อยู่รอบตัวแต่ Auto Play ดับเอง (Continuous Auto Play Health Monitor — เฉพาะในดันเจี้ยน หรือมีมอนสเตอร์ในระยะ 40 studs)
 				if (HUB.Config.autoResumeGamePlay ~= false) and not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsSellingRoutineActive and not HUB.Navigating and not isHomeWarpActive() and not (HUB.IsInTown and HUB.IsInTown()) then
 					if not HUB.IsGameAutoActive() then
-						if isMonsterWithinRadius(35) then
+						local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
+						local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
+						if isDungeon or hasMonster then
 							HUB.EnsureGameAutoActive(2, 0.25)
 						end
 					end
@@ -12521,19 +12574,21 @@ do
 							HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: อยู่ในเมืองหลวง (ปิด Auto Play ป้องกันการแย่งเดิน)"
 						end
 					else
-						-- ตรวจสอบเงื่อนไขระยะมอนสเตอร์: ต้องมีมอนสเตอร์อยู่ในระยะ 30 studs เท่านั้น
-						if isMonsterWithinRadius(30) then
+						-- ตรวจสอบเงื่อนไขระยะมอนสเตอร์: ต้องมีมอนสเตอร์อยู่ในระยะ 40 studs เท่านั้น (หรืออยู่ในดันเจี้ยน)
+						local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
+						local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
+						if isDungeon or hasMonster then
 							local ok = HUB.EnsureGameAutoActive(4, 0.3)
 							if ok then
 								HUB.BotTurnedOnAuto = true
-								print("[Hunting Together Hub] พบมอนสเตอร์ในระยะ 30 studs — สั่งเปิด Auto Play ต่อเนื่องเรียบร้อย")
+								print("[Hunting Together Hub] พบมอนสเตอร์ในระยะ 40 studs (หรือในดันเจี้ยน) — สั่งเปิด Auto Play ต่อเนื่องเรียบร้อย")
 								if HUB.UI.AutoResumeStatusLabel then
-									HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: เปิด Auto Play อัตโนมัติ (พบมอนในระยะ 30 studs) ⚔️"
+									HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: เปิด Auto Play อัตโนมัติ (พบมอนในระยะ 40 studs) ⚔️"
 								end
 							end
 						else
 							if HUB.UI.AutoResumeStatusLabel and not HUB.BotTurnedOnAuto then
-								HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: ไม่มีมอนในระยะ 30 studs (ยังไม่เปิด Auto Play)"
+								HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: ไม่มีมอนในระยะ 40 studs (ยังไม่เปิด Auto Play)"
 							end
 						end
 					end
@@ -12583,9 +12638,11 @@ do
 				return
 			end
 
-			-- ถ้ามีมอนสเตอร์ใกล้ตัว หรืออยู่ในโซนมอนสเตอร์ ให้เปิด Auto Play ทันที (ยกเว้นอยู่ในเมือง หรือกำลังร่าย HomeWarp)
+			-- ถ้ามีมอนสเตอร์ใกล้ตัว (40 studs) หรืออยู่ในดันเจี้ยน ให้เปิด Auto Play ทันที (ยกเว้นอยู่ในเมือง หรือกำลังร่าย HomeWarp)
 			local inTown = HUB.IsInTown and HUB.IsInTown()
-			if not isHomeWarpActive() and not inTown and (isMonsterWithinRadius(30) or root.Position.Z <= -300) then
+			local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
+			local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
+			if not isHomeWarpActive() and not inTown and (isDungeon or hasMonster) then
 				local ok = HUB.EnsureGameAutoActive(5, 0.3)
 				if ok then
 					HUB.BotTurnedOnAuto = true
@@ -12596,7 +12653,7 @@ do
 				end
 			else
 				if HUB.UI.AutoResumeStatusLabel and not HUB.BotTurnedOnAuto then
-					HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: เกิดใหม่ที่เมือง (งดเปิด Auto Play ในเมือง)"
+					HUB.UI.AutoResumeStatusLabel.Text = inTown and "สถานะ: เกิดใหม่ที่เมือง (งดเปิด Auto Play ในเมือง)" or "สถานะ: เกิดใหม่ (ไม่มีมอนในระยะ 40 studs)"
 				end
 			end
 		end)
