@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.90)
+-- Hunting Together Hub (v9.91)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.90"
+local VERSION = "9.91"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -7542,6 +7542,9 @@ do
 				end
 				refreshAllRows()
 				if HUB.Config.autoSave then saveConfig() end
+				if HUB.CancelAutoBossRoutine then
+					HUB.CancelAutoBossRoutine(true)
+				end
 			end))
 
 			for idx, bDef in ipairs(BOSS_DEFS) do
@@ -7631,10 +7634,17 @@ do
 
 				local function onToggleBoss()
 					if not HUB.Config.farmBossList then HUB.Config.farmBossList = {} end
-					HUB.Config.farmBossList[bDef.key] = not HUB.Config.farmBossList[bDef.key]
+					local isNowEnabled = not HUB.Config.farmBossList[bDef.key]
+					HUB.Config.farmBossList[bDef.key] = isNowEnabled
 					refreshRow()
 					if HUB.Config.autoSave then saveConfig() end
-					if HUB.Config.autoFarmBoss and HUB.Config.farmBossList[bDef.key] and HUB.CheckAndTriggerAutoBoss then
+					if not isNowEnabled then
+						if HUB.CurrentTargetBoss == bDef.key then
+							if HUB.CancelAutoBossRoutine then
+								HUB.CancelAutoBossRoutine(true)
+							end
+						end
+					elseif isNowEnabled and HUB.Config.autoFarmBoss and HUB.CheckAndTriggerAutoBoss then
 						task.spawn(HUB.CheckAndTriggerAutoBoss)
 					end
 				end
@@ -8192,7 +8202,8 @@ end
 local _lastAnchorUpdate = 0
 local function updateFarmingAnchor(root)
 	if not root then return end
-	-- GUARD: ห้ามบันทึกพิกัดในเมือง (Z > -300) เป็นจุดฟาร์มเด็ดขาด เพราะในเมืองไม่มีมอนสเตอร์ให้ฟาร์ม
+	-- GUARD: ห้ามบันทึกพิกัดในดันเจี้ยน หรือในเมือง (Z > -300) เป็นจุดฟาร์มเด็ดขาด
+	if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return end
 	if root.Position.Z > -300 then return end
 
 	local now = os.clock()
@@ -8214,8 +8225,8 @@ local function updateFarmingAnchor(root)
 	if now - _lastAnchorUpdate < 0.5 then return end
 	_lastAnchorUpdate = now
 
-	-- หากผู้เล่นหยุดเดินเองเกิน 1.2 วินาที และไม่ได้อยู่ในโหมดนำทางของ HUB
-	if not HUB.Navigating and (now - (HUB.LastManualMoveTime or 0) >= 1.2) then
+	-- หากผู้เล่นหยุดเดินเองเกิน 1.2 วินาที และไม่ได้อยู่ในโหมดนำทางหรือรูทีนบอส/ขายของของ HUB
+	if not HUB.Navigating and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and (now - (HUB.LastManualMoveTime or 0) >= 1.2) then
 		if not HUB.FarmAnchor or (HUB.FarmAnchor - root.Position).Magnitude > 25 then
 			HUB.FarmAnchor = root.Position
 		end
@@ -9151,16 +9162,26 @@ local function resumeFarmOrFollow(targetPos)
 	end
 end
 
-local function returnToOrigin(shouldAbortFn, updateStatusFn)
+local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
+	if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return false end
 	local char = LocalPlayer.Character
 	local root = char and char:FindFirstChild("HumanoidRootPart")
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	if not root or not hum or hum.Health <= 0 then return false end
 
-	local origin = HUB.OriginCFrame
+	local origin = customTarget or HUB.OriginCFrame or (HUB.FarmAnchor and HUB.FarmAnchor.Z <= -300 and CFrame.new(HUB.FarmAnchor))
 	if not origin then
 		return true
 	end
+
+	local originPos = nil
+	if typeof(origin) == "CFrame" then
+		originPos = origin.Position
+	elseif typeof(origin) == "Vector3" then
+		originPos = origin
+		origin = CFrame.new(origin)
+	end
+	if not originPos then return true end
 
 	-- ปิด Auto Play ชั่วคราวก่อนเดินทางกลับ เพื่อไม่ให้ถูกมอนสเตอร์ระหว่างทางดึงตัวละครออกนอกเส้นทาง
 	if HUB.DisableGameAutoPlay then
@@ -10929,11 +10950,15 @@ do
 		_cancelBossRoutine = false
 		HUB.IsBossRoutineActive = true
 		HUB.BossRoutineStartTime = os.clock()
+		HUB.CurrentTargetBoss = targetBoss and targetBoss.key
 
 		local success, err = pcall(function()
 			local function shouldAbort()
 				if not HUB.Alive or not HUB.Config.autoFarmBoss or _cancelBossRoutine or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
 				if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return true end
+				if targetBoss and (not HUB.Config.farmBossList or HUB.Config.farmBossList[targetBoss.key] ~= true) then
+					return true
+				end
 				return false
 			end
 
@@ -10948,6 +10973,17 @@ do
 			end
 
 			while targetBoss and not shouldAbort() do
+				-- ตรวจสอบว่าบอสตัวปัจจุบันถูกผู้ใช้กดปิดไปแล้วหรือไม่ หากถูกปิดให้หาบอสตัวเลือกอื่นทันที
+				if not HUB.Config.farmBossList or HUB.Config.farmBossList[targetBoss.key] ~= true then
+					local altBoss = getNextAliveSelectedBoss()
+					if altBoss then
+						targetBoss = altBoss
+						HUB.CurrentTargetBoss = targetBoss.key
+					else
+						break
+					end
+				end
+
 				if HUB.UI.BossStatusLabel then
 					local cd = getBossCountdown(targetBoss)
 					if isBossAlive(targetBoss) then
@@ -10986,7 +11022,7 @@ do
 						currentNearPillar = warpPillarsFolder and warpPillarsFolder:FindFirstChild("WarpPillar_Town")
 					end
 
-					if shouldAbort() then return end
+					if shouldAbort() then break end
 
 					-- 3. สั่งวาร์ปไปยังเสาของเป้าหมาย (targetBoss.pillarId) พร้อม Synchronization & Silver Guard
 					local warpedToBoss = executePillarWarp(currentNearPillar, targetBoss.pillarId, shouldAbort)
@@ -11070,7 +11106,7 @@ do
 					end,
 				})
 
-				if shouldAbort() then return end
+				if shouldAbort() then break end
 
 				local cdOnArrival = getBossCountdown(targetBoss)
 				local isDeadOnArrival = bossDiedOnWay or (not isBossAlive(targetBoss) and not findLiveBossModel(targetBoss) and cdOnArrival > preSpawnSec)
@@ -11095,7 +11131,7 @@ do
 					end
 				end
 
-				if shouldAbort() then return end
+				if shouldAbort() then break end
 
 				-- 5. สู้บอส:
 				local bossDefeated = false
@@ -11276,7 +11312,7 @@ do
 					end
 				end
 
-				if shouldAbort() then return end
+				if shouldAbort() then break end
 
 				-- 6. เช็คบอสตัวถัดไป (ไม่ต้องสั่งเดินซ้ำที่นี่ เพราะรอบถัดไป executePillarWarp จะเดินไปหาเสาที่ใกล้ที่สุดและกดวาร์ปให้ทันที)
 				local nextBoss = getNextAliveSelectedBoss(targetBoss.key)
@@ -11285,11 +11321,13 @@ do
 						HUB.UI.BossStatusLabel.Text = string.format("สถานะ: สลับไปล่าบอสตัวถัดไป: %s (%s)...", nextBoss.name, nextBoss.levelText)
 					end
 					targetBoss = nextBoss
+					HUB.CurrentTargetBoss = targetBoss.key
 				else
 					if HUB.UI.BossStatusLabel then
 						HUB.UI.BossStatusLabel.Text = "สถานะ: ไม่มีบอสอื่นที่พร้อมล่า — กำลังเดินทางกลับจุดเดิม..."
 					end
 					targetBoss = nil
+					HUB.CurrentTargetBoss = nil
 				end
 			end
 
@@ -11319,7 +11357,16 @@ do
 				return
 			end
 
-			returnToOrigin(shouldAbort, function(text)
+			local function shouldAbortReturn()
+				if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
+				local ch = LocalPlayer.Character
+				local h = ch and ch:FindFirstChildOfClass("Humanoid")
+				if not h or h.Health <= 0 then return true end
+				if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return true end
+				return false
+			end
+
+			returnToOrigin(shouldAbortReturn, function(text)
 				if HUB.UI.BossStatusLabel then HUB.UI.BossStatusLabel.Text = text end
 			end)
 		end)
@@ -11331,6 +11378,7 @@ do
 		_isBossRoutine = false
 		HUB.IsBossRoutineActive = false
 		HUB.BossRoutineStartTime = nil
+		HUB.CurrentTargetBoss = nil
 		if HUB.UI.BossStatusLabel then
 			if HUB.Config.autoFarmBoss then
 				HUB.UI.BossStatusLabel.Text = "สถานะ: พร้อมทำงาน · สแตนด์บายรอบอสเกิด..."
@@ -11341,14 +11389,12 @@ do
 	end
 
 	HUB.RunAutoBossRoutine = runAutoBossRoutine
-	HUB.CancelAutoBossRoutine = function()
+	HUB.CancelAutoBossRoutine = function(shouldReturn)
 		_cancelBossRoutine = true
 		_isBossRoutine = false
 		HUB.IsBossRoutineActive = false
 		HUB.BossRoutineStartTime = nil
-		if not HUB.Config.autoSell and not HUB.Config.autoFarmBoss then
-			clearOrigin()
-		end
+		HUB.CurrentTargetBoss = nil
 		pcall(function()
 			local char = LocalPlayer.Character
 			local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -11358,6 +11404,15 @@ do
 		end)
 		if HUB.UI.BossStatusLabel and not HUB.Config.autoFarmBoss then
 			HUB.UI.BossStatusLabel.Text = "สถานะ: ปิดใช้งาน"
+		end
+		if shouldReturn then
+			task.spawn(function()
+				if HUB.ReturnToOrigin then
+					HUB.ReturnToOrigin()
+				end
+			end)
+		elseif not HUB.Config.autoSell and not HUB.Config.autoFarmBoss then
+			clearOrigin()
 		end
 	end
 	HUB.IsBossAlive = isBossAlive
@@ -12688,6 +12743,45 @@ do
 		LocalPlayer:SetAttribute("RespawnKeepBot", nil)
 	end)
 
+	local function triggerAutoRespawn()
+		task.spawn(function()
+			-- รอ Grace Period 1.2 วินาที เพื่อให้ Server บันทึกการตายและส่ง DeathPrompt
+			task.wait(1.2)
+			local tries = 0
+			while HUB.CharacterDying and tries < 6 do
+				if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
+				tries = tries + 1
+
+				-- Transport 1: สั่ง Remote RespawnChoice:FireServer("town") เพื่อเกิดเมืองฟรีทันที
+				local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+				local respawnChoice = remotes and remotes:FindFirstChild("RespawnChoice")
+				if respawnChoice then
+					pcall(function()
+						respawnChoice:FireServer("town")
+					end)
+				end
+
+				-- Transport 2 (UI Fallback): ค้นหาปุ่ม Respawn in Town บน PlayerGui.LumiRespawn
+				pcall(function()
+					local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+					local lumiRespawn = pgui and pgui:FindFirstChild("LumiRespawn")
+					if lumiRespawn then
+						for _, desc in ipairs(lumiRespawn:GetDescendants()) do
+							if desc:IsA("TextButton") and string.find(string.lower(desc.Text), "respawn in town") then
+								if type(EXEC.firesignal) == "function" then
+									pcall(EXEC.firesignal, desc.MouseButton1Click)
+								end
+								break
+							end
+						end
+					end
+				end)
+
+				task.wait(1.5)
+			end
+		end)
+	end
+
 	local function onCharacterDied()
 		HUB.CharacterDying = true
 		-- ยกเลิกลูปรูทีนที่กำลังทำงานอยู่ทันที ป้องกันไม่ให้เธรดค้างบนร่างที่ตาย
@@ -12696,6 +12790,7 @@ do
 		HUB.IsSalvagingRoutineActive = false
 		HUB.Navigating = false
 		HUB.Dodging = false
+		triggerAutoRespawn()
 	end
 
 	-- v9.73: ไม่บล็อกการกระโดดอีกแล้ว (เลิก hook __newindex · เลิกล้าง hum.Jump ทุกเฟรม · เลิกปิด state Jumping)
@@ -12714,6 +12809,11 @@ do
 		end
 		if hum then
 			HUB:AddConnection(hum.Died:Connect(onCharacterDied))
+			HUB:AddConnection(hum.HealthChanged:Connect(function(hp)
+				if hp <= 0 and not HUB.CharacterDying then
+					onCharacterDied()
+				end
+			end))
 			-- Anti-Ragdoll (ป้องกันสะดุดล้ม) — ไม่รวม Jumping
 			local disabledStates = {
 				Enum.HumanoidStateType.Ragdoll,
@@ -12903,11 +13003,12 @@ do
 			local root = ch and ch:FindFirstChild("HumanoidRootPart")
 			if not root then return end
 
-			-- กรณีเกิดในเมือง (Z > -200) แต่มี Origin จุดฟาร์มมอนสเตอร์เดิมที่ยังค้างอยู่ (Z <= -300)
-			if root.Position.Z > -200 and HUB.OriginCFrame and HUB.OriginCFrame.Position.Z <= -300 then
+			-- กรณีเกิดในเมือง (Z > -200) แต่มีจุดฟาร์มมอนสเตอร์เดิมนอกเมือง (HUB.OriginCFrame หรือ HUB.FarmAnchor ที่ Z <= -300)
+			local targetFarm = HUB.OriginCFrame or (HUB.FarmAnchor and HUB.FarmAnchor.Z <= -300 and CFrame.new(HUB.FarmAnchor))
+			if root.Position.Z > -200 and targetFarm and targetFarm.Position.Z <= -300 then
 				task.spawn(function()
 					if HUB.ReturnToOrigin then
-						HUB.ReturnToOrigin()
+						HUB.ReturnToOrigin(nil, nil, targetFarm)
 					end
 				end)
 				return
