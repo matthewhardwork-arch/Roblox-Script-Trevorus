@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.89)
+-- Hunting Together Hub (v9.90)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.89"
+local VERSION = "9.90"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -412,7 +412,6 @@ local HUB = {
 			Boss04 = false,
 			Boss05 = false,
 		},
-		autoResumeGamePlay = true,
 		autoStartGame = true,
 		maxLootBoxMiniboss = 1,
 		bossPreSpawnThreshold = 15,
@@ -1024,7 +1023,6 @@ local function saveConfig()
 		autoSellGear = (HUB.Config.autoSellGear ~= false),
 		autoFarmBoss = HUB.Config.autoFarmBoss,
 		farmBossList = HUB.Config.farmBossList,
-		autoResumeGamePlay = (HUB.Config.autoResumeGamePlay ~= false),
 		autoStartGame = (HUB.Config.autoStartGame ~= false),
 		autoPlayDungeon = (HUB.Config.autoPlayDungeon == true),
 		dungeonCollectSkulls = (HUB.Config.dungeonCollectSkulls ~= false),
@@ -1157,7 +1155,6 @@ local function loadConfig()
 						HUB.Config.farmBossList[k] = v
 					end
 				end
-				if data.autoResumeGamePlay ~= nil then HUB.Config.autoResumeGamePlay = data.autoResumeGamePlay end
 				if data.autoStartGame ~= nil then HUB.Config.autoStartGame = data.autoStartGame end
 				if data.maxLootBoxMiniboss ~= nil then HUB.Config.maxLootBoxMiniboss = tonumber(data.maxLootBoxMiniboss) or 1 end
 				if data.bossPreSpawnThreshold ~= nil then
@@ -7804,24 +7801,8 @@ do
 	)
 	HUB.UI.RejoinStatusLabel = rejoinStatusLabel
 
-	local _, autoResumeStatus = createCard(
-		scrollSettings,
-		"Auto Resume Play (เปิด Auto Play อัตโนมัติ)",
-		"หากหลุดแล้ว Rejoin หรือเพิ่ง Execute เข้ามา ระบบจะกดเปิด Auto Play ต่อเมื่อพบมอนในระยะ 30 studs",
-		HUB.Config.autoResumeGamePlay ~= false,
-		function(enabled, label)
-			HUB.Config.autoResumeGamePlay = enabled
-			if enabled then
-				HUB.UserDisabledAuto = false
-				label.Text = "สถานะ: เปิดใช้งาน (จะเปิดต่อเมื่อพบมอนในระยะ 30s)"
-			else
-				label.Text = "สถานะ: ปิดใช้งาน"
-			end
-		end
-	)
-	HUB.UI.AutoResumeStatusLabel = autoResumeStatus
-		-- Speed Boost: เปิด/ปิด + เลือกเปอร์เซ็นต์โบนัสความเร็ว (ใช้ฐานจาก LumiBaseSpeed ของเกม)
-		local _, speedBoostStatus = createCard(
+	-- Speed Boost: เปิด/ปิด + เลือกเปอร์เซ็นต์โบนัสความเร็ว (ใช้ฐานจาก LumiBaseSpeed ของเกม)
+	local _, speedBoostStatus = createCard(
 			scrollSettings,
 			"Speed Boost (วิ่งเร็วขึ้นตามค่าที่เซิร์ฟเวอร์อนุญาต)",
 			"เพิ่มความเร็วเดินจากค่า LumiBaseSpeed ของเกมตามเปอร์เซ็นต์ที่เลือก ระหว่างกด Sprint เกมจะคุมความเร็วเอง",
@@ -11459,7 +11440,7 @@ do
 				local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
 				local hasNearbyMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
 				if rt and hm and hm.Health > 0 and (isDungeon or hasNearbyMonster) then
-					if not isHomeWarpActive() and not HUB.UserDisabledAuto and not HUB.IsGameAutoActive() and HUB.Config.autoResumeGamePlay ~= false then
+					if not isHomeWarpActive() and not HUB.UserDisabledAuto and not HUB.IsGameAutoActive() then
 						_stuckBossCount = _stuckBossCount + 1
 						if _stuckBossCount >= 3 then -- ยืนนิ่งเกิน 15 วินาที
 							_stuckBossCount = 0
@@ -12700,11 +12681,11 @@ do
 	end)
 end
 
--- ===== 9.5 Auto Resume Game Play Worker (Startup & Rejoin Auto-Execute Resilience & Respawn Lifecycle) =====
+-- ===== 9.5 Combat Auto-Play Health & Respawn Lifecycle Worker =====
 do
-	-- ป้องกัน CombatClient สั่งปิด Auto Play ตอนตัวละครเกิดใหม่ (RespawnKeepBot)
+	-- คืนการทำงานตามธรรมชาติให้ CombatClient (ไม่ตั้ง RespawnKeepBot)
 	pcall(function()
-		LocalPlayer:SetAttribute("RespawnKeepBot", true)
+		LocalPlayer:SetAttribute("RespawnKeepBot", nil)
 	end)
 
 	local function onCharacterDied()
@@ -12801,7 +12782,7 @@ do
 				end
 
 				-- 3. มอนสเตอร์อยู่รอบตัวแต่ Auto Play ดับเอง (Continuous Auto Play Health Monitor — เฉพาะในดันเจี้ยน หรือมีมอนสเตอร์ในระยะ 40 studs)
-				if (HUB.Config.autoResumeGamePlay ~= false) and not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsSellingRoutineActive and not HUB.Navigating and not isHomeWarpActive() and not (HUB.IsInTown and HUB.IsInTown()) then
+				if not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsSellingRoutineActive and not HUB.Navigating and not isHomeWarpActive() then
 					if not HUB.IsGameAutoActive() then
 						local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
 						local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
@@ -12823,13 +12804,13 @@ do
 			local h = ch and ch:FindFirstChildOfClass("Humanoid")
 			if not h or h.Health <= 0 then return end
 
-			if HUB.BotTurnedOnAuto and not HUB.BotPausingAuto and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.Navigating and not isHomeWarpActive() then
+			if not HUB.BotPausingAuto and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.Navigating and not isHomeWarpActive() then
 				HUB.UserDisabledAuto = true
-				print("[Hunting Together Hub] ผู้ใช้กดปิด Auto Play ด้วยตนเอง — งดการเปิดอัตโนมัติซ้ำจนกว่าจะกดเปิดในเมนู Hub หรือ execute ใหม่")
-				if HUB.UI.AutoResumeStatusLabel then
-					HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: ผู้ใช้กดปิด Auto Play (งดเปิดซ้ำ)"
-				end
+				print("[Hunting Together Hub] ผู้ใช้กดปิด Auto Play ด้วยตนเอง — งดการเปิดอัตโนมัติซ้ำจนกว่าจะกดเปิดใหม่")
 			end
+		else
+			-- เมื่อผู้ใช้กดเปิด Auto Play ด้วยตนเอง: ปลดล็อค UserDisabledAuto ทันที
+			HUB.UserDisabledAuto = false
 		end
 	end))
 
@@ -12883,9 +12864,8 @@ do
 		end
 	end)
 
-	-- ตรวจสอบและกดเปิด Auto Play อัตโนมัติเมื่อเพิ่ง Execute / Rejoin เข้ามาช่วงแรก (เฉพาะเมื่อพบมอนในระยะ 30 studs)
+	-- ตรวจสอบและข้ามหน้าจอ Press to Start / Intro Loading เมื่อเริ่มเกม
 	task.spawn(function()
-		-- ขั้นที่ 1: ตรวจสอบและข้ามหน้าจอ Press to Start / Intro Loading ก่อน
 		if HUB.Config.autoStartGame ~= false then
 			HUB.BypassStartScreen(45)
 		end
@@ -12893,46 +12873,6 @@ do
 		local pgui = LocalPlayer:WaitForChild("PlayerGui", 25)
 		if pgui then
 			pcall(function() pgui:WaitForChild("LumiAuto", 20) end)
-		end
-
-		-- Grace period ให้ระบบของตัวเกม (CombatClient / BotJson) โหลดและตั้งค่าเริ่มต้นให้เสร็จ
-		task.wait(2.0)
-
-		-- Checkpoints ในช่วง 15 วินาทีแรก (t = 2s, 5s, 9s, 14s)
-		local intervals = { 0, 3, 4, 5 }
-		for _, delaySec in ipairs(intervals) do
-			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
-			if delaySec > 0 then task.wait(delaySec) end
-
-			if HUB.UserDisabledAuto then break end
-
-			if HUB.Config.autoResumeGamePlay ~= false and not isHomeWarpActive() then
-				if not HUB.IsGameAutoActive() then
-					if HUB.IsInTown and HUB.IsInTown() then
-						if HUB.UI.AutoResumeStatusLabel and not HUB.BotTurnedOnAuto then
-							HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: อยู่ในเมืองหลวง (ปิด Auto Play ป้องกันการแย่งเดิน)"
-						end
-					else
-						-- ตรวจสอบเงื่อนไขระยะมอนสเตอร์: ต้องมีมอนสเตอร์อยู่ในระยะ 40 studs เท่านั้น (หรืออยู่ในดันเจี้ยน)
-						local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
-						local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-						if isDungeon or hasMonster then
-							local ok = HUB.EnsureGameAutoActive(4, 0.3)
-							if ok then
-								HUB.BotTurnedOnAuto = true
-								print("[Hunting Together Hub] พบมอนสเตอร์ในระยะ 40 studs (หรือในดันเจี้ยน) — สั่งเปิด Auto Play ต่อเนื่องเรียบร้อย")
-								if HUB.UI.AutoResumeStatusLabel then
-									HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: เปิด Auto Play อัตโนมัติ (พบมอนในระยะ 40 studs) ⚔️"
-								end
-							end
-						else
-							if HUB.UI.AutoResumeStatusLabel and not HUB.BotTurnedOnAuto then
-								HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: ไม่มีมอนในระยะ 40 studs (ยังไม่เปิด Auto Play)"
-							end
-						end
-					end
-				end
-			end
 		end
 	end)
 
@@ -12948,7 +12888,6 @@ do
 		if HUB.CancelAutoSellRoutine then pcall(HUB.CancelAutoSellRoutine) end
 
 		pcall(function()
-			LocalPlayer:SetAttribute("RespawnKeepBot", true)
 			local root = newChar:WaitForChild("HumanoidRootPart", 5)
 			if root then root.Anchored = false end
 		end)
@@ -12956,7 +12895,7 @@ do
 			hookHumanoid(newChar)
 		end)
 
-		if not HUB.Alive or HUB.Config.autoResumeGamePlay == false then return end
+		if not HUB.Alive then return end
 
 		task.delay(2.5, function()
 			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
@@ -12968,32 +12907,20 @@ do
 			if root.Position.Z > -200 and HUB.OriginCFrame and HUB.OriginCFrame.Position.Z <= -300 then
 				task.spawn(function()
 					if HUB.ReturnToOrigin then
-						HUB.ReturnToOrigin(nil, function(txt)
-							if HUB.UI.AutoResumeStatusLabel then
-								HUB.UI.AutoResumeStatusLabel.Text = txt
-							end
-						end)
+						HUB.ReturnToOrigin()
 					end
 				end)
 				return
 			end
 
-			-- ถ้ามีมอนสเตอร์ใกล้ตัว (40 studs) หรืออยู่ในดันเจี้ยน ให้เปิด Auto Play ทันที (ยกเว้นอยู่ในเมือง หรือกำลังร่าย HomeWarp)
-			local inTown = HUB.IsInTown and HUB.IsInTown()
+			-- ถ้ามีมอนสเตอร์ใกล้ตัว (40 studs) หรืออยู่ในดันเจี้ยน ให้เปิด Auto Play ทันที (ยกเว้นกำลังร่าย HomeWarp)
 			local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
 			local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-			if not isHomeWarpActive() and not inTown and (isDungeon or hasMonster) then
+			if not isHomeWarpActive() and (isDungeon or hasMonster) then
 				local ok = HUB.EnsureGameAutoActive(5, 0.3)
 				if ok then
 					HUB.BotTurnedOnAuto = true
 					print("[Hunting Together Hub] ตัวละครเกิดใหม่ — สั่งเปิดใช้งาน Auto Play ต่อเนื่องเรียบร้อย")
-					if HUB.UI.AutoResumeStatusLabel then
-						HUB.UI.AutoResumeStatusLabel.Text = "สถานะ: เปิด Auto Play หลังเกิดใหม่สำเร็จ ⚔️"
-					end
-				end
-			else
-				if HUB.UI.AutoResumeStatusLabel and not HUB.BotTurnedOnAuto then
-					HUB.UI.AutoResumeStatusLabel.Text = inTown and "สถานะ: เกิดใหม่ที่เมือง (งดเปิด Auto Play ในเมือง)" or "สถานะ: เกิดใหม่ (ไม่มีมอนในระยะ 40 studs)"
 				end
 			end
 
