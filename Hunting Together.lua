@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.86)
+-- Hunting Together Hub (v9.87)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.86"
+local VERSION = "9.87"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -599,7 +599,7 @@ function HUB.IsMonsterWithinRadius(radius)
 	return false
 end
 
--- ===== Party Follow State & Helper Functions (v9.86) =====
+-- ===== Party Follow State & Helper Functions (v9.87) =====
 HUB.FollowTargetUserId = nil
 HUB.UserManuallyStoppedFollow = false
 
@@ -11951,6 +11951,22 @@ do
 				local buf = getDodgeBuffer()
 				HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: เปิดใช้งาน · หลบแล้ว %d ครั้ง (ระยะเผื่อ %.1f studs)", HUB.Stats.dodgesPerformed, buf)
 			end
+
+			-- v9.87: กู้คืน Follow หลังจบการหลบสกิลอันตราย (Event-Driven: เฉพาะเมื่อก่อน Dodge เคย Follow อยู่และผู้ใช้ไม่ได้สั่งหยุดเอง)
+			if not isHomeWarpActive() and HUB.FollowTargetUserId and not HUB.UserManuallyStoppedFollow then
+				if HUB.IsUserInMyParty and HUB.IsUserInMyParty(HUB.FollowTargetUserId) then
+					local curFollow = tonumber(LocalPlayer:GetAttribute("LumiFollowUserId"))
+					if not curFollow or curFollow == 0 then
+						local followEv = LocalPlayer:FindFirstChild("LumiPartyFollow")
+						if followEv and followEv:IsA("BindableEvent") then
+							followEv:Fire(HUB.FollowTargetUserId)
+							print(string.format("[Hunting Together Hub] หลบสกิลเสร็จสิ้น — กู้คืน Party Follow ไปยัง UserId %s สำเร็จ 👥", tostring(HUB.FollowTargetUserId)))
+						end
+					end
+				else
+					HUB.FollowTargetUserId = nil
+				end
+			end
 		end
 		HUB.CleanupDodge = cleanupDodge
 
@@ -12932,7 +12948,7 @@ do
 	task.defer(disableExternalIdledConnections)
 end
 
--- ===== 10.45 Party Follow Guardian Engine (Zero-Interference & Auto-Resume) =====
+-- ===== 10.45 Party Follow Guardian Engine (Event-Driven & User-Intent First, v9.87) =====
 do
 	local UserInputService = game:GetService("UserInputService")
 	local moveKeySet = {
@@ -12946,18 +12962,52 @@ do
 		[Enum.KeyCode.Right] = true,
 	}
 
-	-- 1. ตรวจจับการเปลี่ยนแปลงของ Attribute LumiFollowUserId
-	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("LumiFollowUserId"):Connect(function()
-		local curUid = tonumber(LocalPlayer:GetAttribute("LumiFollowUserId"))
-		if curUid and curUid > 0 then
-			-- ผู้เล่นกด Follow ในเกม หรือระบบกู้คืนสำเร็จ
-			HUB.FollowTargetUserId = curUid
-			HUB.UserManuallyStoppedFollow = false
+	-- 1. ดักฟัง BindableEvent LumiPartyFollow โดยตรง (ครอบคลุมทั้งการกดจาก Party GUI และการสั่งจากภายนอก)
+	local function hookPartyFollowEvent()
+		local followEv = LocalPlayer:FindFirstChild("LumiPartyFollow")
+		if followEv and followEv:IsA("BindableEvent") then
+			HUB:AddConnection(followEv.Event:Connect(function(arg)
+				if type(arg) == "number" and arg > 0 then
+					-- ผู้ใช้สั่ง Follow สมาชิกในปาร์ตี้
+					HUB.FollowTargetUserId = arg
+					HUB.UserManuallyStoppedFollow = false
+				else
+					-- ผู้ใช้สั่ง Unfollow (ส่ง nil, "stop", หรือค่าที่ไม่ใช่ตัวเลข)
+					HUB.FollowTargetUserId = nil
+					HUB.UserManuallyStoppedFollow = true
+				end
+			end))
+		end
+	end
+	hookPartyFollowEvent()
+	HUB:AddConnection(LocalPlayer.ChildAdded:Connect(function(child)
+		if child.Name == "LumiPartyFollow" and child:IsA("BindableEvent") then
+			hookPartyFollowEvent()
 		end
 	end))
 
-	-- 2. ดักจับเมื่อผู้เล่นกดเดินเอง (WASD / Arrow Keys)
-	-- หากผู้เล่นกดเดินเองโดยไม่ได้อยู่ในช่วงที่ Hub สั่ง Dodge/Navigate -> ถือว่าผู้ใช้ต้องการหยุด Follow เอง
+	-- 2. ตรวจจับการเปลี่ยนแปลงของ Attribute LumiFollowUserId
+	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("LumiFollowUserId"):Connect(function()
+		local curUid = tonumber(LocalPlayer:GetAttribute("LumiFollowUserId"))
+		if curUid and curUid > 0 then
+			HUB.FollowTargetUserId = curUid
+			HUB.UserManuallyStoppedFollow = false
+		else
+			-- LumiFollowUserId กลายเป็น nil
+			-- ถ้าเกิดขึ้นในขณะที่ไม่ได้ Dodge, ไม่ได้ตาย, และไม่ได้ HomeWarp -> แปลว่าผู้ใช้หรือเกมสั่งหยุด Follow อย่างตั้งใจ
+			local ch = LocalPlayer.Character
+			local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+			local isDead = (hum and hum.Health <= 0) or HUB.CharacterDying == true
+			local isDodging = HUB.Dodging == true
+			local isHoming = (HUB.IsHomeWarpActive and HUB.IsHomeWarpActive()) or HUB.IsHomeWarping == true
+			if not isDodging and not isDead and not isHoming then
+				HUB.FollowTargetUserId = nil
+				HUB.UserManuallyStoppedFollow = true
+			end
+		end
+	end))
+
+	-- 3. ดักจับเมื่อผู้เล่นกดเดินเอง (WASD / Arrow Keys)
 	HUB:AddConnection(UserInputService.InputBegan:Connect(function(input, gpe)
 		if gpe then return end
 		if moveKeySet[input.KeyCode] and not HUB.Dodging and not HUB.Navigating then
@@ -12968,7 +13018,7 @@ do
 		end
 	end))
 
-	-- 3. ดักจับปุ่ม X บน GUI LumiFollowNotice (หากผู้ใช้กดปิด Follow เองที่หน้าจอ)
+	-- 4. ดักจับปุ่ม X บน GUI LumiFollowNotice (หากผู้ใช้กดปิด Follow เองที่หน้าจอ)
 	local function hookFollowNoticeCloseBtn(noticeGui)
 		if not noticeGui then return end
 		local btn = noticeGui:FindFirstChild("TextButton", true)
@@ -12990,42 +13040,6 @@ do
 				hookFollowNoticeCloseBtn(child)
 			end
 		end))
-	end)
-
-	-- 4. Background Guardian Loop (ตรวจเช็คและกู้คืนสถานะ Follow อัตโนมัติเมื่อหลุดจากเหตุสุดวิสัย)
-	task.spawn(function()
-		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
-			task.wait(1.5)
-			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
-
-			local targetUid = HUB.FollowTargetUserId
-			if targetUid and not HUB.UserManuallyStoppedFollow then
-				local currentFollow = tonumber(LocalPlayer:GetAttribute("LumiFollowUserId"))
-				if not currentFollow or currentFollow == 0 then
-					-- ตรวจสอบว่าเพื่อนยังอยู่ในปาร์ตี้หรือไม่
-					if HUB.IsUserInMyParty(targetUid) then
-						local ch = LocalPlayer.Character
-						local h = ch and ch:FindFirstChildOfClass("Humanoid")
-						local notDead = (h and h.Health > 0)
-						local notDodging = not HUB.Dodging
-						local notHoming = not (HUB.IsHomeWarpActive and HUB.IsHomeWarpActive())
-						local notNavigating = not HUB.Navigating
-						local introDone = LocalPlayer:GetAttribute("IntroLoadingDone") ~= false
-
-						if notDead and notDodging and notHoming and notNavigating and introDone then
-							local followEv = LocalPlayer:FindFirstChild("LumiPartyFollow")
-							if followEv and followEv:IsA("BindableEvent") then
-								followEv:Fire(targetUid)
-								print(string.format("[Hunting Together Hub] Party Follow Guardian: กู้คืนสถานะ Follow เพื่อน (UserId: %s) เรียบร้อย 👥", tostring(targetUid)))
-							end
-						end
-					else
-						-- เพื่อนไม่ได้อยู่ในปาร์ตี้แล้ว เลิกจำ
-						HUB.FollowTargetUserId = nil
-					end
-				end
-			end
-		end
 	end)
 end
 
