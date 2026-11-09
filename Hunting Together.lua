@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.92)
+-- Hunting Together Hub (v9.93)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.92"
+local VERSION = "9.93"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -13545,8 +13545,94 @@ do
 		return bestSkull
 	end
 
-	-- v9.81: เลือกจุดเกิดมอนที่ "ใกล้ตัวที่สุด" ทุกชนิด (ไม่เรียงตาม Step/Order แล้ว)
-	-- ข้าม: จุดที่ไปถึงแล้วใน Step นี้ · จุดที่บาเรีย/ประตูบอสกั้นอยู่ (canReach) · อยู่ในห้องบอสแล้วห้ามออกไปจุดข้างนอก
+	-- v9.93: ลำดับจุดเกิดมอนสเตอร์ Halloween 20 จุด (Ground-Truth จาก Halloween.Spawns)
+	-- จัดเรียงตามทิศทางความก้าวหน้าของดันเจี้ยน (Corridor -> Plaza -> Hallway -> Witch -> Boss)
+	local HALLOWEEN_SPOTS_SEQUENCE = {
+		-- ส่วนที่ 1: ทางเดินแรก (Corridor) - Z ลดลงจาก 214 -> 18, เลี้ยว X ที่ -3890
+		{ id = 1,  name = "PackSpot",    pos = Vector3.new(-3842, 60, 214), step = 1 },
+		{ id = 2,  name = "PackSpot",    pos = Vector3.new(-3842, 60, 150), step = 1 },
+		{ id = 3,  name = "AmbushSpot",  pos = Vector3.new(-3842, 60, 118), step = 1 },
+		{ id = 4,  name = "PackSpot",    pos = Vector3.new(-3842, 60, 86),  step = 1 },
+		{ id = 5,  name = "PackSpot",    pos = Vector3.new(-3842, 60, 18),  step = 1 },
+		{ id = 6,  name = "PackSpot",    pos = Vector3.new(-3890, 60, -20), step = 1 },
+
+		-- ส่วนที่ 2: ลานพิธีและเสาพิธีกรรม (Plaza Pillars) - หลังบาเรีย SealCorridor (X = -3942)
+		{ id = 7,  name = "PillarSpot",  pos = Vector3.new(-3972, 60, -7),  step = 2 },
+		{ id = 8,  name = "PillarSpot",  pos = Vector3.new(-3994, 60, -46), step = 2 },
+		{ id = 9,  name = "PillarSpot",  pos = Vector3.new(-4017, 60, -7),  step = 2 },
+
+		-- ส่วนที่ 3: ทางเดินกลางมุ่งหน้าสู่ห้องแม่มด - หลังบาเรีย SealPlaza (X = -4054)
+		{ id = 10, name = "PackSpot",    pos = Vector3.new(-4078, 60, -20), step = 3 },
+		{ id = 11, name = "AmbushSpot",  pos = Vector3.new(-4098, 60, -20), step = 3 },
+		{ id = 12, name = "PackSpot",    pos = Vector3.new(-4118, 60, -20), step = 3 },
+		{ id = 13, name = "PackSpot",    pos = Vector3.new(-4158, 60, -20), step = 3 },
+
+		-- ส่วนที่ 4: ห้องแม่มด (Witch Room) - หลังบาเรีย SealWitch (Z = -68)
+		{ id = 14, name = "WitchSpot",   pos = Vector3.new(-4236, 60, -20), step = 3 },
+		{ id = 15, name = "PackSpot",    pos = Vector3.new(-4226, 60, -112), step = 3 },
+		{ id = 16, name = "AmbushSpot",  pos = Vector3.new(-4226, 60, -148), step = 3 },
+		{ id = 17, name = "PackSpot",    pos = Vector3.new(-4226, 60, -184), step = 3 },
+
+		-- ส่วนที่ 5: ห้องบอส (Boss Room) - หลังประตู Boss Door (X = -4090, Z = -260)
+		{ id = 18, name = "AmbushSpot",  pos = Vector3.new(-4138, 60, -260), step = 4 },
+		{ id = 19, name = "PackSpot",    pos = Vector3.new(-4168, 60, -260), step = 4 },
+		{ id = 20, name = "BossSpot",    pos = Vector3.new(-3966, 60, -260), step = 4 },
+	}
+
+	local function getSpotSeqIndex(part)
+		if not part or not part:IsA("BasePart") then return 999 end
+		local pPos = part.Position
+		for i, s in ipairs(HALLOWEEN_SPOTS_SEQUENCE) do
+			if math.abs(pPos.X - s.pos.X) <= 10.0 and math.abs(pPos.Z - s.pos.Z) <= 10.0 then
+				return i
+			end
+		end
+		return 999
+	end
+
+	local function getPlayerProgressionIndex(myPos, dStep)
+		local maxIdx = 1
+		dStep = dStep or tonumber(workspace:GetAttribute("DungeonStep")) or 1
+		if dStep == 2 then
+			maxIdx = math.max(maxIdx, 7)
+		elseif dStep == 3 then
+			maxIdx = math.max(maxIdx, 10)
+		elseif dStep >= 4 then
+			maxIdx = math.max(maxIdx, 18)
+		end
+
+		for i, s in ipairs(HALLOWEEN_SPOTS_SEQUENCE) do
+			local dist = (myPos - s.pos).Magnitude
+			if dist <= 22.0 then
+				maxIdx = math.max(maxIdx, i)
+			end
+		end
+
+		-- ทิศทางเรขาคณิตเพิ่มเติม:
+		if myPos.Z <= 18 and myPos.X > -3900 then
+			maxIdx = math.max(maxIdx, 5)
+		end
+		if myPos.X <= -3880 and myPos.Z <= 0 then
+			maxIdx = math.max(maxIdx, 6)
+		end
+		if myPos.X <= -3950 and myPos.Z <= 0 and myPos.Z >= -60 then
+			maxIdx = math.max(maxIdx, 7)
+		end
+		if myPos.X <= -4060 and myPos.Z <= 0 and myPos.Z >= -60 then
+			maxIdx = math.max(maxIdx, 10)
+		end
+		if myPos.X <= -4200 then
+			maxIdx = math.max(maxIdx, 14)
+		end
+		if myPos.X >= -4090 and myPos.Z <= -200 then
+			maxIdx = math.max(maxIdx, 18)
+		end
+
+		return maxIdx
+	end
+
+	-- v9.93: เลือกจุดเกิดมอนที่อยู่ "ข้างหน้าตามลำดับเส้นทาง" (Progression Sequence)
+	-- ★ กฎเหล็ก Zero-Backtracking: ห้ามเดินย้อนกลับไปยังจุดทางเข้าเด็ดขาด!
 	local function resolveNextDungeonSpot(step, visitedSpots, canReach)
 		local spawns = getDungeonSpawnsFolder()
 		if not spawns then return nil end
@@ -13558,29 +13644,36 @@ do
 
 		step = step or tonumber(workspace:GetAttribute("DungeonStep")) or 1
 		local inBossRoom = step >= 4 and myPos.X >= -4090
+		local currentProg = getPlayerProgressionIndex(myPos, step)
 
-		-- เฉพาะจุดเกิดมอน (probe จริง 05/11/2026 · Halloween.Spawns 31 จุด) — ข้ามจุดที่ไม่ใช่มอน:
-		-- DungeonSpawn (จุดเกิดผู้เล่น) · DungeonZone/Zone_* (ขอบเขตโซน) · SecretChestSpot/ExitChestSpot (กล่อง) · PlazaSpot (กลางลาน)
 		local MOB_SPOTS = { PackSpot = true, AmbushSpot = true, PillarSpot = true, WitchSpot = true, BossSpot = true }
-		local best, bestDist = nil, math.huge
+		local candidates = {}
+
 		for _, ch in ipairs(spawns:GetChildren()) do
-			if ch:IsA("BasePart") and MOB_SPOTS[ch.Name] and not visitedSpots[ch] then
-				local d = (ch.Position - myPos).Magnitude
-				if d <= 8.0 then
-					visitedSpots[ch] = true -- ยืนอยู่ที่จุดนี้แล้ว ไม่ต้องเดินไปอีก
-				elseif (not inBossRoom or ch.Position.X >= -4090) and (not canReach or canReach(ch.Position)) and d < bestDist then
-					best, bestDist = ch, d
+			if ch:IsA("BasePart") and MOB_SPOTS[ch.Name] then
+				local seqIdx = getSpotSeqIndex(ch)
+				-- ข้ามจุดที่อยู่ด้านหลังความก้าวหน้าปัจจุบันเด็ดขาด (Zero-Backtracking)
+				if seqIdx >= currentProg and not visitedSpots[ch] then
+					local d = (ch.Position - myPos).Magnitude
+					if d <= 8.0 then
+						visitedSpots[ch] = true -- ยืนอยู่ประชิดจุดนี้แล้ว
+					elseif (not inBossRoom or ch.Position.X >= -4090) and (not canReach or canReach(ch.Position)) then
+						table.insert(candidates, { part = ch, dist = d, seqIdx = seqIdx })
+					end
 				end
 			end
 		end
-		if best then return best end
 
-		-- ไปครบทุกจุดแล้วแต่ยังไม่มีมอนเกิด ⇒ ล้างรายการเพื่อวนใหม่ (ยกเว้นในห้องบอส กันย้อนกลับออกไปข้างนอก)
-		if next(visitedSpots) ~= nil and not inBossRoom then
-			for k in pairs(visitedSpots) do
-				visitedSpots[k] = nil
-			end
+		if #candidates > 0 then
+			table.sort(candidates, function(a, b)
+				if a.seqIdx ~= b.seqIdx then
+					return a.seqIdx < b.seqIdx
+				end
+				return a.dist < b.dist
+			end)
+			return candidates[1].part
 		end
+
 		return nil
 	end
 
@@ -14442,6 +14535,9 @@ do
 		local lastPatrolTime = 0
 		local visitedSpots = {}
 		local lastStep = nil
+		local lastStuckPos = nil
+		local stuckAccumTime = 0
+		local lastStuckSampleTime = os.clock()
 
 		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
 			task.wait(0.35)
@@ -14459,6 +14555,8 @@ do
 				lastStep = nil
 				openedChests = {}
 				STALL.model = nil
+				lastStuckPos = nil
+				stuckAccumTime = 0
 				task.wait(2.0)
 				continue
 			end
@@ -14969,14 +15067,66 @@ do
 				end
 			end
 
-			-- (v9.81: เอาข้อ 4.8 "นำทางเข้าหามอนที่อยู่ไกลกว่า 25 studs" ออก — Auto Play ของเกมมองเห็นและเดินไปหาเอง
-			--  มอนที่ไกลแต่ยังนับอยู่ ⇒ HUB ไม่แตะการเดิน ปล่อยให้ Auto Play จัดการ)
+			-- 4.8 ตรวจสอบกรณี Auto Play เดินไปหามอนสเตอร์ พร้อมระบบ Real-time Stuck Detection
 			if targetMob then
+				local nowClock = os.clock()
+				local dtStuck = nowClock - (lastStuckSampleTime or nowClock)
+				lastStuckSampleTime = nowClock
+
+				local isTryingToReach = (mobDist and mobDist > 14.0) or (hum.MoveDirection.Magnitude > 0.1)
+				local movedDist = lastStuckPos and (Vector3.new(root.Position.X - lastStuckPos.X, 0, root.Position.Z - lastStuckPos.Z)).Magnitude or 10.0
+				lastStuckPos = root.Position
+
+				if isTryingToReach and movedDist < 0.6 and not HUB.Navigating and not HUB.Dodging then
+					stuckAccumTime = stuckAccumTime + dtStuck
+				else
+					stuckAccumTime = math.max(0, stuckAccumTime - dtStuck * 2)
+				end
+
+				-- หากตัวละครเดินติดกำแพง/เสา/สิ่งกีดขวาง ต่อเนื่องเกิน 1.5 วินาที:
+				-- ให้ระบบนำทางอัจฉริยะ HUB.NavigatePath เข้ามาช่วยพาเดินอ้อมสิ่งกีดขวางทันที!
+				if stuckAccumTime >= 1.5 and not HUB.Navigating and not HUB.Dodging then
+					stuckAccumTime = 0
+					local tPivot = targetMob:GetPivot()
+					local tPos = tPivot and tPivot.Position
+					if tPos then
+						if HUB.UI and HUB.UI.DungeonStatusLabel then
+							HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: ตรวจพบเดินติดสิ่งกีดขวาง ⚠️ กำลังนำทางอัจฉริยะพาอ้อมไปหา %s... 🧭", targetMob.Name)
+						end
+						task.spawn(function()
+							HUB.NavigatePath(tPos, {
+								stopDistance = 12.0,
+								timeout = 6.0,
+								sprint = true,
+								emulatePlayerMove = true,
+								shouldAbort = function()
+									if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
+									if not targetMob.Parent then return true end
+									local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+									-- เมื่อเดินอ้อมพ้นมุมเลี้ยวจนเข้าใกล้เป้าหมายในระยะ 14 studs (เข้าสู่ระยะโจมตี)
+									-- ให้ยกเลิกการนำทางเพื่อคืนการควบคุมให้ Auto Play ของเกมโจมตีต่อเนื่องทันที
+									if r and (r.Position - tPos).Magnitude <= 14.0 then return true end
+									if HUB.CollectingSkull or HUB.Dodging or HUB.LightingCandle then return true end
+									if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
+									return false
+								end
+							})
+						end)
+						task.wait(0.4)
+						continue
+					end
+				end
+
 				if HUB.UI and HUB.UI.DungeonStatusLabel then
 					HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: ปล่อยให้ Auto Play เดินไปหา %s (%d studs)... 🎮", targetMob.Name, math.floor(mobDist or 0))
 				end
 				task.wait(0.3)
 				continue
+			else
+				-- ไม่มี targetMob: อัปเดต sample pos และลดตัวนับ stuck
+				lastStuckPos = root.Position
+				stuckAccumTime = 0
+				lastStuckSampleTime = os.clock()
 			end
 
 			-- 5. ไม่มีมอนให้สู้ (นับเฉพาะมอนที่ยังตีได้ · ตัวที่ตีไม่ได้เกิน 10 วิ ไม่นับ): เดินไปจุดเกิดมอนที่ใกล้ที่สุด (เฉพาะเมื่อไม่ได้ Follow เพื่อนอยู่)
