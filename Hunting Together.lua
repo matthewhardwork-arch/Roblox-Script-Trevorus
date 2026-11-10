@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.97)
+-- Hunting Together Hub (v9.98)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.97"
+local VERSION = "9.98"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -8882,7 +8882,7 @@ end
 
 local function cleanWarpPillarUIAndBlur()
 	pcall(function()
-		-- 1. เคลียร์ระดับโมดูล LumiPage & PHKit ของเกม (ระบบ UI ธีมใหม่ Sky/PetHunt)
+		-- 1. เคลียร์ระดับโมดูล PHKit ของเกมสำหรับหน้าต่าง HuntWarpPillar
 		local Shared = ReplicatedStorage:FindFirstChild("Shared")
 		local LumiPage = Shared and require(Shared:FindFirstChild("LumiPage"))
 		if LumiPage then
@@ -8892,9 +8892,6 @@ local function cleanWarpPillarUIAndBlur()
 			end
 			if phk and phk._open then
 				phk._open["lp_HuntWarpPillar"] = nil
-			end
-			if type(LumiPage.CloseAll) == "function" then
-				pcall(LumiPage.CloseAll)
 			end
 		end
 
@@ -8956,7 +8953,7 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 	end
 	if targetPillarModel then
 		local dToTarget = (root.Position - targetPillarModel:GetPivot().Position).Magnitude
-		if dToTarget <= 45.0 then
+		if dToTarget <= 150.0 then
 			return true
 		end
 	end
@@ -9068,17 +9065,12 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 						break
 					end
 				else
-					if targetPillarModel then
-						local d = (root.Position - targetPillarModel:GetPivot().Position).Magnitude
-						if d <= 60.0 then
-							warpedOk = true
-							break
-						end
-					else
-						if (root.Position - startRootPos).Magnitude > 120.0 then
-							warpedOk = true
-							break
-						end
+					local dToTargetPillar = targetPillarModel and (root.Position - targetPillarModel:GetPivot().Position).Magnitude or math.huge
+					local dFromStart = (root.Position - startRootPos).Magnitude
+					-- วาร์ปสำเร็จ: อยู่ในรัศมีโซนเสาเป้าหมาย (<= 150 studs) หรือตำแหน่งเคลื่อนย้ายข้ามแมพ (> 120 studs)
+					if dToTargetPillar <= 150.0 or dFromStart > 120.0 then
+						warpedOk = true
+						break
 					end
 				end
 			end
@@ -9099,11 +9091,11 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 					if targetPillarId == "Town" then
 						if root.Position.Z > -250 then warpedOk = true break end
 					else
-						if targetPillarModel then
-							local d = (root.Position - targetPillarModel:GetPivot().Position).Magnitude
-							if d <= 60.0 then warpedOk = true break end
-						else
-							if (root.Position - startRootPos).Magnitude > 120.0 then warpedOk = true break end
+						local dToTargetPillar = targetPillarModel and (root.Position - targetPillarModel:GetPivot().Position).Magnitude or math.huge
+						local dFromStart = (root.Position - startRootPos).Magnitude
+						if dToTargetPillar <= 150.0 or dFromStart > 120.0 then
+							warpedOk = true
+							break
 						end
 					end
 				end
@@ -9121,9 +9113,12 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 	if warpedOk then
 		root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 		if root then
-			local tWarpDone = os.clock()
-			while (root.Anchored and os.clock() - tWarpDone < 1.8) do
-				task.wait(0.08)
+			if root.Anchored then
+				local tWarpDone = os.clock()
+				while (root.Anchored and os.clock() - tWarpDone < 1.8) do
+					task.wait(0.08)
+				end
+				if root.Anchored then root.Anchored = false end
 			end
 			HUB.WaitGroundReady(root, 2.5)
 			task.wait(0.15)
