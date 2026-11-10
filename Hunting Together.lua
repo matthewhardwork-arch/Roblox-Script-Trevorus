@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.95)
+-- Hunting Together Hub (v9.96)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.95"
+local VERSION = "9.96"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -367,9 +367,11 @@ local HUB = {
 		speedBaseClean = 0,
 		autoJoinDungeon = false,
 		dungeonAutoJoin = true,
-		dungeonJoinDelay = 10, -- 0 | 10 | 20 (วินาที)
+		dungeonCryptJoinDelay = 10, -- 0 | 10 | 20 (วินาที สำหรับ Halloween Crypt)
+		dungeonGoldJoinDelay = 10, -- 0 | 10 | 20 (วินาที สำหรับ Goblin Gold)
+		dungeonJoinDelay = 10, -- Fallback / Legacy (วินาที)
 		dungeonSelected = "halloween",
-		dungeonGoldPriority = "auto", -- "auto" (เกมเล่นเอง), "barrel" (ช่วยถังทอง), "nearest" (ใกล้สุด)
+		dungeonGoldPriority = "auto", -- "auto" (เกมเล่นเอง), "barrel" (ช่วยถังทอง), "nearest" (มอนใกล้สุด)
 		dungeonGoldHuntSpecial = true,
 		dungeonDifficulty = "easy",
 		dungeonAutoBuyKey = true,
@@ -1038,7 +1040,9 @@ local function saveConfig()
 		speedBaseClean = HUB.Config.speedBaseClean or 0,
 		autoJoinDungeon = (HUB.Config.autoJoinDungeon == true),
 		dungeonAutoJoin = (HUB.Config.dungeonAutoJoin ~= false),
-		dungeonJoinDelay = tonumber(HUB.Config.dungeonJoinDelay) or 10,
+		dungeonCryptJoinDelay = tonumber(HUB.Config.dungeonCryptJoinDelay) or 10,
+		dungeonGoldJoinDelay = tonumber(HUB.Config.dungeonGoldJoinDelay) or 10,
+		dungeonJoinDelay = tonumber(HUB.Config.dungeonCryptJoinDelay) or tonumber(HUB.Config.dungeonJoinDelay) or 10,
 		dungeonSelected = HUB.Config.dungeonSelected or "halloween",
 		dungeonGoldPriority = HUB.Config.dungeonGoldPriority or "auto",
 		dungeonGoldHuntSpecial = (HUB.Config.dungeonGoldHuntSpecial ~= false),
@@ -1090,6 +1094,20 @@ local function loadConfig()
 				if tonumber(data.speedBaseClean) then HUB.Config.speedBaseClean = tonumber(data.speedBaseClean) end
 				if data.autoJoinDungeon ~= nil then HUB.Config.autoJoinDungeon = data.autoJoinDungeon end
 				if data.dungeonAutoJoin ~= nil then HUB.Config.dungeonAutoJoin = (data.dungeonAutoJoin ~= false) end
+				if data.dungeonCryptJoinDelay ~= nil then
+					local d = tonumber(data.dungeonCryptJoinDelay)
+					HUB.Config.dungeonCryptJoinDelay = (d == 0 or d == 20) and d or 10
+				elseif data.dungeonJoinDelay ~= nil then
+					local d = tonumber(data.dungeonJoinDelay)
+					HUB.Config.dungeonCryptJoinDelay = (d == 0 or d == 20) and d or 10
+				end
+				if data.dungeonGoldJoinDelay ~= nil then
+					local d = tonumber(data.dungeonGoldJoinDelay)
+					HUB.Config.dungeonGoldJoinDelay = (d == 0 or d == 20) and d or 10
+				elseif data.dungeonJoinDelay ~= nil then
+					local d = tonumber(data.dungeonJoinDelay)
+					HUB.Config.dungeonGoldJoinDelay = (d == 0 or d == 20) and d or 10
+				end
 				if data.dungeonJoinDelay ~= nil then
 					local d = tonumber(data.dungeonJoinDelay)
 					HUB.Config.dungeonJoinDelay = (d == 0 or d == 20) and d or 10
@@ -4438,7 +4456,8 @@ do
 			bd20Stroke.Parent = btnDelay20
 
 			local function refreshDelayRadio()
-				local d = tonumber(HUB.Config.dungeonJoinDelay) or 10
+				local isGold = (HUB.Config.dungeonSelected == "gold")
+				local d = isGold and (tonumber(HUB.Config.dungeonGoldJoinDelay) or 10) or (tonumber(HUB.Config.dungeonCryptJoinDelay) or 10)
 				btnDelay0.BackgroundColor3 = (d == 0) and THEME.BtnGreen or THEME.BtnOff
 				btnDelay0.TextColor3 = (d == 0) and Color3.fromRGB(255, 255, 255) or THEME.TextDark
 				btnDelay0.Text = (d == 0) and "✓ 0 วิ" or "0 วิ"
@@ -4456,23 +4475,20 @@ do
 			end
 			refreshDelayRadio()
 
-			HUB:AddConnection(btnDelay0.MouseButton1Click:Connect(function()
-				HUB.Config.dungeonJoinDelay = 0
+			local function setJoinDelay(val)
+				if HUB.Config.dungeonSelected == "gold" then
+					HUB.Config.dungeonGoldJoinDelay = val
+				else
+					HUB.Config.dungeonCryptJoinDelay = val
+				end
+				HUB.Config.dungeonJoinDelay = val
 				refreshDelayRadio()
 				if HUB.Config.autoSave then saveConfig() end
-			end))
+			end
 
-			HUB:AddConnection(btnDelay10.MouseButton1Click:Connect(function()
-				HUB.Config.dungeonJoinDelay = 10
-				refreshDelayRadio()
-				if HUB.Config.autoSave then saveConfig() end
-			end))
-
-			HUB:AddConnection(btnDelay20.MouseButton1Click:Connect(function()
-				HUB.Config.dungeonJoinDelay = 20
-				refreshDelayRadio()
-				if HUB.Config.autoSave then saveConfig() end
-			end))
+			HUB:AddConnection(btnDelay0.MouseButton1Click:Connect(function() setJoinDelay(0) end))
+			HUB:AddConnection(btnDelay10.MouseButton1Click:Connect(function() setJoinDelay(10) end))
+			HUB:AddConnection(btnDelay20.MouseButton1Click:Connect(function() setJoinDelay(20) end))
 
 			-- แถวที่ 3: กด Ready อัตโนมัติ (สมาชิก)
 			local lblReady = Instance.new("TextLabel")
@@ -5005,9 +5021,9 @@ do
 			applyFont(goldDivTitle, true)
 			goldDivTitle.Parent = goldContainer
 
-			-- Gold Row 1: รูปแบบการเล่น (Combat Mode): [🎮 Auto Play] [🛡️ ถังทอง] [⚔️ ใกล้สุด]
+			-- Gold Row 1: รูปแบบการเล่น (Combat Mode): [🎮 Auto] [🛡️ ถังทอง] [⚔️ มอนใกล้สุด]
 			local lblGoldPriority = Instance.new("TextLabel")
-			lblGoldPriority.Size = UDim2.new(1, -252, 0, 26)
+			lblGoldPriority.Size = UDim2.new(1, -250, 0, 26)
 			lblGoldPriority.Position = UDim2.new(0, 10, 0, 26)
 			lblGoldPriority.BackgroundTransparency = 1
 			lblGoldPriority.Text = "🎯 โหมดต่อสู้ (Mode):"
@@ -5018,8 +5034,8 @@ do
 			lblGoldPriority.Parent = goldContainer
 
 			local btnAutoPlay = Instance.new("TextButton")
-			btnAutoPlay.Size = UDim2.new(0, 85, 0, 26)
-			btnAutoPlay.Position = UDim2.new(1, -237, 0, 26)
+			btnAutoPlay.Size = UDim2.new(0, 70, 0, 26)
+			btnAutoPlay.Position = UDim2.new(1, -242, 0, 26)
 			btnAutoPlay.BorderSizePixel = 0
 			applyFont(btnAutoPlay, true)
 			btnAutoPlay.TextSize = 11
@@ -5032,8 +5048,8 @@ do
 			bapStroke.Parent = btnAutoPlay
 
 			local btnBarrelPrio = Instance.new("TextButton")
-			btnBarrelPrio.Size = UDim2.new(0, 70, 0, 26)
-			btnBarrelPrio.Position = UDim2.new(1, -146, 0, 26)
+			btnBarrelPrio.Size = UDim2.new(0, 80, 0, 26)
+			btnBarrelPrio.Position = UDim2.new(1, -168, 0, 26)
 			btnBarrelPrio.BorderSizePixel = 0
 			applyFont(btnBarrelPrio, true)
 			btnBarrelPrio.TextSize = 11
@@ -5046,8 +5062,8 @@ do
 			bbpStroke.Parent = btnBarrelPrio
 
 			local btnNearestPrio = Instance.new("TextButton")
-			btnNearestPrio.Size = UDim2.new(0, 60, 0, 26)
-			btnNearestPrio.Position = UDim2.new(1, -70, 0, 26)
+			btnNearestPrio.Size = UDim2.new(0, 84, 0, 26)
+			btnNearestPrio.Position = UDim2.new(1, -84, 0, 26)
 			btnNearestPrio.BorderSizePixel = 0
 			applyFont(btnNearestPrio, true)
 			btnNearestPrio.TextSize = 11
@@ -5074,12 +5090,12 @@ do
 
 					btnNearestPrio.BackgroundColor3 = THEME.BtnOff
 					btnNearestPrio.TextColor3 = THEME.TextDark
-					btnNearestPrio.Text = "ใกล้สุด"
+					btnNearestPrio.Text = "⚔️ มอนใกล้สุด"
 					bnpStroke.Color = THEME.BtnOffStroke
 				elseif mode == "nearest" then
 					btnNearestPrio.BackgroundColor3 = THEME.BtnOrange
 					btnNearestPrio.TextColor3 = Color3.fromRGB(255, 255, 255)
-					btnNearestPrio.Text = "✓ ใกล้สุด"
+					btnNearestPrio.Text = "✓ ⚔️ มอนใกล้สุด"
 					bnpStroke.Color = Color3.fromRGB(255, 200, 120)
 
 					btnAutoPlay.BackgroundColor3 = THEME.BtnOff
@@ -5104,7 +5120,7 @@ do
 
 					btnNearestPrio.BackgroundColor3 = THEME.BtnOff
 					btnNearestPrio.TextColor3 = THEME.TextDark
-					btnNearestPrio.Text = "ใกล้สุด"
+					btnNearestPrio.Text = "⚔️ มอนใกล้สุด"
 					bnpStroke.Color = THEME.BtnOffStroke
 				end
 			end
@@ -5222,6 +5238,7 @@ do
 						card.Size = UDim2.new(1, 0, 0, 544)
 					end
 				end
+				refreshDelayRadio()
 			end
 			updateDungeonViewMode()
 
@@ -15333,10 +15350,15 @@ do
 
 		local function addCandidate(m)
 			if m:IsA("Model") and m.Parent and not m:GetAttribute("AnimDead") and m:GetAttribute("IsDummy") ~= true then
-				local hum = m:FindFirstChildOfClass("Humanoid")
-				local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
-				if hp > 0 then
-					table.insert(candidates, m)
+				local nLower = m.Name:lower()
+				local mId = tostring(m:GetAttribute("MonsterId") or ""):lower()
+				-- ★ กรองถังทอง (Barrels) ออกจากเป้าหมายมอนสเตอร์เด็ดขาด 100%
+				if not nLower:find("barrel") and not mId:find("barrel") then
+					local hum = m:FindFirstChildOfClass("Humanoid")
+					local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
+					if hp > 0 then
+						table.insert(candidates, m)
+					end
 				end
 			end
 		end
@@ -15356,7 +15378,8 @@ do
 		if #candidates == 0 then return nil, nil, false end
 
 		local barrels = getActiveBarrels()
-		local prioritizeBarrel = (HUB.Config.dungeonGoldPriority ~= "nearest")
+		local isNearestMonsterMode = (HUB.Config.dungeonGoldPriority == "nearest")
+		local prioritizeBarrel = (not isNearestMonsterMode)
 		local huntSpecial = (HUB.Config.dungeonGoldHuntSpecial ~= false)
 		local ranked = {}
 
@@ -15379,7 +15402,10 @@ do
 			local isThreateningBarrel = (minBarrelDist <= 90.0)
 			local weight = 100
 
-			if huntSpecial and isGoldGoblin then
+			if isNearestMonsterMode then
+				-- ★ โหมดมอนใกล้สุด: ล็อคมอนสเตอร์ที่ใกล้ที่สุด 100% ไม่รวมถังทอง (ไม่คิดระยะถังทอง)
+				weight = distToMe
+			elseif huntSpecial and isGoldGoblin then
 				-- Priority สูงสุด: ก๊อบลินทองพิเศษ
 				weight = 0
 			elseif prioritizeBarrel and isThreateningBarrel then
@@ -15473,7 +15499,7 @@ do
 			local goldMode = HUB.Config.dungeonGoldPriority or "auto"
 			if HUB.UI and HUB.UI.DungeonStatusLabel then
 				local comboText = goldCombo >= 5 and string.format(" · Combo x%d 🔥", goldCombo) or ""
-				local modeLabel = (goldMode == "auto") and "Auto Play กำลังฟาร์ม" or ((goldMode == "nearest") and "ล็อคเป้าตัวใกล้สุด" or "กำลังปกป้องถังทอง")
+				local modeLabel = (goldMode == "auto") and "Auto Play กำลังฟาร์ม" or ((goldMode == "nearest") and "ล็อคเป้ามอนใกล้สุด" or "กำลังปกป้องถังทอง")
 				HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: %s · ทองสะสม %s Gold%s", modeLabel, formatComma(partyGold), comboText)
 			end
 
@@ -15899,13 +15925,14 @@ do
 			end
 
 			-- ง) กรณีเป็นหัวหน้าปาร์ตี้ หรือเล่นคนเดียว (Solo Leader): สั่งสร้างห้องเริ่มเล่น!
-			-- ★ Lobby Join Delay Guard: หน่วงเวลารอตามที่ตั้งค่าไว้ (0วิ / 10วิ / 20วิ) เพื่อรอสมาชิกโหลดครบ
-			local delaySec = tonumber(HUB.Config.dungeonJoinDelay) or 10
+			-- ★ Lobby Join Delay Guard: หน่วงเวลารอตามที่ตั้งค่าไว้ (0วิ / 10วิ / 20วิ) แยกตามดันเจี้ยน เพื่อรอสมาชิกโหลดครบ
+			local delaySec = isGold and (tonumber(HUB.Config.dungeonGoldJoinDelay) or 10) or (tonumber(HUB.Config.dungeonCryptJoinDelay) or 10)
 			local elapsedLobby = tick() - lobbyReturnTime
 			if delaySec > 0 and elapsedLobby < delaySec then
 				local waitLeft = math.ceil(delaySec - elapsedLobby)
 				if HUB.UI.JoinDungeonStatusLabel then
-					HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: กลับถึง Lobby · รอสมาชิกโหลดครบอีก %d วิ ก่อนเปิดห้อง... ⏳", waitLeft)
+					local dungLabel = isGold and "Gold Dungeon" or "ดันเจี้ยน"
+					HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: กลับถึง Lobby · รอสมาชิกโหลดครบอีก %d วิ ก่อนเปิดห้อง %s... ⏳", waitLeft, dungLabel)
 				end
 				task.wait(1.0)
 				continue
