@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.94)
+-- Hunting Together Hub (v9.95)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.94"
+local VERSION = "9.95"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -367,6 +367,7 @@ local HUB = {
 		speedBaseClean = 0,
 		autoJoinDungeon = false,
 		dungeonAutoJoin = true,
+		dungeonJoinDelay = 10, -- 0 | 10 | 20 (วินาที)
 		dungeonSelected = "halloween",
 		dungeonGoldPriority = "auto", -- "auto" (เกมเล่นเอง), "barrel" (ช่วยถังทอง), "nearest" (ใกล้สุด)
 		dungeonGoldHuntSpecial = true,
@@ -1037,6 +1038,7 @@ local function saveConfig()
 		speedBaseClean = HUB.Config.speedBaseClean or 0,
 		autoJoinDungeon = (HUB.Config.autoJoinDungeon == true),
 		dungeonAutoJoin = (HUB.Config.dungeonAutoJoin ~= false),
+		dungeonJoinDelay = tonumber(HUB.Config.dungeonJoinDelay) or 10,
 		dungeonSelected = HUB.Config.dungeonSelected or "halloween",
 		dungeonGoldPriority = HUB.Config.dungeonGoldPriority or "auto",
 		dungeonGoldHuntSpecial = (HUB.Config.dungeonGoldHuntSpecial ~= false),
@@ -1088,6 +1090,10 @@ local function loadConfig()
 				if tonumber(data.speedBaseClean) then HUB.Config.speedBaseClean = tonumber(data.speedBaseClean) end
 				if data.autoJoinDungeon ~= nil then HUB.Config.autoJoinDungeon = data.autoJoinDungeon end
 				if data.dungeonAutoJoin ~= nil then HUB.Config.dungeonAutoJoin = (data.dungeonAutoJoin ~= false) end
+				if data.dungeonJoinDelay ~= nil then
+					local d = tonumber(data.dungeonJoinDelay)
+					HUB.Config.dungeonJoinDelay = (d == 0 or d == 20) and d or 10
+				end
 				if data.dungeonSelected ~= nil then HUB.Config.dungeonSelected = (data.dungeonSelected == "gold") and "gold" or "halloween" end
 				if data.dungeonGoldPriority ~= nil then
 					local gp = tostring(data.dungeonGoldPriority):lower()
@@ -4377,10 +4383,101 @@ do
 				if refreshDungeonStatus then refreshDungeonStatus() end
 			end))
 
-			-- แถวที่ 2: กด Ready อัตโนมัติ (สมาชิก)
+			-- แถวที่ 2: หน่วงเวลาก่อนเข้าดัน (รอปาร์ตี้)
+			local lblJoinDelay = Instance.new("TextLabel")
+			lblJoinDelay.Size = UDim2.new(1, -165, 0, 26)
+			lblJoinDelay.Position = UDim2.new(0, 10, 0, 66)
+			lblJoinDelay.BackgroundTransparency = 1
+			lblJoinDelay.Text = "⏳ หน่วงเวลาก่อนเข้าดัน (รอปาร์ตี้):"
+			lblJoinDelay.TextColor3 = Color3.fromRGB(255, 220, 100)
+			lblJoinDelay.TextSize = 12
+			lblJoinDelay.TextXAlignment = Enum.TextXAlignment.Left
+			applyFont(lblJoinDelay, true)
+			lblJoinDelay.Parent = subPanel
+
+			local btnDelay0 = Instance.new("TextButton")
+			btnDelay0.Size = UDim2.new(0, 46, 0, 26)
+			btnDelay0.Position = UDim2.new(1, -155, 0, 66)
+			btnDelay0.BorderSizePixel = 0
+			applyFont(btnDelay0, true)
+			btnDelay0.TextSize = 11
+			btnDelay0.Parent = subPanel
+			local bd0Corner = Instance.new("UICorner")
+			bd0Corner.CornerRadius = UDim.new(0, 6)
+			bd0Corner.Parent = btnDelay0
+			local bd0Stroke = Instance.new("UIStroke")
+			bd0Stroke.Thickness = 1.2
+			bd0Stroke.Parent = btnDelay0
+
+			local btnDelay10 = Instance.new("TextButton")
+			btnDelay10.Size = UDim2.new(0, 46, 0, 26)
+			btnDelay10.Position = UDim2.new(1, -105, 0, 66)
+			btnDelay10.BorderSizePixel = 0
+			applyFont(btnDelay10, true)
+			btnDelay10.TextSize = 11
+			btnDelay10.Parent = subPanel
+			local bd10Corner = Instance.new("UICorner")
+			bd10Corner.CornerRadius = UDim.new(0, 6)
+			bd10Corner.Parent = btnDelay10
+			local bd10Stroke = Instance.new("UIStroke")
+			bd10Stroke.Thickness = 1.2
+			bd10Stroke.Parent = btnDelay10
+
+			local btnDelay20 = Instance.new("TextButton")
+			btnDelay20.Size = UDim2.new(0, 46, 0, 26)
+			btnDelay20.Position = UDim2.new(1, -55, 0, 66)
+			btnDelay20.BorderSizePixel = 0
+			applyFont(btnDelay20, true)
+			btnDelay20.TextSize = 11
+			btnDelay20.Parent = subPanel
+			local bd20Corner = Instance.new("UICorner")
+			bd20Corner.CornerRadius = UDim.new(0, 6)
+			bd20Corner.Parent = btnDelay20
+			local bd20Stroke = Instance.new("UIStroke")
+			bd20Stroke.Thickness = 1.2
+			bd20Stroke.Parent = btnDelay20
+
+			local function refreshDelayRadio()
+				local d = tonumber(HUB.Config.dungeonJoinDelay) or 10
+				btnDelay0.BackgroundColor3 = (d == 0) and THEME.BtnGreen or THEME.BtnOff
+				btnDelay0.TextColor3 = (d == 0) and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+				btnDelay0.Text = (d == 0) and "✓ 0 วิ" or "0 วิ"
+				bd0Stroke.Color = (d == 0) and THEME.BtnGreenStroke or THEME.BtnOffStroke
+
+				btnDelay10.BackgroundColor3 = (d == 10) and THEME.BtnGreen or THEME.BtnOff
+				btnDelay10.TextColor3 = (d == 10) and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+				btnDelay10.Text = (d == 10) and "✓ 10 วิ" or "10 วิ"
+				bd10Stroke.Color = (d == 10) and THEME.BtnGreenStroke or THEME.BtnOffStroke
+
+				btnDelay20.BackgroundColor3 = (d == 20) and THEME.BtnGreen or THEME.BtnOff
+				btnDelay20.TextColor3 = (d == 20) and Color3.fromRGB(255, 255, 255) or THEME.TextDark
+				btnDelay20.Text = (d == 20) and "✓ 20 วิ" or "20 วิ"
+				bd20Stroke.Color = (d == 20) and THEME.BtnGreenStroke or THEME.BtnOffStroke
+			end
+			refreshDelayRadio()
+
+			HUB:AddConnection(btnDelay0.MouseButton1Click:Connect(function()
+				HUB.Config.dungeonJoinDelay = 0
+				refreshDelayRadio()
+				if HUB.Config.autoSave then saveConfig() end
+			end))
+
+			HUB:AddConnection(btnDelay10.MouseButton1Click:Connect(function()
+				HUB.Config.dungeonJoinDelay = 10
+				refreshDelayRadio()
+				if HUB.Config.autoSave then saveConfig() end
+			end))
+
+			HUB:AddConnection(btnDelay20.MouseButton1Click:Connect(function()
+				HUB.Config.dungeonJoinDelay = 20
+				refreshDelayRadio()
+				if HUB.Config.autoSave then saveConfig() end
+			end))
+
+			-- แถวที่ 3: กด Ready อัตโนมัติ (สมาชิก)
 			local lblReady = Instance.new("TextLabel")
 			lblReady.Size = UDim2.new(1, -165, 0, 26)
-			lblReady.Position = UDim2.new(0, 10, 0, 66)
+			lblReady.Position = UDim2.new(0, 10, 0, 96)
 			lblReady.BackgroundTransparency = 1
 			lblReady.Text = "✅ กด Ready อัตโนมัติ (สมาชิก):"
 			lblReady.TextColor3 = Color3.fromRGB(255, 220, 100)
@@ -4391,7 +4488,7 @@ do
 
 			local readyToggleBtn = Instance.new("TextButton")
 			readyToggleBtn.Size = UDim2.new(0, 145, 0, 26)
-			readyToggleBtn.Position = UDim2.new(1, -155, 0, 66)
+			readyToggleBtn.Position = UDim2.new(1, -155, 0, 96)
 			readyToggleBtn.BorderSizePixel = 0
 			applyFont(readyToggleBtn, true)
 			readyToggleBtn.TextSize = 12
@@ -4420,14 +4517,14 @@ do
 			local cryptContainer = Instance.new("Frame")
 			cryptContainer.Name = "CryptContainer"
 			cryptContainer.Size = UDim2.new(1, 0, 0, 330)
-			cryptContainer.Position = UDim2.new(0, 0, 0, 96)
+			cryptContainer.Position = UDim2.new(0, 0, 0, 126)
 			cryptContainer.BackgroundTransparency = 1
 			cryptContainer.Parent = subPanel
 
 			local goldContainer = Instance.new("Frame")
 			goldContainer.Name = "GoldContainer"
 			goldContainer.Size = UDim2.new(1, 0, 0, 115)
-			goldContainer.Position = UDim2.new(0, 0, 0, 96)
+			goldContainer.Position = UDim2.new(0, 0, 0, 126)
 			goldContainer.BackgroundTransparency = 1
 			goldContainer.Parent = subPanel
 
@@ -5099,12 +5196,12 @@ do
 					btnCrypt.Text = "🎃 Crypt"
 					bcStroke.Color = THEME.BtnOffStroke
 
-					subPanel.Size = UDim2.new(1, -24, 0, 215)
+					subPanel.Size = UDim2.new(1, -24, 0, 245)
 					if setExpandHeight then
-						setExpandHeight(215, 299)
+						setExpandHeight(245, 329)
 					end
 					if card and card.Size.Y.Offset > 74 then
-						card.Size = UDim2.new(1, 0, 0, 299)
+						card.Size = UDim2.new(1, 0, 0, 329)
 					end
 				else
 					btnCrypt.BackgroundColor3 = THEME.BtnGreen
@@ -5117,12 +5214,12 @@ do
 					btnGold.Text = "💰 Gold"
 					bgStroke.Color = THEME.BtnOffStroke
 
-					subPanel.Size = UDim2.new(1, -24, 0, 430)
+					subPanel.Size = UDim2.new(1, -24, 0, 460)
 					if setExpandHeight then
-						setExpandHeight(430, 514)
+						setExpandHeight(460, 544)
 					end
 					if card and card.Size.Y.Offset > 74 then
-						card.Size = UDim2.new(1, 0, 0, 514)
+						card.Size = UDim2.new(1, 0, 0, 544)
 					end
 				end
 			end
@@ -5145,6 +5242,7 @@ do
 			refreshAllDungeonSubBtns = function()
 				updateDungeonViewMode()
 				refreshAutoJoinBtn()
+				refreshDelayRadio()
 				refreshReadyBtn()
 				refreshDiffRadio()
 				refreshKeyBtn()
@@ -15801,10 +15899,11 @@ do
 			end
 
 			-- ง) กรณีเป็นหัวหน้าปาร์ตี้ หรือเล่นคนเดียว (Solo Leader): สั่งสร้างห้องเริ่มเล่น!
-			-- ★ Lobby 20-Second Wait Guard: หน่วงเวลารอ 20 วินาทีหลังกลับเข้า Lobby เพื่อรอเพื่อนร่วมปาร์ตี้โหลดครบ
+			-- ★ Lobby Join Delay Guard: หน่วงเวลารอตามที่ตั้งค่าไว้ (0วิ / 10วิ / 20วิ) เพื่อรอสมาชิกโหลดครบ
+			local delaySec = tonumber(HUB.Config.dungeonJoinDelay) or 10
 			local elapsedLobby = tick() - lobbyReturnTime
-			if elapsedLobby < 20.0 then
-				local waitLeft = math.ceil(20.0 - elapsedLobby)
+			if delaySec > 0 and elapsedLobby < delaySec then
+				local waitLeft = math.ceil(delaySec - elapsedLobby)
 				if HUB.UI.JoinDungeonStatusLabel then
 					HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: กลับถึง Lobby · รอสมาชิกโหลดครบอีก %d วิ ก่อนเปิดห้อง... ⏳", waitLeft)
 				end
