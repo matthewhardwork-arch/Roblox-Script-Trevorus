@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.93)
+-- Hunting Together Hub (v9.94)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.93"
+local VERSION = "9.94"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -14053,6 +14053,17 @@ do
 		return workspace:GetAttribute("DungeonReplayLeader") == LocalPlayer.UserId
 	end
 
+	local function hasDungeonAccess()
+		local runs = tonumber(LocalPlayer:GetAttribute("DungeonRunsToday")) or 0
+		if runs < 2 then return true end
+		local raw = LocalPlayer:GetAttribute("ItemsJson") or "{}"
+		local ok, items = pcall(HttpService.JSONDecode, HttpService, raw)
+		if ok and type(items) == "table" and (tonumber(items.dungeon_key) or 0) >= 1 then
+			return true
+		end
+		return false
+	end
+
 	-- ป๊อปอัป "X wants to replay!" ที่สมาชิกที่ไม่ใช่หัวหน้าเห็น (ต้องทั้ง ScreenGui เปิดอยู่และ ReplayPop มองเห็น)
 	local function getReplayPopup()
 		local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
@@ -14734,7 +14745,27 @@ do
 						-- (ลงเดี่ยว = ตัวเรา · ลงปาร์ตี้ = หัวตี้) · ยังไม่มีคำขอค้าง (ป๊อปอัปปิด) · เหลือ > 4 วิ
 						local pop = getReplayPopup()
 						local soloRun = #Players:GetPlayers() <= 1
-						if isReplayLeader() then
+						local buyBtn = pop and pop:FindFirstChild("ReplayBuyKey")
+						local hasAccess = hasDungeonAccess()
+						local needKey = (buyBtn and buyBtn.Visible) or (not hasAccess)
+
+						if needKey then
+							local silver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
+							local canAfford = (silver >= 500000) or (buyBtn and buyBtn:GetAttribute("CanBuy") == true)
+							if HUB.Config.dungeonAutoBuyKey ~= false then
+								if canAfford then
+									if os.clock() - (ac.lastReplayBuy or 0) >= 2 then
+										ac.lastReplayBuy = os.clock()
+										fireDungeonAction("replayBuyKey")
+									end
+									statusTxt = "สถานะ: ไม่มีรอบฟรี/กุญแจสำหรับ Replay · กำลังซื้อกุญแจในดัน (500K Silver)... 🔑"
+								else
+									statusTxt = "สถานะ: ไม่มีกุญแจสำหรับ Replay · เงิน Silver ไม่พอซื้อ (ต้องการ 500K) ⚠️"
+								end
+							else
+								statusTxt = "สถานะ: ไม่มีรอบฟรี/กุญแจสำหรับ Replay · ปิดซื้อกุญแจอัตโนมัติอยู่ ⏳"
+							end
+						elseif isReplayLeader() then
 							if not pop and remaining > REPLAY_MIN_REMAINING and os.clock() - (ac.lastReplayStart or 0) >= 3 and (ac.replayStarts or 0) < 3 then
 								-- คำขอเดิมถูกยกเลิก (ป๊อปอัปปิด) เกมจะโชว์ปุ่มให้กดใหม่ ⇒ ขอซ้ำได้ เว้น 3 วิ สูงสุด 3 ครั้ง
 								if fireDungeonAction("replayStart") then
@@ -14753,19 +14784,11 @@ do
 								statusTxt = "สถานะ: กำลังกด Replay... 🔁"
 							end
 						elseif pop then
-							-- สมาชิก: ป๊อปอัป "X wants to replay!" · ReplayAccept (attribute Voted) · ReplayBuyKey (โชว์เมื่อไม่มีสิทธิ์ลง · attribute CanBuy)
+							-- สมาชิก: ป๊อปอัป "X wants to replay!" · ReplayAccept (attribute Voted)
 							local acceptBtn = pop:FindFirstChild("ReplayAccept")
-							local buyBtn = pop:FindFirstChild("ReplayBuyKey")
 							local voted = acceptBtn and acceptBtn:GetAttribute("Voted") == true
-							local needKey = buyBtn and buyBtn.Visible
 							if voted then
 								statusTxt = "สถานะ: กด Accept Replay แล้ว รอหัวตี้เริ่มรอบใหม่ 🔁"
-							elseif needKey then
-								if HUB.Config.dungeonAutoBuyKey ~= false and buyBtn:GetAttribute("CanBuy") == true and os.clock() - (ac.lastReplayBuy or 0) >= 2 then
-									ac.lastReplayBuy = os.clock()
-									fireDungeonAction("replayBuyKey")
-								end
-								statusTxt = "สถานะ: ไม่มีรอบฟรี/กุญแจสำหรับ Replay " .. ((HUB.Config.dungeonAutoBuyKey ~= false) and "· กำลังซื้อกุญแจ 🔑" or "· ปิดซื้อกุญแจอัตโนมัติอยู่ ⏳")
 							else
 								if os.clock() - (ac.lastReplayVote or 0) >= 1.5 then
 									ac.lastReplayVote = os.clock()
