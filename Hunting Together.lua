@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.96)
+-- Hunting Together Hub (v9.97)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.96"
+local VERSION = "9.97"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -8880,6 +8880,61 @@ HUB.WaitGroundReady = function(root, maxWait)
 	return false
 end
 
+local function cleanWarpPillarUIAndBlur()
+	pcall(function()
+		-- 1. เคลียร์ระดับโมดูล LumiPage & PHKit ของเกม (ระบบ UI ธีมใหม่ Sky/PetHunt)
+		local Shared = ReplicatedStorage:FindFirstChild("Shared")
+		local LumiPage = Shared and require(Shared:FindFirstChild("LumiPage"))
+		if LumiPage then
+			local phk = LumiPage.PHKit
+			if phk and type(phk.SetOpen) == "function" then
+				pcall(phk.SetOpen, false, "lp_HuntWarpPillar")
+			end
+			if phk and phk._open then
+				phk._open["lp_HuntWarpPillar"] = nil
+			end
+			if type(LumiPage.CloseAll) == "function" then
+				pcall(LumiPage.CloseAll)
+			end
+		end
+
+		-- 2. เคลียร์ Attribute เสาวาร์ปบนตัว LocalPlayer
+		LocalPlayer:SetAttribute("HuntWarpPillarOpen", false)
+
+		-- 3. ซ่อน ScreenGui เสาวาร์ปใน PlayerGui
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		if pg then
+			local wpGui = pg:FindFirstChild("HuntWarpPillar") or pg:FindFirstChild("LumiPage_HuntWarpPillar")
+			if wpGui then wpGui.Enabled = false end
+		end
+
+		-- 4. ล้างเอฟเฟกต์เบลอใน Lighting โดยตรง (PHWindowBlur & LumiBagBlur)
+		local Lighting = game:GetService("Lighting")
+		local blur = Lighting:FindFirstChild("PHWindowBlur")
+		if blur and blur.Enabled then
+			local hasOtherOpen = false
+			if LumiPage and LumiPage.PHKit and LumiPage.PHKit._open then
+				for k, v in pairs(LumiPage.PHKit._open) do
+					if v and k ~= "lp_HuntWarpPillar" then
+						hasOtherOpen = true
+						break
+					end
+				end
+			end
+			if not hasOtherOpen then
+				blur.Enabled = false
+				blur.Size = 0
+			end
+		end
+
+		local bagBlur = Lighting:FindFirstChild("LumiBagBlur")
+		if bagBlur and bagBlur.Enabled then
+			bagBlur.Enabled = false
+		end
+	end)
+end
+HUB.CleanWarpPillarUIAndBlur = cleanWarpPillarUIAndBlur
+
 local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 	if not nearPillar or not targetPillarId then return false end
 	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
@@ -8997,12 +9052,8 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 		-- ส่งคำสั่งวาร์ปไปยังเซิร์ฟเวอร์
 		pillarWarp:FireServer(targetPillarId)
 
-		-- ปิด UI เสาวาร์ปของเกมที่อาจเด้งขึ้นมา
-		pcall(function()
-			local pg = LocalPlayer:FindFirstChild("PlayerGui")
-			local wpGui = pg and (pg:FindFirstChild("HuntWarpPillar") or pg:FindFirstChild("LumiPage_HuntWarpPillar"))
-			if wpGui then wpGui.Enabled = false end
-		end)
+		-- ปิด UI เสาวาร์ปและล้างเอฟเฟกต์เบลอทันที
+		cleanWarpPillarUIAndBlur()
 
 		-- รอการเทเลพอร์ตทางกายภาพ (สูงสุด 4.5 วินาที)
 		local wT0 = os.clock()
@@ -9077,6 +9128,11 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 			HUB.WaitGroundReady(root, 2.5)
 			task.wait(0.15)
 		end
+		-- ล้าง UI และ Blur ตกค้างซ้ำอีกครั้งหลังวาร์ปถึงที่หมาย (ป้องกัน Event PillarOpen ที่เพิ่งมาถึงจาก Server)
+		cleanWarpPillarUIAndBlur()
+	else
+		-- กรณีวาร์ปไม่สำเร็จ ล้าง UI และ Blur เช่นกัน
+		cleanWarpPillarUIAndBlur()
 	end
 
 	return warpedOk
@@ -13426,6 +13482,57 @@ do
 
 	-- ปิด Connection อื่นทันทีตั้งแต่ตอนเริ่ม
 	task.defer(disableExternalIdledConnections)
+end
+
+-- ===== 10.40 Auto Anti-Blur Guard Engine (Lighting & UI Post-Processing Cleanup, v9.97) =====
+do
+	local Lighting = game:GetService("Lighting")
+	task.spawn(function()
+		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
+			task.wait(1.5)
+			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
+
+			local blur = Lighting:FindFirstChild("PHWindowBlur")
+			if blur and blur.Enabled then
+				local isAnyMenuOpen = false
+				local Shared = ReplicatedStorage:FindFirstChild("Shared")
+				local LumiPage = Shared and require(Shared:FindFirstChild("LumiPage"))
+				if LumiPage and LumiPage.PHKit and LumiPage.PHKit._open then
+					-- ตรวจสอบว่าหน้าต่างเสาวาร์ปปิดอยู่หรือไม่ แต่มี tag ค้างใน _open
+					local pg = LocalPlayer:FindFirstChild("PlayerGui")
+					local wpGui = pg and (pg:FindFirstChild("HuntWarpPillar") or pg:FindFirstChild("LumiPage_HuntWarpPillar"))
+					if (not wpGui or not wpGui.Enabled) and LumiPage.PHKit._open["lp_HuntWarpPillar"] then
+						LumiPage.PHKit._open["lp_HuntWarpPillar"] = nil
+					end
+
+					for k, v in pairs(LumiPage.PHKit._open) do
+						if v then
+							isAnyMenuOpen = true
+							break
+						end
+					end
+				end
+
+				if not isAnyMenuOpen then
+					pcall(function()
+						blur.Enabled = false
+						blur.Size = 0
+					end)
+				end
+			end
+
+			local bagBlur = Lighting:FindFirstChild("LumiBagBlur")
+			if bagBlur and bagBlur.Enabled then
+				local pg = LocalPlayer:FindFirstChild("PlayerGui")
+				local invGui = pg and pg:FindFirstChild("LumiInventory")
+				if not invGui or not invGui.Enabled then
+					pcall(function()
+						bagBlur.Enabled = false
+					end)
+				end
+			end
+		end
+	end)
 end
 
 -- ===== 10.45 Party Follow Guardian Engine (Event-Driven & User-Intent First, v9.87) =====
