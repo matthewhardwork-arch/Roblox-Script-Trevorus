@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.07)
+-- Hunting Together Hub (v10.08)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.07"
+local VERSION = "10.08"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -13998,11 +13998,30 @@ do
 		local MOB_SPOTS = { PackSpot = true, AmbushSpot = true, PillarSpot = true, WitchSpot = true, BossSpot = true }
 		local candidates = {}
 
+		-- ★ v10.08: ตรวจสอบว่ายังมีมอนสเตอร์มีชีวิตตกค้างอยู่ในดันเจี้ยนหรือไม่
+		local hasAliveMonsters = false
+		local hw = workspace:FindFirstChild("Halloween")
+		local mFolder = (hw and hw:FindFirstChild("Monsters")) or workspace:FindFirstChild("Monsters")
+		if mFolder then
+			for _, m in ipairs(mFolder:GetChildren()) do
+				if m:IsA("Model") and m.Parent and m:GetAttribute("IsDummy") ~= true and not m:GetAttribute("AnimDead") then
+					local hum = m:FindFirstChildOfClass("Humanoid")
+					local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
+					if hp > 0 then
+						hasAliveMonsters = true
+						break
+					end
+				end
+			end
+		end
+
 		for _, ch in ipairs(spawns:GetChildren()) do
 			if ch:IsA("BasePart") and MOB_SPOTS[ch.Name] then
 				local seqIdx = getSpotSeqIndex(ch)
-				-- ข้ามจุดที่อยู่ด้านหลังความก้าวหน้าปัจจุบันเด็ดขาด (Zero-Backtracking)
-				if seqIdx >= currentProg and not visitedSpots[ch] then
+				-- v10.08: หากยังมีมอนสเตอร์ตกค้าง อนุญาตให้ย้อนกลับไปจุดเกิดเดิมเพื่อเคลียร์มอนสเตอร์ได้ (Backtrack Allowed)
+				-- หากไม่มีมอนสเตอร์ตกค้างแล้ว ให้เดินหน้าตาม Progression ตามปกติ (Zero-Backtracking)
+				local allowSpot = hasAliveMonsters or (seqIdx >= currentProg)
+				if allowSpot and not visitedSpots[ch] then
 					local d = (ch.Position - myPos).Magnitude
 					if d <= 8.0 then
 						visitedSpots[ch] = true -- ยืนอยู่ประชิดจุดนี้แล้ว
@@ -14949,6 +14968,7 @@ do
 		local lastStuckPos = nil
 		local stuckAccumTime = 0
 		local lastStuckSampleTime = os.clock()
+		local workerActivated = false -- ★ Latch: สถานะเริ่มทำงานแล้วของ Worker (v10.08)
 
 		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
 			task.wait(0.35)
@@ -14968,6 +14988,7 @@ do
 				STALL.model = nil
 				lastStuckPos = nil
 				stuckAccumTime = 0
+				workerActivated = false
 				task.wait(2.0)
 				continue
 			end
@@ -14996,28 +15017,32 @@ do
 				continue
 			end
 
-			-- 1. ตรวจสอบและสั่งเปิด Auto Play ของเกมอัตโนมัติ
-			if not HUB.IsGameAutoActive() then
-				HUB.EnsureGameAutoActive(2, 0.25)
-			end
-
-			-- ★ Auto Play Sync Guard (v10.07):
-			-- Worker ดัน Halloween จะต้องเริ่มทำงานพร้อมกับ Auto Play ของเกมเท่านั้น!
-			-- ตราบใดที่ Auto Play ของเกมยังไม่เปิด (เช่น ยังนับเวลาไม่เสร็จ หรือผู้ใช้ปิด)
-			-- ให้หยุดรอที่จุดเกิด ห้ามเดินนำทาง ห้ามล็อคมอนสเตอร์ และห้ามทำรูทีนใดๆ ทั้งสิ้น 100%!
-			if not HUB.IsGameAutoActive() then
-				if hum then hum:Move(Vector3.zero, false) end
-				if HUB.Navigating then HUB.Navigating = false end
-				if HUB.UI and HUB.UI.DungeonStatusLabel then
-					HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอระบบ Auto Play ของเกมเริ่มทำงาน... ⏳"
-				end
-				task.wait(0.35)
-				continue
-			end
-
 			local dState = workspace:GetAttribute("DungeonState")
 			if dState ~= "cleared" then HUB.AfterClear = nil; HUB.DungeonClearHold = false end
 			local dStep = tonumber(workspace:GetAttribute("DungeonStep")) or 1
+
+			-- 1. ตรวจสอบและสั่งเปิด Auto Play ของเกมอัตโนมัติ (เฉพาะเมื่อยังไม่เคลียร์ดันเจี้ยน)
+			if dState ~= "cleared" and not HUB.IsGameAutoActive() then
+				HUB.EnsureGameAutoActive(2, 0.25)
+			end
+
+			-- ★ Auto Play Initial Sync Guard (v10.08):
+			-- ก่อนที่ดันเจี้ยนจะเริ่มครั้งแรก ต้องรอให้เกมเริ่มและ Auto Play เปิดก่อน 1 ครั้ง
+			-- แต่เมื่อเริ่มทำงานแล้ว (workerActivated == true) แม้ตอนจบดันจะสั่งปิด Auto Play เพื่อเปิดกล่อง
+			-- ตัว Worker จะต้องทำงานต่อได้อย่างสมบูรณ์ ไม่หยุดทำงานไปอีกเด็ดขาด 100%!
+			if not workerActivated then
+				if dState == "running" or HUB.IsGameAutoActive() then
+					workerActivated = true
+				else
+					if hum then hum:Move(Vector3.zero, false) end
+					if HUB.Navigating then HUB.Navigating = false end
+					if HUB.UI and HUB.UI.DungeonStatusLabel then
+						HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอระบบ Auto Play ของเกมเริ่มทำงาน... ⏳"
+					end
+					task.wait(0.35)
+					continue
+				end
+			end
 			if dStep ~= lastStep then
 				lastStep = dStep
 				visitedSpots = {}
@@ -15490,7 +15515,7 @@ do
 				end
 			end
 
-			-- 4.8 ตรวจสอบกรณี Auto Play เดินไปหามอนสเตอร์ พร้อมระบบ Real-time Stuck Detection
+			-- 4.8 ตรวจสอบกรณีมอนสเตอร์อยู่ระยะไกล (> 25 studs): นำทางพาสาวเท้าเดินไปหาทันที! (v10.08 Active Escort & Backtrack Hunter)
 			if targetMob then
 				local nowClock = os.clock()
 				local dtStuck = nowClock - (lastStuckSampleTime or nowClock)
@@ -15500,50 +15525,52 @@ do
 				local movedDist = lastStuckPos and (Vector3.new(root.Position.X - lastStuckPos.X, 0, root.Position.Z - lastStuckPos.Z)).Magnitude or 10.0
 				lastStuckPos = root.Position
 
-				if isTryingToReach and movedDist < 0.6 and not HUB.Navigating and not HUB.Dodging then
+				local tPivot = targetMob:GetPivot()
+				local tPos = tPivot and tPivot.Position
+
+				-- ★ Active Escort & Backtrack Hunter (v10.08):
+				-- เมื่อมอนสเตอร์อยู่ห่างเกิน 25 studs (เช่น ถูก Auto Play ทิ้งไว้ข้างหลัง หรืออยู่คนละฟากของห้อง):
+				-- หรือเมื่อตัวละครเริ่มเดินติดขัด / วิ่งชนบาเรียข้างหน้า (movedDist < 0.6 หรือ stuckAccumTime >= 0.8):
+				-- Worker จะเข้าควบคุมการเดินด้วย HUB.NavigatePath พาสาวเท้าเดินย้อนกลับไปส่งให้ถึงตัวมอนสเตอร์ทันที!
+				local needEscort = (mobDist and mobDist > 25.0)
+				if isTryingToReach and movedDist < 0.6 then
 					stuckAccumTime = stuckAccumTime + dtStuck
 				else
 					stuckAccumTime = math.max(0, stuckAccumTime - dtStuck * 2)
 				end
 
-				-- หากตัวละครเดินติดกำแพง/เสา/สิ่งกีดขวาง ต่อเนื่องเกิน 1.5 วินาที:
-				-- ให้ระบบนำทางอัจฉริยะ HUB.NavigatePath เข้ามาช่วยพาเดินอ้อมสิ่งกีดขวางทันที!
-				if stuckAccumTime >= 1.5 and not HUB.Navigating and not HUB.Dodging then
+				if (needEscort or stuckAccumTime >= 0.8) and tPos and not HUB.Navigating and not HUB.Dodging then
 					stuckAccumTime = 0
-					local tPivot = targetMob:GetPivot()
-					local tPos = tPivot and tPivot.Position
-					if tPos then
-						if HUB.UI and HUB.UI.DungeonStatusLabel then
-							HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: ตรวจพบเดินติดสิ่งกีดขวาง ⚠️ กำลังนำทางอัจฉริยะพาอ้อมไปหา %s... 🧭", targetMob.Name)
-						end
-						task.spawn(function()
-							HUB.NavigatePath(tPos, {
-								stopDistance = 12.0,
-								timeout = 6.0,
-								sprint = true,
-								emulatePlayerMove = true,
-								shouldAbort = function()
-									if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
-									if not targetMob.Parent then return true end
-									local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-									-- เมื่อเดินอ้อมพ้นมุมเลี้ยวจนเข้าใกล้เป้าหมายในระยะ 14 studs (เข้าสู่ระยะโจมตี)
-									-- ให้ยกเลิกการนำทางเพื่อคืนการควบคุมให้ Auto Play ของเกมโจมตีต่อเนื่องทันที
-									if r and (r.Position - tPos).Magnitude <= 14.0 then return true end
-									if HUB.CollectingSkull or HUB.Dodging or HUB.LightingCandle then return true end
-									if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
-									return false
-								end
-							})
-						end)
-						task.wait(0.4)
-						continue
+					if HUB.UI and HUB.UI.DungeonStatusLabel then
+						local actionName = (mobDist > 40.0) and "พากลับไปเคลียร์มอนสเตอร์ที่เหลือ" or "นำทางพาเดินไปหามอนสเตอร์"
+						HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: %s (%s, %d studs)... 🧭⚔️", actionName, targetMob.Name, math.floor(mobDist))
 					end
+					task.spawn(function()
+						HUB.NavigatePath(tPos, {
+							stopDistance = 14.0,
+							timeout = 10.0,
+							sprint = true,
+							emulatePlayerMove = true,
+							shouldAbort = function()
+								if not HUB.Alive or not HUB.Config.autoPlayDungeon then return true end
+								if not targetMob.Parent then return true end
+								local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+								-- เมื่อพาเดินเข้าใกล้เป้าหมายในระยะ <= 16 studs แล้ว ส่งมอบให้ Auto Play เข้าสู้ทันที!
+								if r and (r.Position - tPos).Magnitude <= 16.0 then return true end
+								if HUB.CollectingSkull or HUB.Dodging or HUB.LightingCandle then return true end
+								if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return true end
+								return false
+							end
+						})
+					end)
+					task.wait(0.35)
+					continue
 				end
 
 				if HUB.UI and HUB.UI.DungeonStatusLabel then
-					HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: ปล่อยให้ Auto Play เดินไปหา %s (%d studs)... 🎮", targetMob.Name, math.floor(mobDist or 0))
+					HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: กำลังเข้าหามอนสเตอร์ %s (%d studs)... 🎮", targetMob.Name, math.floor(mobDist or 0))
 				end
-				task.wait(0.3)
+				task.wait(0.25)
 				continue
 			else
 				-- ไม่มี targetMob: อัปเดต sample pos และลดตัวนับ stuck
@@ -15724,6 +15751,7 @@ do
 	task.spawn(function()
 		local lastGoblinLock = 0
 		local lastNavigateTime = 0
+		local goldWorkerActivated = false -- ★ Latch: สถานะเริ่มทำงานแล้วของ Gold Worker (v10.08)
 
 		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
 			task.wait(0.3)
@@ -15735,6 +15763,7 @@ do
 			end
 
 			if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then
+				goldWorkerActivated = false
 				task.wait(2.0)
 				continue
 			end
@@ -15773,19 +15802,23 @@ do
 				continue
 			end
 
-			-- 2. รักษาสถานะ Auto Play ของเกม
-			if not HUB.IsGameAutoActive() then
+			-- 2. รักษาสถานะ Auto Play ของเกม (เฉพาะเมื่อยังไม่จบดันเจี้ยน)
+			if dState ~= "cleared" and dObj ~= "Time up!" and not HUB.IsGameAutoActive() then
 				HUB.EnsureGameAutoActive(2, 0.25)
 			end
 
-			-- ★ Auto Play Sync Guard (v10.07):
-			if not HUB.IsGameAutoActive() then
-				if hum then hum:Move(Vector3.zero, false) end
-				if HUB.UI and HUB.UI.DungeonStatusLabel then
-					HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอระบบ Auto Play ของเกมเริ่มทำงาน... ⏳"
+			-- ★ Auto Play Initial Sync Guard (v10.08):
+			if not goldWorkerActivated then
+				if dState == "running" or HUB.IsGameAutoActive() then
+					goldWorkerActivated = true
+				else
+					if hum then hum:Move(Vector3.zero, false) end
+					if HUB.UI and HUB.UI.DungeonStatusLabel then
+						HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอระบบ Auto Play ของเกมเริ่มทำงาน... ⏳"
+					end
+					task.wait(0.35)
+					continue
 				end
-				task.wait(0.35)
-				continue
 			end
 
 			-- 3. อัปเดตสถิติและสถานะบนจอ
