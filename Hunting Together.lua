@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.03)
+-- Hunting Together Hub (v10.04)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.03"
+local VERSION = "10.04"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -563,6 +563,86 @@ function HUB.IsDungeonPlace()
 	return false
 end
 
+-- Ground-Truth Dungeon Countdown Checker (v10.04 - ตรวจสอบการนับถอยหลังเริ่มดันเจี้ยนทุกมิติ)
+HUB.DungeonCountdownEndsAt = nil
+HUB.DungeonCountdownHold = false
+HUB.DungeonSpawnGraceUntil = nil
+
+if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
+	local dStep = tonumber(workspace:GetAttribute("DungeonStep")) or 1
+	if dStep == 1 then
+		HUB.DungeonSpawnGraceUntil = os.clock() + 3.0
+	end
+end
+
+function HUB.IsDungeonCountdownActive()
+	if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return false, nil end
+	local now = workspace:GetServerTimeNow()
+
+	-- 1. ตรวจสอบเวลาสิ้นสุดจากแพ็กเก็ต Remote DungeonPrompt
+	if HUB.DungeonCountdownEndsAt and now < HUB.DungeonCountdownEndsAt then
+		local sec = math.max(0, math.ceil(HUB.DungeonCountdownEndsAt - now - 1.2))
+		return true, tostring(sec)
+	end
+
+	-- 2. ตรวจสอบ UI จริงใน LumiDungeon
+	local pgui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	local lumiDungeon = pgui and pgui:FindFirstChild("LumiDungeon")
+	if lumiDungeon then
+		for _, ch in ipairs(lumiDungeon:GetChildren()) do
+			if ch:IsA("Frame") and ch.Visible == true then
+				-- กรอบนับถอยหลังกลางจอ (ตำแหน่ง 0.30 - 0.38 Scale หรือขนาดกว้าง >= 500)
+				if (ch.Position.Y.Scale >= 0.30 and ch.Position.Y.Scale <= 0.38 and ch.Size.X.Offset >= 500)
+					or (ch.Name == "Frame" and ch.Position.Y.Scale >= 0.30 and ch.Position.Y.Scale <= 0.38) then
+					local textLabel = ch:FindFirstChildOfClass("TextLabel")
+					local txt = textLabel and textLabel.Text or ""
+					if txt ~= "" then
+						return true, txt
+					end
+				end
+				-- กรอบ ReadyCheck (ก่อนเริ่มดันเจี้ยน)
+				if ch.Name == "ReadyCheck" then
+					local cd = ch:FindFirstChild("Countdown")
+					local cdTxt = cd and cd.Text or "Ready"
+					return true, cdTxt
+				end
+			end
+		end
+	end
+
+	-- 3. ตรวจสอบสถานะ DungeonState (ถ้ายังไม่เข้าสถานะ running และไม่ใช่ cleared แสดงว่ายังเตรียมการ/รอเริ่ม)
+	local dState = workspace:GetAttribute("DungeonState")
+	if dState and dState ~= "running" and dState ~= "cleared" then
+		return true, "Waiting"
+	end
+
+	-- 4. Initial Spawn Grace (สำหรับช่วง 3.0 วินาทีแรกหลังโหลดสคริปต์ในดันเจี้ยนสดๆ)
+	if HUB.DungeonSpawnGraceUntil and os.clock() < HUB.DungeonSpawnGraceUntil then
+		local rem = math.max(0, math.ceil(HUB.DungeonSpawnGraceUntil - os.clock()))
+		return true, tostring(rem)
+	end
+
+	return false, nil
+end
+
+-- ดักฟังสัญญาณ Remote สำหรับการนับถอยหลังดันเจี้ยนทุกรูปแบบ (Zero-Latency Listener)
+do
+	local remotes = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+	local dp = remotes and remotes:FindFirstChild("DungeonPrompt")
+	if dp and dp:IsA("RemoteEvent") then
+		HUB:AddConnection(dp.OnClientEvent:Connect(function(action, arg1, arg2)
+			if action == "countdown" then
+				local targetTime = tonumber(arg2) or (workspace:GetServerTimeNow() + 5)
+				HUB.DungeonCountdownEndsAt = targetTime + 1.2
+				HUB.DungeonCountdownHold = true
+				if HUB.IsGameAutoActive and HUB.IsGameAutoActive() and HUB.DisableGameAutoPlay then
+					HUB.DisableGameAutoPlay()
+				end
+			end
+		end))
+	end
+end
+
 -- Ground-Truth Town Checker (ตรวจสอบว่าผู้เล่นอยู่ในเมืองหลักหรือไม่ โดยต้องไม่ใช่ในดันเจี้ยน และพิกัด Z > -150)
 function HUB.IsInTown()
 	if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
@@ -668,7 +748,11 @@ end
 function HUB.EnsureGameAutoActive(maxRetries, retryInterval, forceInMonsterZone)
 	-- ลำดับความสำคัญสูงสุด: ระหว่างจุดเทียนบอสห้ามเปิด Auto Play แย่งการเดิน
 	if HUB.BrazierPriority then return HUB.IsGameAutoActive() end
-	if HUB.DungeonCountdownHold or HUB.DungeonClearHold then return HUB.IsGameAutoActive() end
+	-- Countdown & Clear Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากอยู่ระหว่างการนับถอยหลังเริ่มดันเจี้ยนหรือเคลียร์ดันเจี้ยน
+	if HUB.DungeonClearHold then return HUB.IsGameAutoActive() end
+	if HUB.DungeonCountdownHold or (HUB.IsDungeonCountdownActive and HUB.IsDungeonCountdownActive()) then
+		return false
+	end
 	-- Town Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากตัวละครอยู่ในเมือง (ในเมืองไม่มีมอนสเตอร์ป่าเด็ดขาด มีเฉพาะ TrainingDummy)
 	if HUB.IsInTown and HUB.IsInTown() then
 		return false
@@ -13212,8 +13296,9 @@ do
 				if not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and not HUB.Navigating and not isHomeWarpActive() then
 					if not HUB.IsGameAutoActive() then
 						local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
+						local isCounting = isDungeon and HUB.IsDungeonCountdownActive and HUB.IsDungeonCountdownActive()
 						local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-						if isDungeon or hasMonster then
+						if not isCounting and (isDungeon or hasMonster) then
 							HUB.EnsureGameAutoActive(2, 0.25)
 						end
 					end
@@ -13346,10 +13431,11 @@ do
 				return
 			end
 
-			-- ถ้ามีมอนสเตอร์ใกล้ตัว (40 studs) หรืออยู่ในดันเจี้ยน ให้เปิด Auto Play ทันที (ยกเว้นกำลังร่าย HomeWarp)
+			-- ถ้ามีมอนสเตอร์ใกล้ตัว (40 studs) หรืออยู่ในดันเจี้ยน ให้เปิด Auto Play ทันที (ยกเว้นกำลังร่าย HomeWarp หรือรอนับถอยหลังดันเจี้ยน)
 			local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
+			local isCounting = isDungeon and HUB.IsDungeonCountdownActive and HUB.IsDungeonCountdownActive()
 			local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-			if not isHomeWarpActive() and (isDungeon or hasMonster) then
+			if not isHomeWarpActive() and not isCounting and (isDungeon or hasMonster) then
 				local ok = HUB.EnsureGameAutoActive(5, 0.3)
 				if ok then
 					HUB.BotTurnedOnAuto = true
@@ -14302,13 +14388,8 @@ do
 	HUB.RunBrazierSession = runBrazierSession
 
 	local function isDungeonStartingCountdown()
-		local pgui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-		local lumiDungeon = pgui and pgui:FindFirstChild("LumiDungeon")
-		local countdownFrame = lumiDungeon and lumiDungeon:FindFirstChild("Frame")
-		if countdownFrame and countdownFrame.Visible == true then
-			local textLabel = countdownFrame:FindFirstChildOfClass("TextLabel")
-			local cdText = textLabel and textLabel.Text or ""
-			return true, cdText
+		if HUB.IsDungeonCountdownActive then
+			return HUB.IsDungeonCountdownActive()
 		end
 		return false, nil
 	end
@@ -15640,6 +15721,22 @@ do
 
 			-- HomeWarp Guard
 			if HUB.IsHomeWarpActive and HUB.IsHomeWarpActive() then
+				task.wait(0.2)
+				continue
+			end
+
+			-- 0. ตรวจสอบเวลานับถอยหลังเริ่มดันเจี้ยน (Start Countdown Guard)
+			local isCounting, cdText = HUB.IsDungeonCountdownActive and HUB.IsDungeonCountdownActive()
+			HUB.DungeonCountdownHold = isCounting == true
+			if isCounting and HUB.IsGameAutoActive and HUB.IsGameAutoActive() and HUB.DisableGameAutoPlay then
+				HUB.DisableGameAutoPlay()
+			end
+			if isCounting then
+				if hum then hum:Move(Vector3.zero, false) end
+				if HUB.UI and HUB.UI.DungeonStatusLabel then
+					local secInfo = (cdText and cdText ~= "") and (" (" .. cdText .. " วิ)") or ""
+					HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอนับถอยหลังเริ่ม Gold Run" .. secInfo .. "..."
+				end
 				task.wait(0.2)
 				continue
 			end
