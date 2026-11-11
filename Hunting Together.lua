@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.04)
+-- Hunting Together Hub (v10.07)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.04"
+local VERSION = "10.07"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -563,84 +563,12 @@ function HUB.IsDungeonPlace()
 	return false
 end
 
--- Ground-Truth Dungeon Countdown Checker (v10.04 - ตรวจสอบการนับถอยหลังเริ่มดันเจี้ยนทุกมิติ)
+-- Ground-Truth Dungeon State Helpers (v10.06 - Backward Compatibility Stubs)
 HUB.DungeonCountdownEndsAt = nil
 HUB.DungeonCountdownHold = false
-HUB.DungeonSpawnGraceUntil = nil
-
-if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
-	local dStep = tonumber(workspace:GetAttribute("DungeonStep")) or 1
-	if dStep == 1 then
-		HUB.DungeonSpawnGraceUntil = os.clock() + 3.0
-	end
-end
 
 function HUB.IsDungeonCountdownActive()
-	if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then return false, nil end
-	local now = workspace:GetServerTimeNow()
-
-	-- 1. ตรวจสอบเวลาสิ้นสุดจากแพ็กเก็ต Remote DungeonPrompt
-	if HUB.DungeonCountdownEndsAt and now < HUB.DungeonCountdownEndsAt then
-		local sec = math.max(0, math.ceil(HUB.DungeonCountdownEndsAt - now - 1.2))
-		return true, tostring(sec)
-	end
-
-	-- 2. ตรวจสอบ UI จริงใน LumiDungeon
-	local pgui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-	local lumiDungeon = pgui and pgui:FindFirstChild("LumiDungeon")
-	if lumiDungeon then
-		for _, ch in ipairs(lumiDungeon:GetChildren()) do
-			if ch:IsA("Frame") and ch.Visible == true then
-				-- กรอบนับถอยหลังกลางจอ (ตำแหน่ง 0.30 - 0.38 Scale หรือขนาดกว้าง >= 500)
-				if (ch.Position.Y.Scale >= 0.30 and ch.Position.Y.Scale <= 0.38 and ch.Size.X.Offset >= 500)
-					or (ch.Name == "Frame" and ch.Position.Y.Scale >= 0.30 and ch.Position.Y.Scale <= 0.38) then
-					local textLabel = ch:FindFirstChildOfClass("TextLabel")
-					local txt = textLabel and textLabel.Text or ""
-					if txt ~= "" then
-						return true, txt
-					end
-				end
-				-- กรอบ ReadyCheck (ก่อนเริ่มดันเจี้ยน)
-				if ch.Name == "ReadyCheck" then
-					local cd = ch:FindFirstChild("Countdown")
-					local cdTxt = cd and cd.Text or "Ready"
-					return true, cdTxt
-				end
-			end
-		end
-	end
-
-	-- 3. ตรวจสอบสถานะ DungeonState (ถ้ายังไม่เข้าสถานะ running และไม่ใช่ cleared แสดงว่ายังเตรียมการ/รอเริ่ม)
-	local dState = workspace:GetAttribute("DungeonState")
-	if dState and dState ~= "running" and dState ~= "cleared" then
-		return true, "Waiting"
-	end
-
-	-- 4. Initial Spawn Grace (สำหรับช่วง 3.0 วินาทีแรกหลังโหลดสคริปต์ในดันเจี้ยนสดๆ)
-	if HUB.DungeonSpawnGraceUntil and os.clock() < HUB.DungeonSpawnGraceUntil then
-		local rem = math.max(0, math.ceil(HUB.DungeonSpawnGraceUntil - os.clock()))
-		return true, tostring(rem)
-	end
-
 	return false, nil
-end
-
--- ดักฟังสัญญาณ Remote สำหรับการนับถอยหลังดันเจี้ยนทุกรูปแบบ (Zero-Latency Listener)
-do
-	local remotes = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
-	local dp = remotes and remotes:FindFirstChild("DungeonPrompt")
-	if dp and dp:IsA("RemoteEvent") then
-		HUB:AddConnection(dp.OnClientEvent:Connect(function(action, arg1, arg2)
-			if action == "countdown" then
-				local targetTime = tonumber(arg2) or (workspace:GetServerTimeNow() + 5)
-				HUB.DungeonCountdownEndsAt = targetTime + 1.2
-				HUB.DungeonCountdownHold = true
-				if HUB.IsGameAutoActive and HUB.IsGameAutoActive() and HUB.DisableGameAutoPlay then
-					HUB.DisableGameAutoPlay()
-				end
-			end
-		end))
-	end
 end
 
 -- Ground-Truth Town Checker (ตรวจสอบว่าผู้เล่นอยู่ในเมืองหลักหรือไม่ โดยต้องไม่ใช่ในดันเจี้ยน และพิกัด Z > -150)
@@ -655,7 +583,7 @@ function HUB.IsInTown()
 	return root.Position.Z > -150
 end
 
--- Ground-Truth Live Monster Radius Checker (ตรวจสอบมอนสเตอร์ที่มีชีวิตในรัศมีที่กำหนด)
+-- Ground-Truth Live Monster Radius Checker (v10.06 - ตรวจสอบมอนสเตอร์มีชีวิตในรัศมีครอบคลุมทุกแมพและดันเจี้ยน)
 function HUB.IsMonsterWithinRadius(radius)
 	if HUB.IsInTown and HUB.IsInTown() then
 		return false
@@ -665,22 +593,56 @@ function HUB.IsMonsterWithinRadius(radius)
 	if not root then return false end
 
 	radius = radius or 40
-	local monsters = CollectionService:GetTagged("Monster")
-	for _, m in ipairs(monsters) do
+	local myPos = root.Position
+
+	local function isAliveMonster(m)
 		if m and m:IsA("Model") and m.Parent then
 			local mName = m.Name:lower()
 			if not mName:find("dummy") and not mName:find("training") and m:GetAttribute("IsDummy") ~= true then
 				local hum = m:FindFirstChildOfClass("Humanoid")
 				local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
-				if hp > 0 then
+				if hp > 0 and not m:GetAttribute("AnimDead") then
 					local mPos = m.PrimaryPart and m.PrimaryPart.Position or (m:GetPivot() and m:GetPivot().Position)
-					if mPos and (mPos - root.Position).Magnitude <= radius then
+					if mPos and (mPos - myPos).Magnitude <= radius then
 						return true
 					end
 				end
 			end
 		end
+		return false
 	end
+
+	-- 1. ตรวจสอบใน workspace.Monsters (Dungeons, Bosses, Main World)
+	local mFolder = workspace:FindFirstChild("Monsters")
+	if mFolder then
+		for _, m in ipairs(mFolder:GetChildren()) do
+			if isAliveMonster(m) then return true end
+		end
+	end
+
+	-- 2. ตรวจสอบใน workspace.Halloween.Monsters (Halloween Crypt)
+	local hw = workspace:FindFirstChild("Halloween")
+	local hwMobs = hw and hw:FindFirstChild("Monsters")
+	if hwMobs then
+		for _, m in ipairs(hwMobs:GetChildren()) do
+			if isAliveMonster(m) then return true end
+		end
+	end
+
+	-- 3. ตรวจสอบใน workspace.GoldDungeon.Monsters (Gold Dungeon)
+	local gd = workspace:FindFirstChild("GoldDungeon")
+	local gdMobs = gd and gd:FindFirstChild("Monsters")
+	if gdMobs then
+		for _, m in ipairs(gdMobs:GetChildren()) do
+			if isAliveMonster(m) then return true end
+		end
+	end
+
+	-- 4. ตรวจสอบ Tagged Monster ผ่าน CollectionService (Main World)
+	for _, m in ipairs(CollectionService:GetTagged("Monster")) do
+		if isAliveMonster(m) then return true end
+	end
+
 	return false
 end
 
@@ -748,11 +710,8 @@ end
 function HUB.EnsureGameAutoActive(maxRetries, retryInterval, forceInMonsterZone)
 	-- ลำดับความสำคัญสูงสุด: ระหว่างจุดเทียนบอสห้ามเปิด Auto Play แย่งการเดิน
 	if HUB.BrazierPriority then return HUB.IsGameAutoActive() end
-	-- Countdown & Clear Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากอยู่ระหว่างการนับถอยหลังเริ่มดันเจี้ยนหรือเคลียร์ดันเจี้ยน
+	-- Clear Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากอยู่ระหว่างเคลียร์ดันเจี้ยน
 	if HUB.DungeonClearHold then return HUB.IsGameAutoActive() end
-	if HUB.DungeonCountdownHold or (HUB.IsDungeonCountdownActive and HUB.IsDungeonCountdownActive()) then
-		return false
-	end
 	-- Town Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากตัวละครอยู่ในเมือง (ในเมืองไม่มีมอนสเตอร์ป่าเด็ดขาด มีเฉพาะ TrainingDummy)
 	if HUB.IsInTown and HUB.IsInTown() then
 		return false
@@ -767,13 +726,37 @@ function HUB.EnsureGameAutoActive(maxRetries, retryInterval, forceInMonsterZone)
 	HUB.BotPausingAuto = false
 	HUB.UserDisabledAuto = false
 
-	-- Dungeon & Monster Guard:
-	-- หากไม่อยู่ในดันเจี้ยน และไม่ได้บังคับเปิดเมื่อกลับถึงจุดฟาร์มเดิม (forceInMonsterZone) ต้องมีมอนสเตอร์ในระยะ 40 studs
+	-- Auto Play Activation Guards (v10.07):
 	local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
-	if not isDungeon and not forceInMonsterZone then
-		local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-		if not hasMonster then
+	if isDungeon then
+		-- ในดันเจี้ยน: ปฏิเสธการเปิด Auto Play ทุกกรณีหากอยู่ระหว่างการนับเวลาเริ่มดันเจี้ยน
+		local isCounting = false
+		local pgui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		local ld = pgui and pgui:FindFirstChild("LumiDungeon")
+		if ld then
+			for _, ch in ipairs(ld:GetChildren()) do
+				if ch:IsA("Frame") and ch.Visible == true then
+					if (ch.Position.Y.Scale >= 0.30 and ch.Position.Y.Scale <= 0.38) or ch.Name == "ReadyCheck" then
+						isCounting = true
+						break
+					end
+				end
+			end
+		end
+		local dState = workspace:GetAttribute("DungeonState")
+		if dState and dState ~= "running" and dState ~= "cleared" then
+			isCounting = true
+		end
+		if isCounting then
 			return false
+		end
+	else
+		-- นอกดันเจี้ยน (Main World / Boss Farm): ต้องมีมอนสเตอร์ในระยะ 40 studs ยกเว้น forceInMonsterZone
+		if not forceInMonsterZone then
+			local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
+			if not hasMonster then
+				return false
+			end
 		end
 	end
 
@@ -13292,13 +13275,11 @@ do
 					end
 				end
 
-				-- 3. มอนสเตอร์อยู่รอบตัวแต่ Auto Play ดับเอง (Continuous Auto Play Health Monitor — เฉพาะในดันเจี้ยน หรือมีมอนสเตอร์ในระยะ 40 studs)
+				-- 3. มอนสเตอร์อยู่รอบตัวแต่ Auto Play ดับเอง (Continuous Auto Play Health Monitor — เฉพาะเมื่อมีมอนสเตอร์ในระยะ 40 studs)
 				if not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and not HUB.Navigating and not isHomeWarpActive() then
 					if not HUB.IsGameAutoActive() then
-						local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
-						local isCounting = isDungeon and HUB.IsDungeonCountdownActive and HUB.IsDungeonCountdownActive()
 						local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-						if not isCounting and (isDungeon or hasMonster) then
+						if hasMonster then
 							HUB.EnsureGameAutoActive(2, 0.25)
 						end
 					end
@@ -13431,11 +13412,9 @@ do
 				return
 			end
 
-			-- ถ้ามีมอนสเตอร์ใกล้ตัว (40 studs) หรืออยู่ในดันเจี้ยน ให้เปิด Auto Play ทันที (ยกเว้นกำลังร่าย HomeWarp หรือรอนับถอยหลังดันเจี้ยน)
-			local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
-			local isCounting = isDungeon and HUB.IsDungeonCountdownActive and HUB.IsDungeonCountdownActive()
+			-- ถ้ามีมอนสเตอร์ใกล้ตัว (40 studs) ให้เปิด Auto Play ทันที (ยกเว้นกำลังร่าย HomeWarp)
 			local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-			if not isHomeWarpActive() and not isCounting and (isDungeon or hasMonster) then
+			if not isHomeWarpActive() and hasMonster then
 				local ok = HUB.EnsureGameAutoActive(5, 0.3)
 				if ok then
 					HUB.BotTurnedOnAuto = true
@@ -14797,7 +14776,7 @@ do
 			end
 		end
 
-		if #candidates == 0 then return nil, nil, false, false, false end
+		if #candidates == 0 then return nil, nil, false, false, false, false end
 
 		-- ★ ตรวจสอบว่ามีเสาพิธีกรรม (Ritual Pillars) ที่มีชีวิตอยู่ในห้องบอสหรือไม่
 		local hasActivePillars = false
@@ -14810,6 +14789,40 @@ do
 				if hp > 0 and not m:GetAttribute("AnimDead") then
 					hasActivePillars = true
 					break
+				end
+			end
+		end
+
+		-- ★ v10.05 ตรวจสอบว่ามี Mini Boss และลูกน้อง (Minions) อยู่รอบตัว Mini Boss หรือไม่ (เช่น Potion Witch ดันเจี้ยน Halloween)
+		local activeMiniBossPos = nil
+		local hasActiveMiniBoss = false
+		for _, m in ipairs(candidates) do
+			local isMini = m:GetAttribute("IsMiniBoss") == true or m.Name:lower():find("witch")
+			if isMini then
+				local hum = m:FindFirstChildOfClass("Humanoid")
+				local hp = tonumber(m:GetAttribute("HP")) or (hum and hum.Health) or 0
+				if hp > 0 and not m:GetAttribute("AnimDead") then
+					hasActiveMiniBoss = true
+					activeMiniBossPos = m:GetPivot().Position
+					break
+				end
+			end
+		end
+
+		local hasActiveMinionsNearMini = false
+		if hasActiveMiniBoss and activeMiniBossPos then
+			for _, m in ipairs(candidates) do
+				local isMini = m:GetAttribute("IsMiniBoss") == true or m.Name:lower():find("witch")
+				local isBoss = m:GetAttribute("IsBoss") == true or m.Name:lower():find("king") or m.Name:lower():find("boss")
+				local mId = tostring(m:GetAttribute("MonsterId") or ""):lower()
+				local nLower = m.Name:lower()
+				local isPillar = (mId == "dgn_ritual_pillar") or nLower:find("ritual pillar") or (nLower:find("pillar") and not nLower:find("warp") and not nLower:find("spot"))
+				if not isMini and not isBoss and not isPillar then
+					local mDistToMini = (m:GetPivot().Position - activeMiniBossPos).Magnitude
+					if mDistToMini <= 45.0 then
+						hasActiveMinionsNearMini = true
+						break
+					end
 				end
 			end
 		end
@@ -14827,19 +14840,40 @@ do
 				local isImmuneShield = (m:GetAttribute("SealShield") == true)
 				local isBoss = m:GetAttribute("IsBoss") == true or nameLower:find("king") or nameLower:find("boss")
 				local isMini = m:GetAttribute("IsMiniBoss") == true or nameLower:find("witch")
+				local isMinionOfMini = false
+				if hasActiveMiniBoss and activeMiniBossPos and not isMini and not isBoss and not isPillar then
+					local distToMini = (mPos - activeMiniBossPos).Magnitude
+					if distToMini <= 45.0 then
+						isMinionOfMini = true
+					end
+				end
 				local isAggroOnMe = (m:GetAttribute("ThreatUserId") == myUserId)
 				local isImmediateProximity = (dist <= 16.0)
 
 				local weight = 100
 
-				-- ★ Immediate Threat Override: หากมอนสเตอร์อยู่ในระยะประชิดตัว (<= 16 studs)
-				-- หรือกำลังล็อกเป้าโจมตีเรา (ThreatUserId == myUserId)
-				-- และต้องไม่ใช่มอนสเตอร์ที่ติดบาเรียอมตะ SealShield
-				if (isImmediateProximity or isAggroOnMe) and not isImmuneShield then
-					weight = 0
-				elseif isImmuneShield then
+				if isImmuneShield then
 					-- มอนสเตอร์หรือบอสที่ติดบาเรียอมตะ SealShield: ไม่สามารถทำดาเมจได้เด็ดขาด ปรับความสำคัญต่ำสุด!
 					weight = 999
+				elseif hasActiveMiniBoss and hasActiveMinionsNearMini then
+					-- ★ v10.05 Halloween Mini Boss Adds Priority:
+					-- หากมี Mini Boss อยู่และมีลูกน้องอัญเชิญมารุมรอบตัว Mini Boss (<= 45 studs)
+					-- ให้ลูกน้องรอบตัวได้รับ Priority สูงสุด เพื่อกำจัดลูกน้องก่อน ไม่ให้ผู้เล่นโดนรุมตีตาย!
+					if isMini then
+						weight = 20 -- ลด Priority มินิบอสลงชั่วคราว ให้เคลียร์ลูกน้องก่อน (แม้จะประชิดตัวหรือมี Aggro ก็ตาม!)
+					elseif isMinionOfMini or isImmediateProximity or isAggroOnMe then
+						if isImmediateProximity or isAggroOnMe then
+							weight = 0 -- ลูกน้องที่ประชิดตัวเราหรือติด Aggro ต้องตายก่อนเป็นอันดับแรก
+						else
+							weight = 1 -- ลูกน้องรอบตัวมินิบอสตัวอื่นๆ ในระยะ
+						end
+					else
+						weight = 50
+					end
+				elseif (isImmediateProximity or isAggroOnMe) then
+					-- ★ Immediate Threat Override: หากมอนสเตอร์อยู่ในระยะประชิดตัว (<= 16 studs)
+					-- หรือกำลังล็อกเป้าโจมตีเรา (ThreatUserId == myUserId)
+					weight = 0
 				elseif dStep >= 4 then
 					if myPos.X < -4090 then
 						-- อยู่นอกห้องบอส (ในทางเดิน): มอนสเตอร์ในทางเดินต้องได้ความสำคัญสูงสุด!
@@ -14889,12 +14923,13 @@ do
 					weight = weight,
 					isPriority = ((isBoss == true or isMini == true) and not isPillar) == true,
 					isImmediate = ((isImmediateProximity or isAggroOnMe) and not isImmuneShield) == true,
-					isPillar = (isPillar == true)
+					isPillar = (isPillar == true),
+					isMinionPriority = (hasActiveMiniBoss and hasActiveMinionsNearMini and (isMinionOfMini or isImmediateProximity or isAggroOnMe) and not isMini and not isBoss and not isPillar) == true
 				})
 			end
 		end
 
-		if #ranked == 0 then return nil, nil, false, false, false end
+		if #ranked == 0 then return nil, nil, false, false, false, false end
 
 		table.sort(ranked, function(a, b)
 			if a.weight ~= b.weight then
@@ -14904,7 +14939,7 @@ do
 		end)
 
 		local best = ranked[1]
-		return best.model, best.dist, best.isPriority, best.isImmediate, best.isPillar
+		return best.model, best.dist, best.isPriority, best.isImmediate, best.isPillar, best.isMinionPriority
 	end
 
 	task.spawn(function()
@@ -14955,22 +14990,6 @@ do
 				continue
 			end
 
-			-- 0. ตรวจสอบเวลานับถอยหลังเริ่มดันเจี้ยน (Start Countdown Guard)
-			local isCounting, cdText = isDungeonStartingCountdown()
-			HUB.DungeonCountdownHold = isCounting == true
-			if isCounting and HUB.IsGameAutoActive() then HUB.DisableGameAutoPlay() end
-			if isCounting then
-				if hum then
-					hum:Move(Vector3.zero, false)
-				end
-				if HUB.UI and HUB.UI.DungeonStatusLabel then
-					local secInfo = (cdText and cdText ~= "") and (" (" .. cdText .. " วิ)") or ""
-					HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอนับถอยหลังเริ่มดันเจี้ยน" .. secInfo .. "..."
-				end
-				task.wait(0.2)
-				continue
-			end
-
 			-- HomeWarp Guard: ถ้ากำลังร่าย HomeWarp ให้หยุดพักการทำงานของ Dungeon Worker และงดเปิด Auto Play ชั่วคราว 100%
 			if HUB.IsHomeWarpActive and HUB.IsHomeWarpActive() then
 				task.wait(0.2)
@@ -14979,7 +14998,21 @@ do
 
 			-- 1. ตรวจสอบและสั่งเปิด Auto Play ของเกมอัตโนมัติ
 			if not HUB.IsGameAutoActive() then
-				HUB.EnsureGameAutoActive(3, 0.25)
+				HUB.EnsureGameAutoActive(2, 0.25)
+			end
+
+			-- ★ Auto Play Sync Guard (v10.07):
+			-- Worker ดัน Halloween จะต้องเริ่มทำงานพร้อมกับ Auto Play ของเกมเท่านั้น!
+			-- ตราบใดที่ Auto Play ของเกมยังไม่เปิด (เช่น ยังนับเวลาไม่เสร็จ หรือผู้ใช้ปิด)
+			-- ให้หยุดรอที่จุดเกิด ห้ามเดินนำทาง ห้ามล็อคมอนสเตอร์ และห้ามทำรูทีนใดๆ ทั้งสิ้น 100%!
+			if not HUB.IsGameAutoActive() then
+				if hum then hum:Move(Vector3.zero, false) end
+				if HUB.Navigating then HUB.Navigating = false end
+				if HUB.UI and HUB.UI.DungeonStatusLabel then
+					HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอระบบ Auto Play ของเกมเริ่มทำงาน... ⏳"
+				end
+				task.wait(0.35)
+				continue
 			end
 
 			local dState = workspace:GetAttribute("DungeonState")
@@ -15350,16 +15383,17 @@ do
 			end
 
 			-- 4. ตรวจสอบมอนสเตอร์มีชีวิตในดันเจี้ยน (Live Monster Tracking & Universal Target Lock)
-			local targetMob, mobDist, isPriorityTarget, isImmediateTarget, isPillarTarget = findBestDungeonMonster(root.Position, dStep)
+			local targetMob, mobDist, isPriorityTarget, isImmediateTarget, isPillarTarget, isMinionPriorityTarget = findBestDungeonMonster(root.Position, dStep)
 			if targetMob and mobDist then
 				-- ★ Universal Target Lock: ยิง LumiLockTarget และตั้ง CurrentTarget ให้มอนสเตอร์ทุกตัวเสมอ (0 ms)
 				-- สิ่งนี้จะปลุก CombatClient (u2995 = true) ทันที ข้ามคูลดาวน์ 1.5s ของเกม ทำให้ตัวละครโจมตีทันทีไม่ยืนนิ่ง
+				-- v10.05 แก้ไข: LumiLockTarget และ CurrentTarget อยู่ใต้ LocalPlayer (ไม่ใช่ Character)
 				local charNow = LocalPlayer.Character
-				local lumiLock = charNow and charNow:FindFirstChild("LumiLockTarget")
+				local lumiLock = LocalPlayer:FindFirstChild("LumiLockTarget") or (charNow and charNow:FindFirstChild("LumiLockTarget"))
 				if lumiLock and lumiLock:IsA("BindableEvent") then
 					pcall(function() lumiLock:Fire(targetMob) end)
 				end
-				local ct = charNow and charNow:FindFirstChild("CurrentTarget")
+				local ct = LocalPlayer:FindFirstChild("CurrentTarget") or (charNow and charNow:FindFirstChild("CurrentTarget"))
 				if ct and ct:IsA("ObjectValue") then
 					pcall(function() ct.Value = targetMob end)
 				end
@@ -15373,8 +15407,9 @@ do
 						HUB.Navigating = false
 					end
 					if HUB.UI and HUB.UI.DungeonStatusLabel then
-						local kindText = isPillarTarget and "มอบให้ Auto Play ทำลายเสาพิธีกรรม" or (isPriorityTarget and "มอบให้ Auto Play จัดการบอส" or "มอบให้ Auto Play ต่อสู้")
-						HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: %s (%s, %d studs)... %s", kindText, targetMob.Name, math.floor(mobDist), isPillarTarget and "⚡🏛️" or "🔥⚔️")
+						local kindText = isPillarTarget and "มอบให้ Auto Play ทำลายเสาพิธีกรรม" or (isMinionPriorityTarget and "กำจัดลูกน้องรอบตัวมินิบอสก่อน" or (isPriorityTarget and "มอบให้ Auto Play จัดการบอส" or "มอบให้ Auto Play ต่อสู้"))
+						local icon = isPillarTarget and "⚡🏛️" or (isMinionPriorityTarget and "🛡️⚔️" or "🔥⚔️")
+						HUB.UI.DungeonStatusLabel.Text = string.format("สถานะ: %s (%s, %d studs)... %s", kindText, targetMob.Name, math.floor(mobDist), icon)
 					end
 					task.wait(0.25)
 					continue
@@ -15725,22 +15760,6 @@ do
 				continue
 			end
 
-			-- 0. ตรวจสอบเวลานับถอยหลังเริ่มดันเจี้ยน (Start Countdown Guard)
-			local isCounting, cdText = HUB.IsDungeonCountdownActive and HUB.IsDungeonCountdownActive()
-			HUB.DungeonCountdownHold = isCounting == true
-			if isCounting and HUB.IsGameAutoActive and HUB.IsGameAutoActive() and HUB.DisableGameAutoPlay then
-				HUB.DisableGameAutoPlay()
-			end
-			if isCounting then
-				if hum then hum:Move(Vector3.zero, false) end
-				if HUB.UI and HUB.UI.DungeonStatusLabel then
-					local secInfo = (cdText and cdText ~= "") and (" (" .. cdText .. " วิ)") or ""
-					HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอนับถอยหลังเริ่ม Gold Run" .. secInfo .. "..."
-				end
-				task.wait(0.2)
-				continue
-			end
-
 			-- 1. ตรวจสอบสถานะจบดันเจี้ยน (Summary / Time up)
 			local dObj = workspace:GetAttribute("DungeonObjective")
 			local dState = workspace:GetAttribute("DungeonState")
@@ -15756,7 +15775,17 @@ do
 
 			-- 2. รักษาสถานะ Auto Play ของเกม
 			if not HUB.IsGameAutoActive() then
-				HUB.EnsureGameAutoActive(3, 0.25)
+				HUB.EnsureGameAutoActive(2, 0.25)
+			end
+
+			-- ★ Auto Play Sync Guard (v10.07):
+			if not HUB.IsGameAutoActive() then
+				if hum then hum:Move(Vector3.zero, false) end
+				if HUB.UI and HUB.UI.DungeonStatusLabel then
+					HUB.UI.DungeonStatusLabel.Text = "สถานะ: รอระบบ Auto Play ของเกมเริ่มทำงาน... ⏳"
+				end
+				task.wait(0.35)
+				continue
 			end
 
 			-- 3. อัปเดตสถิติและสถานะบนจอ
