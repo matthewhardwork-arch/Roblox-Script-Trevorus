@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.99)
+-- Hunting Together Hub (v10.03)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.99"
+local VERSION = "10.03"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -665,7 +665,7 @@ function HUB.IsGameAutoActive()
 end
 
 -- สั่งเปิดใช้งาน Auto Play ของเกมต่อเนื่องอย่างน่าเชื่อถือ (Triple-Layer Redundant Fallback)
-function HUB.EnsureGameAutoActive(maxRetries, retryInterval)
+function HUB.EnsureGameAutoActive(maxRetries, retryInterval, forceInMonsterZone)
 	-- ลำดับความสำคัญสูงสุด: ระหว่างจุดเทียนบอสห้ามเปิด Auto Play แย่งการเดิน
 	if HUB.BrazierPriority then return HUB.IsGameAutoActive() end
 	if HUB.DungeonCountdownHold or HUB.DungeonClearHold then return HUB.IsGameAutoActive() end
@@ -674,23 +674,25 @@ function HUB.EnsureGameAutoActive(maxRetries, retryInterval)
 		return false
 	end
 
-	-- Dungeon & 40-Stud Monster Guard:
-	-- หากไม่อยู่ในดันเจี้ยน และไม่มีมอนสเตอร์ที่มีชีวิตในระยะ 40 studs ห้ามเปิด Auto Play เองเด็ดขาด
+	-- HomeWarp Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากตัวละครกำลังร่าย HomeWarp (ทั้งผู้เล่นกดเองหรือระบบฮับ)
+	if HUB.IsHomeWarpActive and HUB.IsHomeWarpActive() then
+		return false
+	end
+
+	-- ปลดล็อคสถานะ BotPausingAuto ทันทีเมื่อระบบสั่ง Resume เพื่อไม่ให้ค้างบล็อก Watchdog หากมอนสเตอร์เพิ่งตายชั่วคราว
+	HUB.BotPausingAuto = false
+	HUB.UserDisabledAuto = false
+
+	-- Dungeon & Monster Guard:
+	-- หากไม่อยู่ในดันเจี้ยน และไม่ได้บังคับเปิดเมื่อกลับถึงจุดฟาร์มเดิม (forceInMonsterZone) ต้องมีมอนสเตอร์ในระยะ 40 studs
 	local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
-	if not isDungeon then
+	if not isDungeon and not forceInMonsterZone then
 		local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
 		if not hasMonster then
 			return false
 		end
 	end
 
-	-- HomeWarp Guard: ปฏิเสธการเปิด Auto Play ทุกกรณีหากตัวละครกำลังร่าย HomeWarp (ทั้งผู้เล่นกดเองหรือระบบฮับ)
-	if HUB.IsHomeWarpActive and HUB.IsHomeWarpActive() then
-		return false
-	end
-
-	HUB.BotPausingAuto = false
-	HUB.UserDisabledAuto = false
 	if HUB.IsGameAutoActive() then return true end
 
 	maxRetries = maxRetries or 5
@@ -8388,8 +8390,22 @@ local function updateFarmingAnchor(root)
 	if now - _lastAnchorUpdate < 0.5 then return end
 	_lastAnchorUpdate = now
 
-	-- หากผู้เล่นหยุดเดินเองเกิน 1.2 วินาที และไม่ได้อยู่ในโหมดนำทางหรือรูทีนบอส/ขายของของ HUB
-	if not HUB.Navigating and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and (now - (HUB.LastManualMoveTime or 0) >= 1.2) then
+	-- หากผู้เล่นหยุดเดินเองเกิน 1.2 วินาที และไม่ได้อยู่ในโหมดนำทางหรือรูทีนบอส/ขายของ/เดินทางกลับของ HUB
+	if not HUB.Navigating and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and HUB.OriginCFrame == nil and (now - (HUB.LastManualMoveTime or 0) >= 1.2) then
+		-- ห้ามบันทึกพิกัดหน้าเสาวาร์ป (<= 35 studs) หรือในลานบอส (<= 120 studs) ทับจุดฟาร์มเดิมเด็ดขาด
+		local wpf = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("WarpPillars")
+		if wpf then
+			for _, p in ipairs(wpf:GetChildren()) do
+				if (p:GetPivot().Position - root.Position).Magnitude <= 35.0 then
+					return
+				end
+			end
+		end
+		for _, bDef in ipairs(BOSS_DEFS) do
+			if (bDef.arenaPos - root.Position).Magnitude <= 120.0 then
+				return
+			end
+		end
 		if not HUB.FarmAnchor or (HUB.FarmAnchor - root.Position).Magnitude > 25 then
 			HUB.FarmAnchor = root.Position
 		end
@@ -8880,29 +8896,52 @@ HUB.WaitGroundReady = function(root, maxWait)
 	return false
 end
 
-local function cleanWarpPillarUIAndBlur()
-	pcall(function()
-		local Shared = ReplicatedStorage:FindFirstChild("Shared")
-		local LumiPage = Shared and require(Shared:FindFirstChild("LumiPage"))
-		if LumiPage and type(LumiPage.CloseAll) == "function" then
-			pcall(LumiPage.CloseAll)
+-- ปิดหน้าต่างของเกม (LumiPage) ให้สถานะตรงกับที่ LumiPage:SetOpen(false) ทำเอง — โดยไม่เรียกฟังก์ชันของ LumiPage
+-- (วัดจริง 11/11/2026 · STRUCTURE §13)
+--   · LumiPage:IsOpen() = Gui.Enabled และ SetOpen(x) return ทันทีถ้า Enabled == x
+--     ⇒ ตั้ง Gui.Enabled = false อย่างเดียว ตัวนับของ PHKit ("lp_<ชื่อ>") ค้าง ⇒ PHWindowBlur เปิดค้าง (ภาพเบลอ)
+--   · เรียก method ของ LumiPage (SetOpen/IsOpen) จากเธรด hub ⇒ เธรดถูกลดสิทธิ์จนกว่าจะ yield ครั้งถัดไป
+--     ⇒ แตะ GUI ของ hub แล้ว error "lacking capability Plugin" (รูทีนบอสตายหลังวาร์ปทุกครั้งใน v10.01)
+--   · PHKit.SetOpen ไม่ลดสิทธิ์ และ return เองถ้าสถานะตรงอยู่แล้ว (เรียกซ้ำได้)
+local closeGamePage
+do
+	local _phKit = nil
+	local function getPHKit()
+		if _phKit then return _phKit end
+		local shared = ReplicatedStorage:FindFirstChild("Shared")
+		local mod = shared and shared:FindFirstChild("PHKit")
+		if mod then
+			local ok, res = pcall(require, mod)
+			if ok and type(res) == "table" and type(res.SetOpen) == "function" then
+				_phKit = res
+			end
 		end
+		return _phKit
+	end
 
-		local pg = LocalPlayer:FindFirstChild("PlayerGui")
-		if pg then
-			local wpGui = pg:FindFirstChild("HuntWarpPillar") or pg:FindFirstChild("LumiPage_HuntWarpPillar")
-			if wpGui then wpGui.Enabled = false end
-		end
+	-- onlyIfStale = true: ซ่อมเฉพาะสถานะค้างจากรุ่นเก่า (Gui ปิดแล้วแต่ PHKit ยังนับว่าเปิด) ไม่ปิดหน้าต่างที่ผู้เล่นเปิดอยู่
+	closeGamePage = function(guiName, onlyIfStale)
+		pcall(function()
+			local pg = LocalPlayer:FindFirstChild("PlayerGui")
+			local gui = pg and pg:FindFirstChild(guiName)
+			if gui and gui.Enabled then
+				if onlyIfStale then return end
+				gui.Enabled = false
+			end
+			local ph = getPHKit()
+			if ph then
+				pcall(ph.SetOpen, false, "lp_" .. guiName)
+			end
+			LocalPlayer:SetAttribute(guiName .. "Open", false)
+		end)
+	end
+	HUB.CloseGamePage = closeGamePage
 
-		local Lighting = game:GetService("Lighting")
-		local blur = Lighting:FindFirstChild("PHWindowBlur")
-		if blur and blur.Enabled then
-			blur.Enabled = false
-			blur.Size = 0
-		end
+	task.defer(function()
+		closeGamePage("HuntWarpPillar", true)
+		closeGamePage("HuntDungeonSelect", true)
 	end)
 end
-HUB.CleanWarpPillarUIAndBlur = cleanWarpPillarUIAndBlur
 
 local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 	if not nearPillar or not targetPillarId then return false end
@@ -9017,8 +9056,10 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 		end
 		task.wait(0.2)
 
-		-- ส่งคำสั่งวาร์ปไปยังเซิร์ฟเวอร์ (ห้ามสั่ง wpGui.Enabled = false ดิบๆ ตรงนี้ เพื่อให้ WarpPillarClient/LumiPage จัดการสถานะอย่างถูกต้อง)
+		-- ส่งคำสั่งวาร์ป แล้วปิดหน้าต่างเสา (ลำดับเดียวกับปุ่ม Warp ของเกม: FireServer → SetOpen(false))
+		-- ถ้า PillarOpen มาถึงช้าหลังวาร์ป เกมปิดหน้าต่างเองเมื่อตัวละครห่างจุดที่เปิดเกิน 20 studs (WarpPillarClient)
 		pillarWarp:FireServer(targetPillarId)
+		closeGamePage("HuntWarpPillar")
 
 		-- รอการเทเลพอร์ตทางกายภาพ (สูงสุด 4.5 วินาที)
 		local wT0 = os.clock()
@@ -9086,9 +9127,6 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 			task.wait(0.15)
 		end
 	end
-
-	-- ปิดหน้าต่างเสาวาร์ปและล้าง Blur อย่างถูกวิธีหลังจบกระบวนการวาร์ป
-	cleanWarpPillarUIAndBlur()
 
 	return warpedOk
 end
@@ -9326,11 +9364,16 @@ local function resumeFarmOrFollow(targetPos)
 	end
 
 	if not restoredFollow then
+		HUB.BotPausingAuto = false
 		local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
-		local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-		if isDungeon or hasMonster then
+		local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(80)
+		local inMonsterZone = (targetPos and targetPos.Z <= -300)
+		if isDungeon or hasMonster or (inMonsterZone and HUB.OriginAutoOn ~= false) then
 			if HUB.EnsureGameAutoActive then
-				HUB.EnsureGameAutoActive(6, 0.25)
+				HUB.EnsureGameAutoActive(6, 0.25, true)
+			end
+			if instantResumeAutoCombat and targetPos then
+				instantResumeAutoCombat(targetPos)
 			end
 		end
 	end
@@ -9338,6 +9381,7 @@ end
 
 local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 	if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return false end
+	if HUB.IsReturningToOrigin then return false end
 	local char = LocalPlayer.Character
 	local root = char and char:FindFirstChild("HumanoidRootPart")
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -9357,19 +9401,210 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 	end
 	if not originPos then return true end
 
-	-- ปิด Auto Play ชั่วคราวก่อนเดินทางกลับ เพื่อไม่ให้ถูกมอนสเตอร์ระหว่างทางดึงตัวละครออกนอกเส้นทาง
-	if HUB.DisableGameAutoPlay then
-		HUB.DisableGameAutoPlay()
+	HUB.IsReturningToOrigin = true
+	if HUB.IsBossRoutineActive then
+		HUB.BossRoutineStartTime = os.clock()
 	end
 
-	local originPos = origin.Position
-	local distToOrigin = (root.Position - originPos).Magnitude
+	local okRun, resRun = pcall(function()
+		-- ปิด Auto Play ชั่วคราวก่อนเดินทางกลับ เพื่อไม่ให้ถูกมอนสเตอร์ระหว่างทางดึงตัวละครออกนอกเส้นทาง
+		if HUB.DisableGameAutoPlay then
+			HUB.DisableGameAutoPlay()
+		end
 
-	-- 1. ถ้าอยู่ใกล้จุดหมายเดิมอยู่แล้ว (<= 250 studs เช่น อยู่ในเมืองอยู่แล้ว หรือฟาร์มหน้าห้องบอสที่เพิ่งตี)
-	-- ไม่ต้องกดเสาวาร์ปใดๆ ทั้งสิ้น เดิน navigatePath กลับได้ทันที
-	if distToOrigin <= 250.0 then
+		local distToOrigin = (root.Position - originPos).Magnitude
+
+		-- 1. ถ้าอยู่ใกล้จุดหมายเดิมอยู่แล้ว (<= 250 studs เช่น อยู่ในเมืองอยู่แล้ว หรือฟาร์มหน้าห้องบอสที่เพิ่งตี)
+		-- ไม่ต้องกดเสาวาร์ปใดๆ ทั้งสิ้น เดิน navigatePath กลับได้ทันที
+		if distToOrigin <= 250.0 then
+			if updateStatusFn then
+				updateStatusFn("สถานะ: กำลังเดินกลับจุดเริ่มต้น...")
+			end
+			navigatePath(originPos, {
+				stopDistance = 8.0,
+				timeout = 45.0,
+				sprint = true,
+				shouldAbort = shouldAbortFn,
+			})
+			char = LocalPlayer.Character
+			root = char and char:FindFirstChild("HumanoidRootPart")
+			if root and not (shouldAbortFn and shouldAbortFn()) then
+				resumeFarmOrFollow(originPos)
+				clearOrigin()
+				return true
+			end
+			return false
+		end
+
+		-- 2. อยู่คนละโซน (> 250 studs): ต้องเดินทางผ่านเสาวาร์ป
+		local warpPillarsFolder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("WarpPillars")
+		local unlockedStr = LocalPlayer:GetAttribute("WarpPillars") or ""
+		local unlocked = {}
+		for pId in string.gmatch(unlockedStr, "([^,]+)") do
+			unlocked[pId] = true
+		end
+
+		-- หาเสาวาร์ปที่ใกล้จุด origin ที่สุด (อนุญาตเสา "Town" ด้วย)
+		local returnPillarId = nil
+		local minPillarDist = math.huge
+		if warpPillarsFolder then
+			for _, p in ipairs(warpPillarsFolder:GetChildren()) do
+				local wId = p:GetAttribute("WarpId")
+				if wId and (wId == "Town" or unlocked[wId]) then
+					local d = (p:GetPivot().Position - originPos).Magnitude
+					if d < minPillarDist then
+						minPillarDist = d
+						returnPillarId = wId
+					end
+				end
+			end
+		end
+
+		-- Fallback ถ้าหาไม่เจอ
+		if not returnPillarId then
+			if originPos.Z > -250 then
+				returnPillarId = "Town"
+			elseif unlocked["Boss05"] then
+				returnPillarId = "Boss05"
+			elseif unlocked["Boss04"] then
+				returnPillarId = "Boss04"
+			else
+				returnPillarId = "Boss01"
+			end
+		end
+
+		-- หาเสาวาร์ปที่อยู่ใกล้ตัวละครปัจจุบัน (<= 350 studs ในโซนเดียวกัน)
+		local nearestP, minD = nil, math.huge
+		if warpPillarsFolder then
+			for _, p in ipairs(warpPillarsFolder:GetChildren()) do
+				local d = (p:GetPivot().Position - root.Position).Magnitude
+				if d < minD then
+					minD = d
+					nearestP = p
+				end
+			end
+		end
+
+		-- ตรวจสอบเสาวาร์ปในโซนปัจจุบันด้วย Pillar-First Architecture (Zero Silver Drain & Zero Cooldown)
+		local localPillar, distToLocal = getNearbyBossPillar(root.Position)
+		local townPillar = warpPillarsFolder and warpPillarsFolder:FindFirstChild("WarpPillar_Town")
+
+		-- หากไม่ได้ตรวจพบผ่าน getNearbyBossPillar แต่มีเสาใกล้ตัวในระยะ <= 240 studs (และไม่ใช่เสาเมืองขณะอยู่นอกเมือง)
+		if not localPillar and nearestP and minD <= 240.0 then
+			if root.Position.Z <= -200 and nearestP == townPillar then
+				localPillar = nil
+			else
+				localPillar = nearestP
+			end
+		end
+
+		local currentNearPillar = nil
+		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+
+		if localPillar then
+			-- ลำดับ 1 (Pillar-First Priority): มีเสาวาร์ปอยู่หน้าห้องบอสหรือในโซนนี้
+			-- ให้เดินไปใช้เสาวาร์ปนี้เดินทางไปยัง returnPillarId ทันที (แม้ returnPillarId จะเป็น "Town" ก็ตาม!)
+			-- ข้อดีมหาศาล: เสีย 0 Silver เมื่อวาร์ปไป Town, ใช้เวลา 0.5s, และไม่ทำให้ปุ่ม HomeWarp ติดคูลดาวน์ 60 วินาที!
+			currentNearPillar = localPillar
+			if updateStatusFn then
+				updateStatusFn(string.format("สถานะ: เดินไปเสาวาร์ปหน้าห้องเพื่อเดินทางไปยัง %s...", tostring(returnPillarId)))
+			end
+		elseif root.Position.Z > -200 and townPillar then
+			-- ลำดับ 2: อยู่ในเมืองหลวงอยู่แล้ว ให้ใช้เสาเมืองหลวง
+			currentNearPillar = townPillar
+		else
+			-- ลำดับ 3: อยู่ในทุ่งมอนสเตอร์ลึกๆ ที่ไม่มีเสาวาร์ปในระยะเดินถึง -> ร่าย HomeWarp กลับเมืองหลวง
+			if updateStatusFn then updateStatusFn("สถานะ: วาร์ปเข้าเมืองเพื่อต่อเสาวาร์ป...") end
+
+			-- เช็คคูลดาวน์ HomeWarp หากมีเศษคูลดาวน์สั้นๆ (<= 12 วิ) ให้รอให้พร้อมก่อน
+			local readyAt = tonumber(LocalPlayer:GetAttribute("HomeWarpReadyAt")) or 0
+			local cdLeft = math.max(0, math.ceil(readyAt - workspace:GetServerTimeNow()))
+			if cdLeft > 0 and cdLeft <= 12 then
+				if updateStatusFn then
+					updateStatusFn(string.format("สถานะ: รอ HomeWarp คูลดาวน์อีก %d วิ...", cdLeft))
+				end
+				local cdT0 = os.clock()
+				while (os.clock() - cdT0 < (cdLeft + 0.2)) and not (shouldAbortFn and shouldAbortFn()) do
+					task.wait(0.2)
+				end
+				cdLeft = 0
+			end
+
+			local reachedTown = false
+			if cdLeft == 0 and not (shouldAbortFn and shouldAbortFn()) then
+				if root then root.Anchored = true end
+				local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
+				if homeWarp then
+					homeWarp:FireServer("start", "merchant")
+				else
+					local LumiMenuToggle = LocalPlayer:FindFirstChild("LumiMenuToggle")
+					if LumiMenuToggle then pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end) end
+				end
+				local t0 = os.clock()
+				while os.clock() - t0 < 8.0 and not (shouldAbortFn and shouldAbortFn()) do
+					task.wait(0.1)
+					char = LocalPlayer.Character
+					root = char and char:FindFirstChild("HumanoidRootPart")
+					if root and root.Position.Z > -200 then
+						reachedTown = true
+						break
+					end
+				end
+				if root then root.Anchored = false end
+			end
+
+			if reachedTown and townPillar then
+				currentNearPillar = townPillar
+			end
+		end
+
+		char = LocalPlayer.Character
+		root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then return false end
+
+		-- วาร์ปไปยัง returnPillarId (ถ้ายังไม่ได้อยู่ที่นั่น และมีเสาต้นทางที่ถูกต้อง)
+		if currentNearPillar and returnPillarId then
+			if updateStatusFn then
+				updateStatusFn(string.format("สถานะ: วาร์ปไปยังเสา %s...", tostring(returnPillarId)))
+			end
+			local okWarp = executePillarWarp(currentNearPillar, returnPillarId, shouldAbortFn)
+			-- Caller-Level Smart Retry: หากวาร์ปกลับจุดฟาร์มไม่สำเร็จ ให้ค้นหาเสาใกล้ตัวใหม่และลองอีกครั้ง
+			if not okWarp and not (shouldAbortFn and shouldAbortFn()) then
+				task.wait(0.4)
+				char = LocalPlayer.Character
+				root = char and char:FindFirstChild("HumanoidRootPart")
+				if root then
+					local retryPillar = (root.Position.Z > -200 and townPillar) or getNearbyBossPillar(root.Position)
+					if retryPillar then
+						if updateStatusFn then
+							updateStatusFn(string.format("สถานะ: วาร์ปไม่สำเร็จ — กำลังลองใหม่ไปยังเสา %s...", tostring(returnPillarId)))
+						end
+						executePillarWarp(retryPillar, returnPillarId, shouldAbortFn)
+					end
+				end
+			end
+		end
+
+		char = LocalPlayer.Character
+		root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then return false end
+
+		-- Same-Zone Navigation Guard (<= 500 studs):
+		-- ห้ามสั่ง navigatePath วิ่งข้ามโซนเด็ดขาดถ้าตัวละครยังอยู่คนละโซน และห้ามล้าง OriginCFrame หรือเปิดฟาร์มผิดแมพ
+		local postWarpDist = (root.Position - originPos).Magnitude
+		if postWarpDist > 500.0 then
+			warn(string.format("[Hunting Together Hub] ReturnToOrigin: ยังอยู่ห่างจากเป้าหมาย %.1f studs (ต่างโซน) — รักษาพิกัดจุดฟาร์มเดิมไว้และยกเลิกการวิ่งข้ามโซน", postWarpDist))
+			return false
+		end
+
+		-- ปิด Auto Play อีกครั้งเผื่อถูกกระตุ้นระหว่างวาร์ป ก่อนเดินกลับจุดฟาร์มเดิม
+		if HUB.DisableGameAutoPlay then
+			HUB.DisableGameAutoPlay()
+		end
+
+		-- เดินกลับสู่ originPos
 		if updateStatusFn then
-			updateStatusFn("สถานะ: กำลังเดินกลับจุดเริ่มต้น...")
+			updateStatusFn("สถานะ: ถึงโซนแล้ว กำลังเดินกลับจุดเริ่มต้น...")
 		end
 		navigatePath(originPos, {
 			stopDistance = 8.0,
@@ -9377,209 +9612,31 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 			sprint = true,
 			shouldAbort = shouldAbortFn,
 		})
+
 		char = LocalPlayer.Character
 		root = char and char:FindFirstChild("HumanoidRootPart")
-		if root and not (shouldAbortFn and shouldAbortFn()) then
+		if root and not (shouldAbortFn and shouldAbortFn()) and (root.Position - originPos).Magnitude <= 250.0 then
+			-- เมื่อกลับมาถึงโซนฟาร์มมอนสเตอร์ หรือเคยเปิด Auto Play ไว้ ให้สั่งเปิด Auto Play/Follow ทันที 100%!
 			resumeFarmOrFollow(originPos)
 			clearOrigin()
 			return true
 		end
+
+		-- Self-Healing Fallback: ถ้าเดินไม่ถึงใน 45s หรือหลงทาง แต่ตัวละครอยู่ในโซนมอนสเตอร์แล้ว และไม่ได้ถูกยกเลิก ให้เปิด Auto Play/Follow และเคลียร์ Origin เพื่อไม่ให้ยืนแข็งทื่อ
+		if root and not (shouldAbortFn and shouldAbortFn()) and root.Position.Z <= -300 and (root.Position - originPos).Magnitude <= 500.0 then
+			resumeFarmOrFollow(root.Position)
+			clearOrigin()
+		end
+
+		return false
+	end)
+
+	HUB.IsReturningToOrigin = false
+	if not okRun then
+		warn("[Hunting Together Hub] ReturnToOrigin Error: " .. tostring(resRun))
 		return false
 	end
-
-	-- 2. อยู่คนละโซน (> 250 studs): ต้องเดินทางผ่านเสาวาร์ป
-	local warpPillarsFolder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("WarpPillars")
-	local unlockedStr = LocalPlayer:GetAttribute("WarpPillars") or ""
-	local unlocked = {}
-	for pId in string.gmatch(unlockedStr, "([^,]+)") do
-		unlocked[pId] = true
-	end
-
-	-- หาเสาวาร์ปที่ใกล้จุด origin ที่สุด (อนุญาตเสา "Town" ด้วย)
-	local returnPillarId = nil
-	local minPillarDist = math.huge
-	if warpPillarsFolder then
-		for _, p in ipairs(warpPillarsFolder:GetChildren()) do
-			local wId = p:GetAttribute("WarpId")
-			if wId and (wId == "Town" or unlocked[wId]) then
-				local d = (p:GetPivot().Position - originPos).Magnitude
-				if d < minPillarDist then
-					minPillarDist = d
-					returnPillarId = wId
-				end
-			end
-		end
-	end
-
-	-- Fallback ถ้าหาไม่เจอ
-	if not returnPillarId then
-		if originPos.Z > -250 then
-			returnPillarId = "Town"
-		elseif unlocked["Boss05"] then
-			returnPillarId = "Boss05"
-		elseif unlocked["Boss04"] then
-			returnPillarId = "Boss04"
-		else
-			returnPillarId = "Boss01"
-		end
-	end
-
-	-- หาเสาวาร์ปที่อยู่ใกล้ตัวละครปัจจุบัน (<= 350 studs ในโซนเดียวกัน)
-	local nearestP, minD = nil, math.huge
-	if warpPillarsFolder then
-		for _, p in ipairs(warpPillarsFolder:GetChildren()) do
-			local d = (p:GetPivot().Position - root.Position).Magnitude
-			if d < minD then
-				minD = d
-				nearestP = p
-			end
-		end
-	end
-
-	-- ตรวจสอบเสาวาร์ปในโซนปัจจุบันด้วย Pillar-First Architecture (Zero Silver Drain & Zero Cooldown)
-	local localPillar, distToLocal = getNearbyBossPillar(root.Position)
-	local townPillar = warpPillarsFolder and warpPillarsFolder:FindFirstChild("WarpPillar_Town")
-
-	-- หากไม่ได้ตรวจพบผ่าน getNearbyBossPillar แต่มีเสาใกล้ตัวในระยะ <= 240 studs (และไม่ใช่เสาเมืองขณะอยู่นอกเมือง)
-	if not localPillar and nearestP and minD <= 240.0 then
-		if root.Position.Z <= -200 and nearestP == townPillar then
-			localPillar = nil
-		else
-			localPillar = nearestP
-		end
-	end
-
-	local currentNearPillar = nil
-	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-
-	if localPillar then
-		-- ลำดับ 1 (Pillar-First Priority): มีเสาวาร์ปอยู่หน้าห้องบอสหรือในโซนนี้
-		-- ให้เดินไปใช้เสาวาร์ปนี้เดินทางไปยัง returnPillarId ทันที (แม้ returnPillarId จะเป็น "Town" ก็ตาม!)
-		-- ข้อดีมหาศาล: เสีย 0 Silver เมื่อวาร์ปไป Town, ใช้เวลา 0.5s, และไม่ทำให้ปุ่ม HomeWarp ติดคูลดาวน์ 60 วินาที!
-		currentNearPillar = localPillar
-		if updateStatusFn then
-			updateStatusFn(string.format("สถานะ: เดินไปเสาวาร์ปหน้าห้องเพื่อเดินทางไปยัง %s...", tostring(returnPillarId)))
-		end
-	elseif root.Position.Z > -200 and townPillar then
-		-- ลำดับ 2: อยู่ในเมืองหลวงอยู่แล้ว ให้ใช้เสาเมืองหลวง
-		currentNearPillar = townPillar
-	else
-		-- ลำดับ 3: อยู่ในทุ่งมอนสเตอร์ลึกๆ ที่ไม่มีเสาวาร์ปในระยะเดินถึง -> ร่าย HomeWarp กลับเมืองหลวง
-		if updateStatusFn then updateStatusFn("สถานะ: วาร์ปเข้าเมืองเพื่อต่อเสาวาร์ป...") end
-
-		-- เช็คคูลดาวน์ HomeWarp หากมีเศษคูลดาวน์สั้นๆ (<= 12 วิ) ให้รอให้พร้อมก่อน
-		local readyAt = tonumber(LocalPlayer:GetAttribute("HomeWarpReadyAt")) or 0
-		local cdLeft = math.max(0, math.ceil(readyAt - workspace:GetServerTimeNow()))
-		if cdLeft > 0 and cdLeft <= 12 then
-			if updateStatusFn then
-				updateStatusFn(string.format("สถานะ: รอ HomeWarp คูลดาวน์อีก %d วิ...", cdLeft))
-			end
-			local cdT0 = os.clock()
-			while (os.clock() - cdT0 < (cdLeft + 0.2)) and not (shouldAbortFn and shouldAbortFn()) do
-				task.wait(0.2)
-			end
-			cdLeft = 0
-		end
-
-		local reachedTown = false
-		if cdLeft == 0 and not (shouldAbortFn and shouldAbortFn()) then
-			if root then root.Anchored = true end
-			local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
-			if homeWarp then
-				homeWarp:FireServer("start", "merchant")
-			else
-				local LumiMenuToggle = LocalPlayer:FindFirstChild("LumiMenuToggle")
-				if LumiMenuToggle then pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end) end
-			end
-			local t0 = os.clock()
-			while os.clock() - t0 < 8.0 and not (shouldAbortFn and shouldAbortFn()) do
-				task.wait(0.1)
-				char = LocalPlayer.Character
-				root = char and char:FindFirstChild("HumanoidRootPart")
-				if root and root.Position.Z > -200 then
-					reachedTown = true
-					break
-				end
-			end
-			if root then root.Anchored = false end
-		end
-
-		if reachedTown and townPillar then
-			currentNearPillar = townPillar
-		end
-	end
-
-	char = LocalPlayer.Character
-	root = char and char:FindFirstChild("HumanoidRootPart")
-	if not root then return false end
-
-	-- วาร์ปไปยัง returnPillarId (ถ้ายังไม่ได้อยู่ที่นั่น และมีเสาต้นทางที่ถูกต้อง)
-	if currentNearPillar and returnPillarId then
-		if updateStatusFn then
-			updateStatusFn(string.format("สถานะ: วาร์ปไปยังเสา %s...", tostring(returnPillarId)))
-		end
-		local okWarp = executePillarWarp(currentNearPillar, returnPillarId, shouldAbortFn)
-		-- Caller-Level Smart Retry: หากวาร์ปกลับจุดฟาร์มไม่สำเร็จ ให้ค้นหาเสาใกล้ตัวใหม่และลองอีกครั้ง
-		if not okWarp and not (shouldAbortFn and shouldAbortFn()) then
-			task.wait(0.4)
-			char = LocalPlayer.Character
-			root = char and char:FindFirstChild("HumanoidRootPart")
-			if root then
-				local retryPillar = (root.Position.Z > -200 and townPillar) or getNearbyBossPillar(root.Position)
-				if retryPillar then
-					if updateStatusFn then
-						updateStatusFn(string.format("สถานะ: วาร์ปไม่สำเร็จ — กำลังลองใหม่ไปยังเสา %s...", tostring(returnPillarId)))
-					end
-					executePillarWarp(retryPillar, returnPillarId, shouldAbortFn)
-				end
-			end
-		end
-	end
-
-	char = LocalPlayer.Character
-	root = char and char:FindFirstChild("HumanoidRootPart")
-	if not root then return false end
-
-	-- Same-Zone Navigation Guard (<= 500 studs):
-	-- ห้ามสั่ง navigatePath วิ่งข้ามโซนเด็ดขาดถ้าตัวละครยังอยู่คนละโซน และห้ามล้าง OriginCFrame หรือเปิดฟาร์มผิดแมพ
-	local postWarpDist = (root.Position - originPos).Magnitude
-	if postWarpDist > 500.0 then
-		warn(string.format("[Hunting Together Hub] ReturnToOrigin: ยังอยู่ห่างจากเป้าหมาย %.1f studs (ต่างโซน) — รักษาพิกัดจุดฟาร์มเดิมไว้และยกเลิกการวิ่งข้ามโซน", postWarpDist))
-		return false
-	end
-
-	-- ปิด Auto Play อีกครั้งเผื่อถูกกระตุ้นระหว่างวาร์ป ก่อนเดินกลับจุดฟาร์มเดิม
-	if HUB.DisableGameAutoPlay then
-		HUB.DisableGameAutoPlay()
-	end
-
-	-- เดินกลับสู่ originPos
-	if updateStatusFn then
-		updateStatusFn("สถานะ: ถึงโซนแล้ว กำลังเดินกลับจุดเริ่มต้น...")
-	end
-	navigatePath(originPos, {
-		stopDistance = 8.0,
-		timeout = 45.0,
-		sprint = true,
-		shouldAbort = shouldAbortFn,
-	})
-
-	char = LocalPlayer.Character
-	root = char and char:FindFirstChild("HumanoidRootPart")
-	if root and not (shouldAbortFn and shouldAbortFn()) and (root.Position - originPos).Magnitude <= 250.0 then
-		-- เมื่อกลับมาถึงโซนฟาร์มมอนสเตอร์ หรือเคยเปิด Auto Play ไว้ ให้สั่งเปิด Auto Play/Follow ทันที 100%!
-		resumeFarmOrFollow(originPos)
-		clearOrigin()
-		return true
-	end
-
-	-- Self-Healing Fallback: ถ้าเดินไม่ถึงใน 45s หรือหลงทาง แต่ตัวละครอยู่ในโซนมอนสเตอร์แล้ว ให้เปิด Auto Play/Follow และเคลียร์ Origin เพื่อไม่ให้ยืนแข็งทื่อ
-	if root and root.Position.Z <= -300 then
-		resumeFarmOrFollow(root.Position)
-		clearOrigin()
-	end
-
-	return false
+	return resRun
 end
 HUB.ReturnToOrigin = returnToOrigin
 
@@ -10924,6 +10981,7 @@ do
 	local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
 	local _isBossRoutine = false
 	local _cancelBossRoutine = false
+	local _bossRunSerial = 0
 	local _botModesModule = nil
 	local _lastBotModesRetry = 0
 
@@ -11115,6 +11173,8 @@ do
 			return
 		end
 
+		_bossRunSerial = _bossRunSerial + 1
+		local myRunId = _bossRunSerial
 		_isBossRoutine = true
 		_cancelBossRoutine = false
 		HUB.IsBossRoutineActive = true
@@ -11123,12 +11183,51 @@ do
 
 		local success, err = pcall(function()
 			local function shouldAbort()
-				if not HUB.Alive or not HUB.Config.autoFarmBoss or _cancelBossRoutine or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
+				if not HUB.Alive or not HUB.Config.autoFarmBoss or _cancelBossRoutine or _bossRunSerial ~= myRunId or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
 				if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return true end
 				if targetBoss and (not HUB.Config.farmBossList or HUB.Config.farmBossList[targetBoss.key] ~= true) then
 					return true
 				end
 				return false
+			end
+
+			-- 6.1 รอบอสตัวถัดไปในโซนนี้ แทนการวาร์ปกลับจุดฟาร์มคั่น (v10.03)
+			-- ใช้เมื่อ: กลับจุดฟาร์มต้องวาร์ป (ห่าง > 500) · บอสตัวถัดไปไม่ได้อยู่โซนจุดฟาร์ม
+			-- · และจะเข้าช่วง pre-spawn ภายใน BOSS_LINGER_SEC (กลับไปแล้วต้องออกมาอีกเกือบทันที = เสียค่าวาร์ปฟรี)
+			-- คืนบอสที่พร้อมล่า (เกิดแล้ว/เข้าช่วง pre-spawn) หรือ nil = กลับจุดฟาร์มตามปกติ
+			local BOSS_LINGER_SEC = 30
+			local function lingerForUpcomingBoss(excludeKey, preSpawnSec)
+				local ch = LocalPlayer.Character
+				local rt = ch and ch:FindFirstChild("HumanoidRootPart")
+				if not rt then return nil end
+				local origin = HUB.OriginCFrame or (HUB.FarmAnchor and HUB.FarmAnchor.Z <= -300 and CFrame.new(HUB.FarmAnchor))
+				local originPos = origin and origin.Position
+				if not originPos or (rt.Position - originPos).Magnitude <= 500.0 then return nil end
+
+				local myLevel = LocalPlayer:GetAttribute("Level") or 1
+				local upcoming, upCd = nil, math.huge
+				for _, b in ipairs(BOSS_DEFS) do
+					if b.key ~= excludeKey and HUB.Config.farmBossList and HUB.Config.farmBossList[b.key] == true and myLevel >= (b.minLevel or 0) then
+						local cd = getBossCountdown(b)
+						if cd > preSpawnSec and cd <= preSpawnSec + BOSS_LINGER_SEC and cd < upCd then
+							upcoming, upCd = b, cd
+						end
+					end
+				end
+				-- ไม่มีบอสที่ใกล้เกิด หรือบอสตัวนั้นอยู่โซนจุดฟาร์ม (กลับไปฟาร์มรอแล้วเดินไปเองได้) ⇒ กลับตามปกติ
+				if not upcoming or (upcoming.arenaPos - originPos).Magnitude <= 500.0 then return nil end
+
+				local tWait = os.clock()
+				while not shouldAbort() and os.clock() - tWait < BOSS_LINGER_SEC + 5 do
+					HUB.BossRoutineStartTime = os.clock()
+					local cand = getNextAliveSelectedBoss(excludeKey)
+					if cand then return cand end
+					if HUB.UI.BossStatusLabel then
+						HUB.UI.BossStatusLabel.Text = string.format("สถานะ: รอ %s เกิดในอีก %d วิ (ไม่วาร์ปกลับจุดฟาร์มคั่น)...", upcoming.name, getBossCountdown(upcoming))
+					end
+					task.wait(0.5)
+				end
+				return nil
 			end
 
 			-- 1. บันทึกจุดฟาร์มเดิมผ่าน Central Origin Engine (ถ้ายังไม่มี)
@@ -11142,6 +11241,9 @@ do
 			end
 
 			while targetBoss and not shouldAbort() do
+				-- รีเฟรชเวลาเริ่มต้นของแต่ละตัว เพื่อไม่ให้ Watchdog 240s ตัดการทำงานเมื่อล่าบอสต่อเนื่องหลายตัวติดกัน
+				HUB.BossRoutineStartTime = os.clock()
+
 				-- ตรวจสอบว่าบอสตัวปัจจุบันถูกผู้ใช้กดปิดไปแล้วหรือไม่ หากถูกปิดให้หาบอสตัวเลือกอื่นทันที
 				if not HUB.Config.farmBossList or HUB.Config.farmBossList[targetBoss.key] ~= true then
 					local altBoss = getNextAliveSelectedBoss()
@@ -11176,6 +11278,18 @@ do
 				local currentNearPillar = nil
 				local inTown = (root.Position.Z > -200)
 				local distToTargetArena = (root.Position - targetBoss.arenaPos).Magnitude
+				local preSpawnSec = HUB.Config.bossPreSpawnThreshold or 15
+				local bossKilledBeforeWarp = false
+
+				local function shouldAbortWarpToBoss()
+					if shouldAbort() then return true end
+					local cdNow = getBossCountdown(targetBoss)
+					if not isBossAlive(targetBoss) and not findLiveBossModel(targetBoss) and cdNow > preSpawnSec then
+						bossKilledBeforeWarp = true
+						return true
+					end
+					return false
+				end
 
 				-- หากตัวละครไม่ได้อยู่ที่ห้องบอสเป้าหมายอยู่แล้ว (ห่างเกิน 120 studs) จึงต้องเดินทางผ่านเสาวาร์ป
 				if distToTargetArena > 120.0 then
@@ -11194,10 +11308,10 @@ do
 					if shouldAbort() then break end
 
 					-- 3. สั่งวาร์ปไปยังเสาของเป้าหมาย (targetBoss.pillarId) พร้อม Synchronization & Silver Guard
-					local warpedToBoss = executePillarWarp(currentNearPillar, targetBoss.pillarId, shouldAbort)
+					local warpedToBoss = executePillarWarp(currentNearPillar, targetBoss.pillarId, shouldAbortWarpToBoss)
 
 					-- Caller-Level Smart Retry: หากวาร์ปไปหาบอสไม่สำเร็จ ให้ Re-check เสาและลองใหม่อีก 1 รอบ
-					if not warpedToBoss and not shouldAbort() then
+					if not warpedToBoss and not shouldAbortWarpToBoss() then
 						task.wait(0.4)
 						char = LocalPlayer.Character
 						root = char and char:FindFirstChild("HumanoidRootPart")
@@ -11207,8 +11321,21 @@ do
 								if HUB.UI.BossStatusLabel then
 									HUB.UI.BossStatusLabel.Text = string.format("สถานะ: วาร์ปไม่สำเร็จ — กำลังลองใหม่รอบที่ 2 ไปยัง %s...", targetBoss.name)
 								end
-								warpedToBoss = executePillarWarp(rePillar, targetBoss.pillarId, shouldAbort)
+								warpedToBoss = executePillarWarp(rePillar, targetBoss.pillarId, shouldAbortWarpToBoss)
 							end
+						end
+					end
+
+					if bossKilledBeforeWarp then
+						local nextBossAfterKill = getNextAliveSelectedBoss(targetBoss.key)
+						if nextBossAfterKill then
+							targetBoss = nextBossAfterKill
+							HUB.CurrentTargetBoss = targetBoss.key
+							continue
+						else
+							targetBoss = nil
+							HUB.CurrentTargetBoss = nil
+							break
 						end
 					end
 
@@ -11240,7 +11367,6 @@ do
 				local liveBossOnArrive = findLiveBossModel(targetBoss)
 				local walkTargetPos = (liveBossOnArrive and liveBossOnArrive.PrimaryPart and liveBossOnArrive.PrimaryPart.Position) or targetBoss.arenaPos
 
-				local preSpawnSec = HUB.Config.bossPreSpawnThreshold or 15
 				local bossDiedOnWay = false
 
 				navigatePath(walkTargetPos, {
@@ -11485,6 +11611,9 @@ do
 
 				-- 6. เช็คบอสตัวถัดไป (ไม่ต้องสั่งเดินซ้ำที่นี่ เพราะรอบถัดไป executePillarWarp จะเดินไปหาเสาที่ใกล้ที่สุดและกดวาร์ปให้ทันที)
 				local nextBoss = getNextAliveSelectedBoss(targetBoss.key)
+				if not nextBoss then
+					nextBoss = lingerForUpcomingBoss(targetBoss.key, preSpawnSec)
+				end
 				if nextBoss then
 					if HUB.UI.BossStatusLabel then
 						HUB.UI.BossStatusLabel.Text = string.format("สถานะ: สลับไปล่าบอสตัวถัดไป: %s (%s)...", nextBoss.name, nextBoss.levelText)
@@ -11500,6 +11629,9 @@ do
 				end
 			end
 
+			-- หากถูกร้องขอยกเลิกหรือตัวละครตายระหว่างรูทีน ให้หยุดทันที ห้ามหลุดลงไปแย่งเรียก returnToOrigin ซ้อนกับ CharacterAdded
+			if shouldAbort() then return end
+
 			-- 7. ตรวจสอบการย่อยอุปกรณ์ (Auto Salvage) หรือส่งไม้ต่อให้ Auto Sell (Smart Handoff)
 			if HUB.Config.autoSalvage and HUB.RunAutoSalvageRoutine then
 				local stats = getBagStats()
@@ -11513,12 +11645,16 @@ do
 				end
 			end
 
+			if shouldAbort() then return end
+
 			if HUB.IsAutoSellNeeded and HUB.IsAutoSellNeeded() then
 				if HUB.UI.BossStatusLabel then
 					HUB.UI.BossStatusLabel.Text = "สถานะ: ปราบครบแล้ว · กระเป๋าเต็มเกณฑ์ -> ส่งไม้ต่อให้ Auto Sell"
 				end
-				_isBossRoutine = false
-				HUB.IsBossRoutineActive = false
+				if _bossRunSerial == myRunId then
+					_isBossRoutine = false
+					HUB.IsBossRoutineActive = false
+				end
 				task.spawn(function()
 					task.wait(0.2)
 					if HUB.RunAutoSellRoutine then HUB.RunAutoSellRoutine() end
@@ -11526,8 +11662,11 @@ do
 				return
 			end
 
+			-- รีเฟรชเวลาเริ่มต้นก่อนเดินทางกลับจุดฟาร์ม เพื่อไม่ให้ Watchdog 240s ตัดจังหวะขณะกำลังวาร์ปเสากลับ
+			HUB.BossRoutineStartTime = os.clock()
+
 			local function shouldAbortReturn()
-				if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
+				if not HUB.Alive or _cancelBossRoutine or not HUB.Config.autoFarmBoss or _bossRunSerial ~= myRunId or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
 				local ch = LocalPlayer.Character
 				local h = ch and ch:FindFirstChildOfClass("Humanoid")
 				if not h or h.Health <= 0 then return true end
@@ -11536,7 +11675,7 @@ do
 			end
 
 			returnToOrigin(shouldAbortReturn, function(text)
-				if HUB.UI.BossStatusLabel then HUB.UI.BossStatusLabel.Text = text end
+				if HUB.UI.BossStatusLabel and _bossRunSerial == myRunId then HUB.UI.BossStatusLabel.Text = text end
 			end)
 		end)
 
@@ -11544,26 +11683,32 @@ do
 			warn("[Hunting Together Hub] Auto Boss Routine Error: " .. tostring(err))
 		end
 
-		_isBossRoutine = false
-		HUB.IsBossRoutineActive = false
-		HUB.BossRoutineStartTime = nil
-		HUB.CurrentTargetBoss = nil
-		if HUB.UI.BossStatusLabel then
-			if HUB.Config.autoFarmBoss then
-				HUB.UI.BossStatusLabel.Text = "สถานะ: พร้อมทำงาน · สแตนด์บายรอบอสเกิด..."
-			else
-				HUB.UI.BossStatusLabel.Text = "สถานะ: ปิดใช้งาน"
+		if _bossRunSerial == myRunId then
+			_isBossRoutine = false
+			HUB.IsBossRoutineActive = false
+			HUB.BossRoutineStartTime = nil
+			HUB.CurrentTargetBoss = nil
+			if HUB.UI.BossStatusLabel then
+				if HUB.Config.autoFarmBoss then
+					HUB.UI.BossStatusLabel.Text = "สถานะ: พร้อมทำงาน · สแตนด์บายรอบอสเกิด..."
+				else
+					HUB.UI.BossStatusLabel.Text = "สถานะ: ปิดใช้งาน"
+				end
 			end
 		end
 	end
 
 	HUB.RunAutoBossRoutine = runAutoBossRoutine
 	HUB.CancelAutoBossRoutine = function(shouldReturn)
+		_bossRunSerial = _bossRunSerial + 1
 		_cancelBossRoutine = true
 		_isBossRoutine = false
 		HUB.IsBossRoutineActive = false
 		HUB.BossRoutineStartTime = nil
 		HUB.CurrentTargetBoss = nil
+		if HUB.CancelNavigation then
+			pcall(HUB.CancelNavigation)
+		end
 		pcall(function()
 			local char = LocalPlayer.Character
 			local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -11588,7 +11733,7 @@ do
 	HUB.GetBossCountdown = getBossCountdown
 	HUB.CheckAndTriggerAutoBoss = function()
 		if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return end
-		if not _isBossRoutine and HUB.Config.autoFarmBoss then
+		if not _isBossRoutine and not HUB.IsReturningToOrigin and HUB.Config.autoFarmBoss then
 			local candidate = getNextAliveSelectedBoss()
 			if candidate and not HUB.Navigating and not HUB.Dodging and not HUB.IsSellingRoutineActive then
 				task.spawn(runAutoBossRoutine)
@@ -11613,7 +11758,7 @@ do
 				if HUB.UI.BossStatusLabel and HUB.Config.autoFarmBoss and not _isBossRoutine then
 					HUB.UI.BossStatusLabel.Text = "สถานะ: พักการทำงาน (อยู่ในดันเจี้ยน)"
 				end
-			elseif HUB.Config.autoFarmBoss and not _isBossRoutine and not HUB.Navigating and not HUB.Dodging then
+			elseif HUB.Config.autoFarmBoss and not _isBossRoutine and not HUB.IsReturningToOrigin and not HUB.Navigating and not HUB.Dodging then
 				local candidate = getNextAliveSelectedBoss()
 				if candidate and not HUB.IsSellingRoutineActive then
 					task.spawn(runAutoBossRoutine)
@@ -11656,24 +11801,37 @@ do
 				HUB.SellRoutineStartTime = nil
 			end
 
-			-- 3. Monster Zone Idle Self-Healing: ยืนนิ่งในทุ่งมอนสเตอร์ โดยไม่ได้ติดรูทีนใดๆ แต่ Auto Play ปิดอยู่ (เฉพาะในดันเจี้ยน หรือพบมอนสเตอร์ในระยะ 40 studs)
-			if not _isBossRoutine and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.Navigating and not HUB.Dodging then
+			-- 3. Monster Zone Idle & Stranded Origin Self-Healing
+			if not _isBossRoutine and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and not HUB.Navigating and not HUB.Dodging then
 				local ch = LocalPlayer.Character
 				local rt = ch and ch:FindFirstChild("HumanoidRootPart")
 				local hm = ch and ch:FindFirstChildOfClass("Humanoid")
 				local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
-				local hasNearbyMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-				if rt and hm and hm.Health > 0 and (isDungeon or hasNearbyMonster) then
-					if not isHomeWarpActive() and not HUB.UserDisabledAuto and not HUB.IsGameAutoActive() then
-						_stuckBossCount = _stuckBossCount + 1
-						if _stuckBossCount >= 3 then -- ยืนนิ่งเกิน 15 วินาที
-							_stuckBossCount = 0
-							if HUB.EnsureGameAutoActive then
-								HUB.EnsureGameAutoActive(4, 0.3)
+				if rt and hm and hm.Health > 0 and not isHomeWarpActive() then
+					-- 3.1 หากมี OriginCFrame ค้างอยู่ (เช่น รูทีนถูกขัดจังหวะตอนเพิ่งวาร์ปเสาเสร็จ) และไม่มีบอสเกิดอยู่ ให้สั่งเดินกลับจุดฟาร์มเดิมทันที
+					if not isDungeon and HUB.OriginCFrame and not (HUB.Config.autoFarmBoss and HUB.HasAliveSelectedBoss and HUB.HasAliveSelectedBoss()) then
+						task.spawn(function()
+							if HUB.ReturnToOrigin then
+								HUB.ReturnToOrigin()
 							end
-						end
+						end)
 					else
-						_stuckBossCount = 0
+						local hasNearbyMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
+						if isDungeon or hasNearbyMonster then
+							if not HUB.UserDisabledAuto and not HUB.IsGameAutoActive() then
+								_stuckBossCount = _stuckBossCount + 1
+								if _stuckBossCount >= 3 then -- ยืนนิ่งเกิน 15 วินาที
+									_stuckBossCount = 0
+									if HUB.EnsureGameAutoActive then
+										HUB.EnsureGameAutoActive(4, 0.3)
+									end
+								end
+							else
+								_stuckBossCount = 0
+							end
+						else
+							_stuckBossCount = 0
+						end
 					end
 				else
 					_stuckBossCount = 0
@@ -13051,7 +13209,7 @@ do
 				end
 
 				-- 3. มอนสเตอร์อยู่รอบตัวแต่ Auto Play ดับเอง (Continuous Auto Play Health Monitor — เฉพาะในดันเจี้ยน หรือมีมอนสเตอร์ในระยะ 40 studs)
-				if not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsSellingRoutineActive and not HUB.Navigating and not isHomeWarpActive() then
+				if not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and not HUB.Navigating and not isHomeWarpActive() then
 					if not HUB.IsGameAutoActive() then
 						local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
 						local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
@@ -13173,13 +13331,18 @@ do
 			if not root then return end
 
 			-- กรณีเกิดในเมือง (Z > -200) แต่มีจุดฟาร์มมอนสเตอร์เดิมนอกเมือง (HUB.OriginCFrame หรือ HUB.FarmAnchor ที่ Z <= -300)
+			-- จะเดินทางกลับเฉพาะเมื่อไม่ได้ติดรูทีนล่าบอส/ขายของ และไม่มีบอสเป้าหมายกำลังเกิดรออยู่ (ให้ Auto Boss ล่าก่อนแล้วค่อยกลับ)
 			local targetFarm = HUB.OriginCFrame or (HUB.FarmAnchor and HUB.FarmAnchor.Z <= -300 and CFrame.new(HUB.FarmAnchor))
 			if root.Position.Z > -200 and targetFarm and targetFarm.Position.Z <= -300 then
-				task.spawn(function()
-					if HUB.ReturnToOrigin then
-						HUB.ReturnToOrigin(nil, nil, targetFarm)
-					end
-				end)
+				if not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and not (HUB.Config.autoFarmBoss and HUB.HasAliveSelectedBoss and HUB.HasAliveSelectedBoss()) then
+					task.spawn(function()
+						if HUB.ReturnToOrigin then
+							HUB.ReturnToOrigin(function()
+								return not HUB.Alive or HUB.IsBossRoutineActive or HUB.IsSellingRoutineActive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN
+							end, nil, targetFarm)
+						end
+					end)
+				end
 				return
 			end
 
@@ -15963,11 +16126,7 @@ do
 						end
 					end
 					-- ปิดหน้าต่าง HuntDungeonSelect ไม่ให้บดบังจอ
-					pcall(function()
-						local pg = LocalPlayer:FindFirstChild("PlayerGui")
-						local hds = pg and pg:FindFirstChild("HuntDungeonSelect")
-						if hds then hds.Enabled = false end
-					end)
+					closeGamePage("HuntDungeonSelect")
 					task.wait(1.5)
 				end
 			end
