@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v9.98)
+-- Hunting Together Hub (v9.99)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "9.98"
+local VERSION = "9.99"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -8882,51 +8882,23 @@ end
 
 local function cleanWarpPillarUIAndBlur()
 	pcall(function()
-		-- 1. เคลียร์ระดับโมดูล PHKit ของเกมสำหรับหน้าต่าง HuntWarpPillar
 		local Shared = ReplicatedStorage:FindFirstChild("Shared")
 		local LumiPage = Shared and require(Shared:FindFirstChild("LumiPage"))
-		if LumiPage then
-			local phk = LumiPage.PHKit
-			if phk and type(phk.SetOpen) == "function" then
-				pcall(phk.SetOpen, false, "lp_HuntWarpPillar")
-			end
-			if phk and phk._open then
-				phk._open["lp_HuntWarpPillar"] = nil
-			end
+		if LumiPage and type(LumiPage.CloseAll) == "function" then
+			pcall(LumiPage.CloseAll)
 		end
 
-		-- 2. เคลียร์ Attribute เสาวาร์ปบนตัว LocalPlayer
-		LocalPlayer:SetAttribute("HuntWarpPillarOpen", false)
-
-		-- 3. ซ่อน ScreenGui เสาวาร์ปใน PlayerGui
 		local pg = LocalPlayer:FindFirstChild("PlayerGui")
 		if pg then
 			local wpGui = pg:FindFirstChild("HuntWarpPillar") or pg:FindFirstChild("LumiPage_HuntWarpPillar")
 			if wpGui then wpGui.Enabled = false end
 		end
 
-		-- 4. ล้างเอฟเฟกต์เบลอใน Lighting โดยตรง (PHWindowBlur & LumiBagBlur)
 		local Lighting = game:GetService("Lighting")
 		local blur = Lighting:FindFirstChild("PHWindowBlur")
 		if blur and blur.Enabled then
-			local hasOtherOpen = false
-			if LumiPage and LumiPage.PHKit and LumiPage.PHKit._open then
-				for k, v in pairs(LumiPage.PHKit._open) do
-					if v and k ~= "lp_HuntWarpPillar" then
-						hasOtherOpen = true
-						break
-					end
-				end
-			end
-			if not hasOtherOpen then
-				blur.Enabled = false
-				blur.Size = 0
-			end
-		end
-
-		local bagBlur = Lighting:FindFirstChild("LumiBagBlur")
-		if bagBlur and bagBlur.Enabled then
-			bagBlur.Enabled = false
+			blur.Enabled = false
+			blur.Size = 0
 		end
 	end)
 end
@@ -8953,7 +8925,7 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 	end
 	if targetPillarModel then
 		local dToTarget = (root.Position - targetPillarModel:GetPivot().Position).Magnitude
-		if dToTarget <= 150.0 then
+		if dToTarget <= 45.0 then
 			return true
 		end
 	end
@@ -8990,7 +8962,6 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 
 	local fpp = EXEC.fireproximityprompt or rawget(getgenv(), "fireproximityprompt")
 	local warpedOk = false
-	local startRootPos = root.Position
 	local MAX_WARP_ATTEMPTS = 3
 
 	for attempt = 1, MAX_WARP_ATTEMPTS do
@@ -9046,11 +9017,8 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 		end
 		task.wait(0.2)
 
-		-- ส่งคำสั่งวาร์ปไปยังเซิร์ฟเวอร์
+		-- ส่งคำสั่งวาร์ปไปยังเซิร์ฟเวอร์ (ห้ามสั่ง wpGui.Enabled = false ดิบๆ ตรงนี้ เพื่อให้ WarpPillarClient/LumiPage จัดการสถานะอย่างถูกต้อง)
 		pillarWarp:FireServer(targetPillarId)
-
-		-- ปิด UI เสาวาร์ปและล้างเอฟเฟกต์เบลอทันที
-		cleanWarpPillarUIAndBlur()
 
 		-- รอการเทเลพอร์ตทางกายภาพ (สูงสุด 4.5 วินาที)
 		local wT0 = os.clock()
@@ -9064,11 +9032,9 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 						warpedOk = true
 						break
 					end
-				else
-					local dToTargetPillar = targetPillarModel and (root.Position - targetPillarModel:GetPivot().Position).Magnitude or math.huge
-					local dFromStart = (root.Position - startRootPos).Magnitude
-					-- วาร์ปสำเร็จ: อยู่ในรัศมีโซนเสาเป้าหมาย (<= 150 studs) หรือตำแหน่งเคลื่อนย้ายข้ามแมพ (> 120 studs)
-					if dToTargetPillar <= 150.0 or dFromStart > 120.0 then
+				elseif targetPillarModel then
+					local d = (root.Position - targetPillarModel:GetPivot().Position).Magnitude
+					if d <= 60.0 then
 						warpedOk = true
 						break
 					end
@@ -9090,13 +9056,9 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 				if root then
 					if targetPillarId == "Town" then
 						if root.Position.Z > -250 then warpedOk = true break end
-					else
-						local dToTargetPillar = targetPillarModel and (root.Position - targetPillarModel:GetPivot().Position).Magnitude or math.huge
-						local dFromStart = (root.Position - startRootPos).Magnitude
-						if dToTargetPillar <= 150.0 or dFromStart > 120.0 then
-							warpedOk = true
-							break
-						end
+					elseif targetPillarModel then
+						local d = (root.Position - targetPillarModel:GetPivot().Position).Magnitude
+						if d <= 60.0 then warpedOk = true break end
 					end
 				end
 			end
@@ -9123,12 +9085,10 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 			HUB.WaitGroundReady(root, 2.5)
 			task.wait(0.15)
 		end
-		-- ล้าง UI และ Blur ตกค้างซ้ำอีกครั้งหลังวาร์ปถึงที่หมาย (ป้องกัน Event PillarOpen ที่เพิ่งมาถึงจาก Server)
-		cleanWarpPillarUIAndBlur()
-	else
-		-- กรณีวาร์ปไม่สำเร็จ ล้าง UI และ Blur เช่นกัน
-		cleanWarpPillarUIAndBlur()
 	end
+
+	-- ปิดหน้าต่างเสาวาร์ปและล้าง Blur อย่างถูกวิธีหลังจบกระบวนการวาร์ป
+	cleanWarpPillarUIAndBlur()
 
 	return warpedOk
 end
@@ -9581,15 +9541,10 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 	if not root then return false end
 
 	-- Same-Zone Navigation Guard (<= 500 studs):
-	-- ห้ามสั่ง navigatePath วิ่งข้ามโซนเด็ดขาดถ้าตัวละครยังอยู่คนละโซน
+	-- ห้ามสั่ง navigatePath วิ่งข้ามโซนเด็ดขาดถ้าตัวละครยังอยู่คนละโซน และห้ามล้าง OriginCFrame หรือเปิดฟาร์มผิดแมพ
 	local postWarpDist = (root.Position - originPos).Magnitude
 	if postWarpDist > 500.0 then
-		warn(string.format("[Hunting Together Hub] ReturnToOrigin: ยังอยู่ห่างจากเป้าหมาย %.1f studs (ต่างโซน) — ยกเลิกการวิ่งชนกำแพง", postWarpDist))
-		-- Self-Healing: เคลียร์ Origin ที่เป็นไปไม่ได้ทิ้ง และเปิด Auto Play/Follow ในโซนปัจจุบันทันที ป้องกันยืนนิ่ง
-		if root.Position.Z <= -300 then
-			resumeFarmOrFollow(root.Position)
-		end
-		clearOrigin()
+		warn(string.format("[Hunting Together Hub] ReturnToOrigin: ยังอยู่ห่างจากเป้าหมาย %.1f studs (ต่างโซน) — รักษาพิกัดจุดฟาร์มเดิมไว้และยกเลิกการวิ่งข้ามโซน", postWarpDist))
 		return false
 	end
 
@@ -13477,57 +13432,6 @@ do
 
 	-- ปิด Connection อื่นทันทีตั้งแต่ตอนเริ่ม
 	task.defer(disableExternalIdledConnections)
-end
-
--- ===== 10.40 Auto Anti-Blur Guard Engine (Lighting & UI Post-Processing Cleanup, v9.97) =====
-do
-	local Lighting = game:GetService("Lighting")
-	task.spawn(function()
-		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
-			task.wait(1.5)
-			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
-
-			local blur = Lighting:FindFirstChild("PHWindowBlur")
-			if blur and blur.Enabled then
-				local isAnyMenuOpen = false
-				local Shared = ReplicatedStorage:FindFirstChild("Shared")
-				local LumiPage = Shared and require(Shared:FindFirstChild("LumiPage"))
-				if LumiPage and LumiPage.PHKit and LumiPage.PHKit._open then
-					-- ตรวจสอบว่าหน้าต่างเสาวาร์ปปิดอยู่หรือไม่ แต่มี tag ค้างใน _open
-					local pg = LocalPlayer:FindFirstChild("PlayerGui")
-					local wpGui = pg and (pg:FindFirstChild("HuntWarpPillar") or pg:FindFirstChild("LumiPage_HuntWarpPillar"))
-					if (not wpGui or not wpGui.Enabled) and LumiPage.PHKit._open["lp_HuntWarpPillar"] then
-						LumiPage.PHKit._open["lp_HuntWarpPillar"] = nil
-					end
-
-					for k, v in pairs(LumiPage.PHKit._open) do
-						if v then
-							isAnyMenuOpen = true
-							break
-						end
-					end
-				end
-
-				if not isAnyMenuOpen then
-					pcall(function()
-						blur.Enabled = false
-						blur.Size = 0
-					end)
-				end
-			end
-
-			local bagBlur = Lighting:FindFirstChild("LumiBagBlur")
-			if bagBlur and bagBlur.Enabled then
-				local pg = LocalPlayer:FindFirstChild("PlayerGui")
-				local invGui = pg and pg:FindFirstChild("LumiInventory")
-				if not invGui or not invGui.Enabled then
-					pcall(function()
-						bagBlur.Enabled = false
-					end)
-				end
-			end
-		end
-	end)
 end
 
 -- ===== 10.45 Party Follow Guardian Engine (Event-Driven & User-Intent First, v9.87) =====
