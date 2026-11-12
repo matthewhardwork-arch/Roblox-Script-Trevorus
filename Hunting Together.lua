@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.12)
+-- Hunting Together Hub (v10.13)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.12"
+local VERSION = "10.13"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -660,20 +660,64 @@ do
 		if HUB.IsFreeEntryGame() then
 			return true, "free_game"
 		end
-		local runs = tonumber(LocalPlayer:GetAttribute("DungeonRunsToday")) or 0
-		if runs < HUB.GetDungeonDailyFreeCap(id) then
-			return true, "free_run"
+
+		local isNoKey = HUB.IsNoKeyDungeon(id)
+		local freeExhausted = false
+
+		local replayData = nil
+		if type(HUB.LastReplayState) == "table" and type(HUB.LastReplayState.data) == "table" then
+			replayData = HUB.LastReplayState.data
 		end
-		if HUB.IsNoKeyDungeon(id) then
+		if replayData then
+			if replayData.CanRun == true then
+				return true, "replay_state"
+			end
+			local rUsed = tonumber(replayData.Used)
+			local rFree = tonumber(replayData.Free)
+			if rUsed and rFree then
+				if rUsed < rFree then
+					return true, "free_run"
+				end
+				freeExhausted = true
+			end
+			if tonumber(replayData.Keys) and tonumber(replayData.Keys) >= 1 and not isNoKey then
+				return true, "replay_state_key"
+			end
+			if replayData.CanRun == false then
+				freeExhausted = true
+			end
+		end
+
+		local reward = HUB.LastDungeonReward
+		if type(reward) == "table" and reward.used ~= nil and reward.cap ~= nil then
+			if reward.used < reward.cap then
+				return true, "free_run"
+			end
+			freeExhausted = true
+		end
+
+		local summary = HUB.LastDungeonSummary
+		if type(summary) == "table" and type(summary.data) == "table" and summary.data.Limit == true then
+			freeExhausted = true
+		end
+
+		if not isNoKey then
+			if HUB.GetDungeonKeyCount() >= 1 then
+				return true, "key"
+			end
+			if freeExhausted then
+				return false, "need_key"
+			end
+			return false, "need_key_unknown"
+		end
+
+		if freeExhausted then
 			return false, "daily_limit_nokey"
 		end
-		if HUB.GetDungeonKeyCount() >= 1 then
-			return true, "key"
-		end
-		return false, "need_key"
+		return false, "unknown_nokey"
 	end
 
-	-- เชื่อมต่อ Listener แบบ passive เพื่ออ่านสถานะ Replay และคำเตือนจากเซิร์ฟเวอร์แบบ Real-time
+	-- เชื่อมต่อ Listener แบบ passive เพื่ออ่านสถานะ Replay, Summary, Reward, DungeonSelect และคำเตือนจากเซิร์ฟเวอร์แบบ Real-time
 	function HUB.EnsureDungeonListeners()
 		local rs = game:GetService("ReplicatedStorage")
 		local remotes = rs:FindFirstChild("Remotes")
@@ -683,15 +727,45 @@ do
 			local dp = remotes:FindFirstChild("DungeonPrompt")
 			if dp and dp:IsA("RemoteEvent") then
 				HUB._dungeonPromptBound = true
-				HUB:AddConnection(dp.OnClientEvent:Connect(function(a1, a2)
+				HUB:AddConnection(dp.OnClientEvent:Connect(function(a1, a2, a3, a4, a5, a6)
 					if a1 == "replay" then
 						if type(a2) == "table" then
 							HUB.LastReplayState = { data = a2, receivedAt = os.clock() }
 						else
 							HUB.LastReplayState = nil
 						end
+					elseif a1 == "summary" then
+						if type(a2) == "table" then
+							HUB.LastDungeonSummary = { data = a2, receivedAt = os.clock() }
+						else
+							HUB.LastDungeonSummary = nil
+						end
+					elseif a1 == "reward" then
+						if type(a2) == "table" then
+							HUB.LastDungeonReward = {
+								items = a2,
+								used = tonumber(a3),
+								cap = tonumber(a4),
+								gold = tonumber(a5),
+								exp = tonumber(a6),
+								receivedAt = os.clock(),
+							}
+						else
+							HUB.LastDungeonReward = nil
+						end
+					elseif a1 == "dungeonselect" then
+						if type(a2) == "table" then
+							HUB.LastDungeonSelect = { data = a2, receivedAt = os.clock() }
+						end
+					elseif a1 == "ready" then
+						if type(a2) == "table" and a2.Id then
+							HUB.LastReadyId = a2.Id
+						end
 					elseif a1 == "teleporting" then
 						HUB.LastReplayState = nil
+						HUB.LastDungeonSummary = nil
+						HUB.LastDungeonReward = nil
+						HUB.LastReadyId = nil
 					end
 				end))
 			end
@@ -734,8 +808,13 @@ do
 			ac.buyConfirmedAt = now
 			ac.replayStarts = 0
 			ac.leaderBuyBlocked = false
+			ac.memberBuyBlocked = false
 			if method == "replayBuyKey" or method == "selectBuyKey" then
 				HUB.VerifiedDungeonBuyMethod = method
+			elseif method == "replayBuyKey_pop" or method == "replayBuyKey_inpop" then
+				HUB.VerifiedDungeonBuyMethod = "replayBuyKey"
+			elseif method == "selectBuyKey_pop" then
+				HUB.VerifiedDungeonBuyMethod = "selectBuyKey"
 			end
 			HUB.Stats.dungeonKeysBought = (HUB.Stats.dungeonKeysBought or 0) + 1
 			return "confirmed", method
@@ -763,7 +842,11 @@ do
 		local popOpen = (ctx.popOpen == true)
 		local hasAccess = (ctx.hasAccess == true)
 		local isNoKey = (ctx.noKeyDungeon == true) or (type(replayState) == "table" and replayState.NoKey == true)
-		local keyPrice = tonumber(type(replayState) == "table" and replayState.KeyPrice) or tonumber(ctx.keyPrice) or 500000
+		local replayKeyPrice = nil
+		if type(replayState) == "table" then
+			replayKeyPrice = tonumber(replayState.KeyPrice)
+		end
+		local keyPrice = replayKeyPrice or tonumber(ctx.keyPrice) or 500000
 		local silver = tonumber(ctx.silver) or 0
 		local keyCount = tonumber(ctx.keyCount) or 0
 
@@ -783,7 +866,10 @@ do
 			if popOpen then
 				-- กรณีเปิด ReplayPop เพื่อปลดล็อกเซสชัน "replay" บนเซิร์ฟเวอร์ (S3 fallback) แล้วหัวตี้ยังไม่มีกุญแจ
 				if (not hasAccess) and (not isNoKey) and ctx.autoBuyKey and (silver >= keyPrice) and (not ac.leaderBuyBlocked) then
-					local tried = type(ac.triedBuyMethods) == "table" and ac.triedBuyMethods or {}
+					local tried = {}
+					if type(ac.triedBuyMethods) == "table" then
+						tried = ac.triedBuyMethods
+					end
 					if not tried["replayBuyKey_inpop"] then
 						return {
 							action = "buyKey",
@@ -804,6 +890,9 @@ do
 				if (ac.buyConfirmedAt ~= nil) and ((now - ac.buyConfirmedAt) < 2.0) then
 					return { action = "wait", status = "สถานะ: ซื้อกุญแจสำเร็จ กำลังอัปเดตสิทธิ์ในกระเป๋า... 🔑" }
 				end
+				if ctx.waitUnknownQuota then
+					return { action = "wait", status = "สถานะ: กำลังรอข้อมูลรอบฟรี/สรุปผลจากเซิร์ฟเวอร์... ⏳" }
+				end
 				if isNoKey then
 					return { action = "wait", status = "สถานะ: ไม่มีรอบเหลือวันนี้สำหรับดันเจี้ยนนี้ ⏳" }
 				end
@@ -817,7 +906,10 @@ do
 					return { action = "wait", status = "สถานะ: เซิร์ฟเวอร์ไม่อนุญาตให้หัวตี้/เดี่ยวซื้อกุญแจในดัน · รอระบบพาออก ⏳" }
 				end
 
-				local tried = type(ac.triedBuyMethods) == "table" and ac.triedBuyMethods or {}
+				local tried = {}
+				if type(ac.triedBuyMethods) == "table" then
+					tried = ac.triedBuyMethods
+				end
 				local candidates = {}
 				if ctx.preferredMethod == "replayBuyKey" or ctx.preferredMethod == "selectBuyKey" then
 					table.insert(candidates, { method = ctx.preferredMethod, remoteArg = ctx.preferredMethod })
@@ -875,19 +967,35 @@ do
 
 		-- ===== ฝั่งสมาชิกปาร์ตี้ (isLeader == false) =====
 		if not popOpen then
+			ac.popOpenedAt = nil
 			if hasAccess then
 				return { action = "wait", status = "สถานะ: รอหัวตี้กด Replay (ถ้าไม่กดจะรอให้ดันพาออก) ⏳" }
 			end
 			return { action = "wait", status = "สถานะ: รอหัวตี้กด Replay (เมื่อป๊อปอัปเปิดจะซื้อกุญแจให้อัตโนมัติ) ⏳" }
 		end
 
-		local justConfirmedBuy = (ac.buyConfirmedAt ~= nil) and ((now - ac.buyConfirmedAt) < 2.5) and hasAccess
+		if not ac.popOpenedAt then
+			ac.popOpenedAt = now
+		end
+		local popAge = now - ac.popOpenedAt
+
+		local justConfirmedBuy = (ac.buyConfirmedAt ~= nil) and ((now - ac.buyConfirmedAt) < 3.0)
 		local canRun = false
 		if justConfirmedBuy then
-			canRun = true
+			if type(replayState) == "table" and replayState.CanRun ~= nil then
+				canRun = (replayState.CanRun == true) and (not ctx.buyBtnVisible)
+			else
+				canRun = (not ctx.buyBtnVisible) and hasAccess
+			end
+			if not canRun then
+				return { action = "wait", status = "สถานะ: ซื้อกุญแจสำเร็จ กำลังอัปเดตสิทธิ์ Replay... 🔑" }
+			end
 		elseif type(replayState) == "table" and replayState.CanRun ~= nil then
 			canRun = (replayState.CanRun == true) and (not ctx.buyBtnVisible)
 		else
+			if popAge < 0.8 then
+				return { action = "wait", status = "สถานะ: กำลังรอข้อมูลป๊อปอัป Replay จากเซิร์ฟเวอร์... ⏳" }
+			end
 			canRun = (not ctx.buyBtnVisible) and hasAccess
 		end
 
@@ -903,16 +1011,38 @@ do
 			if not canAfford then
 				return { action = "wait", status = "สถานะ: ไม่มีกุญแจสำหรับ Replay · เงิน Silver ไม่พอซื้อ (ต้องการ 500K) ⚠️" }
 			end
-			if (now - (ac.lastKeyBuyAttempt or 0)) >= 0.4 then
-				return {
-					action = "buyKey",
-					method = "replayBuyKey_pop",
-					remoteArg = "replayBuyKey",
-					keyPrice = keyPrice,
-					status = "สถานะ: กุญแจไม่พอสำหรับ Replay · กำลังซื้อกุญแจในป๊อปอัป (500K Silver)... 🔑",
-				}
+			if ac.memberBuyBlocked then
+				return { action = "wait", status = "สถานะ: ซื้อกุญแจในป๊อปอัป Replay ไม่สำเร็จ · รอระบบพาออก ⏳" }
 			end
-			return { action = "wait", status = "สถานะ: กำลังซื้อกุญแจในป๊อปอัป Replay... 🔑" }
+			local tried = {}
+			if type(ac.triedBuyMethods) == "table" then
+				tried = ac.triedBuyMethods
+			end
+			if not tried["replayBuyKey_pop"] then
+				if (now - (ac.lastKeyBuyAttempt or 0)) >= 0.4 then
+					return {
+						action = "buyKey",
+						method = "replayBuyKey_pop",
+						remoteArg = "replayBuyKey",
+						keyPrice = keyPrice,
+						status = "สถานะ: กุญแจไม่พอสำหรับ Replay · กำลังซื้อกุญแจในป๊อปอัป (500K Silver)... 🔑",
+					}
+				end
+				return { action = "wait", status = "สถานะ: กำลังซื้อกุญแจในป๊อปอัป Replay... 🔑" }
+			elseif not tried["selectBuyKey_pop"] then
+				if (now - (ac.lastKeyBuyAttempt or 0)) >= 0.4 then
+					return {
+						action = "buyKey",
+						method = "selectBuyKey_pop",
+						remoteArg = "selectBuyKey",
+						keyPrice = keyPrice,
+						status = "สถานะ: ลองซื้อกุญแจผ่าน selectBuyKey ในป๊อปอัป (500K Silver)... 🔑",
+					}
+				end
+				return { action = "wait", status = "สถานะ: กำลังซื้อกุญแจในป๊อปอัป Replay... 🔑" }
+			end
+			ac.memberBuyBlocked = true
+			return { action = "wait", status = "สถานะ: ซื้อกุญแจในป๊อปอัป Replay ไม่สำเร็จ · รอระบบพาออก ⏳" }
 		end
 
 		if ctx.acceptVoted then
@@ -15503,9 +15633,14 @@ do
 				STALL.model = nil
 				lastStuckPos = nil
 				stuckAccumTime = 0
+				HUB.LastReplayState = nil
+				HUB.LastDungeonSummary = nil
+				HUB.LastDungeonReward = nil
 				task.wait(2.0)
 				continue
 			end
+
+			HUB.EnsureDungeonListeners()
 
 			local currentDungeonId = workspace:GetAttribute("DungeonId")
 			-- หากเป็น Gold Dungeon ให้ปล่อยให้ Gold Worker ทำงานเฉพาะทาง
@@ -15548,7 +15683,15 @@ do
 			end
 
 			local dState = workspace:GetAttribute("DungeonState")
-			if dState ~= "cleared" then HUB.AfterClear = nil; HUB.DungeonClearHold = false end
+			if dState ~= "cleared" then
+				if HUB.AfterClear ~= nil then
+					HUB.LastReplayState = nil
+					HUB.LastDungeonSummary = nil
+					HUB.LastDungeonReward = nil
+				end
+				HUB.AfterClear = nil
+				HUB.DungeonClearHold = false
+			end
 			local dStep = tonumber(workspace:GetAttribute("DungeonStep")) or 1
 			if dStep ~= lastStep then
 				lastStep = dStep
@@ -15588,6 +15731,8 @@ do
 						buyConfirmedAt = nil,
 						triedBuyMethods = {},
 						leaderBuyBlocked = false,
+						memberBuyBlocked = false,
+						popOpenedAt = nil,
 					}
 					HUB.AfterClear = ac
 				end
@@ -15599,6 +15744,10 @@ do
 				local CHEST_SPAWN_GRACE = 8
 				local graceOver = (os.clock() - ac.startedAt) >= CHEST_SPAWN_GRACE
 				local statusTxt = nil
+				local popPre = nil
+				if afterClear == "replay" then
+					popPre = getReplayPopup()
+				end
 
 				-- ตัวช่วย: มีของที่ตกอยู่ใกล้จุดนี้หรือไม่ (สัตว์เลี้ยงจะเก็บของจากจุดเหล่านี้)
 				local function lootNearby(pos, radius)
@@ -15618,9 +15767,9 @@ do
 					return false
 				end
 
-				-- B) เปิดกล่องจบดันเจี้ยนของตัวเองก่อนทุกอย่าง (BossChest_<UserId> เท่านั้น)
+				-- B) เปิดกล่องจบดันเจี้ยนของตัวเองก่อนทุกอย่าง (BossChest_<UserId> เท่านั้น) — ข้ามทันทีถ้า ReplayPop เปิดแล้ว
 				local chestFinished = true
-				if HUB.Config.dungeonAutoExitChest ~= false then
+				if HUB.Config.dungeonAutoExitChest ~= false and popPre == nil then
 					local chest = findExitChestOf(LocalPlayer.UserId)
 					if not chest then
 						-- ยังไม่เห็นกล่อง: รอให้โผล่/โหลดถึงก่อน · พ้นช่วงรอแล้วยังไม่มี = รอบนี้ไม่ได้รับกล่อง
@@ -15646,9 +15795,11 @@ do
 									sprint = true,
 									emulatePlayerMove = true,
 									shouldAbort = function()
+										local curAfterClear = HUB.Config.dungeonAfterClear or "wait"
 										return not HUB.Alive or not HUB.Config.autoPlayDungeon
 											or workspace:GetAttribute("DungeonState") ~= "cleared"
 											or not chest.Parent or isExitChestOpened(chest)
+											or (curAfterClear == "replay" and getReplayPopup() ~= nil)
 											or (workspace:GetAttribute("DungeonReturnAt") ~= nil and getReplayRemaining() <= REPLAY_MIN_REMAINING + 1.5)
 											or not (HUB.IsDungeonPlace and HUB.IsDungeonPlace())
 									end
@@ -15663,9 +15814,12 @@ do
 				end
 				if lastChance then chestFinished = true end
 
-				-- C) รอให้สัตว์เลี้ยงเก็บของที่ตกหลังเปิดกล่องเสร็จ (หยุดเมื่อไม่มีของใกล้ตัว หรือครบ 8 วิ)
+				local popNow = getReplayPopup()
+				local replayImmediate = (afterClear == "replay") and (popNow ~= nil)
+
+				-- C) รอให้สัตว์เลี้ยงเก็บของที่ตกหลังเปิดกล่องเสร็จ (หยุดเมื่อไม่มีของใกล้ตัว หรือครบ 8 วิ; ข้ามทันทีเมื่อ ReplayPop เปิด)
 				local petFinished = false
-				if chestFinished then
+				if chestFinished and not replayImmediate then
 					ac.chestDoneAt = ac.chestDoneAt or os.clock()
 					petFinished = lastChance or (not lootNearby(root.Position, 45)) or (os.clock() - ac.chestDoneAt >= 8)
 				end
@@ -15673,16 +15827,16 @@ do
 					ac.petFinishedAt = os.clock()
 				end
 
-				-- ระหว่างยังเปิดกล่อง/รอสัตว์เลี้ยง ห้ามให้ Auto Play พาวิ่งไปไหน
-				HUB.DungeonClearHold = not petFinished
+				-- ระหว่างยังเปิดกล่อง/รอสัตว์เลี้ยง ห้ามให้ Auto Play พาวิ่งไปไหน (ปล่อยทันทีเมื่อ ReplayPop เปิด)
+				HUB.DungeonClearHold = not (petFinished or replayImmediate)
 				if HUB.DungeonClearHold and HUB.IsGameAutoActive() then
 					HUB.DisableGameAutoPlay()
 				end
 
 				-- C2) ลงเป็นปาร์ตี้: รอเพื่อนเปิดกล่องเฉพาะเมื่อป๊อปอัป Replay ยังไม่เปิด และจำกัดเวลารอไม่ให้เลยโหวต 15 วิ
-				local popNow = getReplayPopup()
 				local partyPending = {}
-				local canWaitParty = petFinished
+				local canWaitParty = (not replayImmediate)
+					and petFinished
 					and (not lastChance)
 					and (popNow == nil)
 					and (timeLeft > 22)
@@ -15691,23 +15845,28 @@ do
 					partyPending = getPartyChestPending(graceOver, HUB.Config.dungeonAutoExitChest == false)
 				end
 
-				-- D) action หลังจบดัน: ทำเฉพาะเมื่อเปิดกล่องและเก็บของเสร็จแล้ว (หรือ ReplayPop เปิดแล้ว)
-				if petFinished and #partyPending > 0 then
+				-- D) action หลังจบดัน: ทำทันทีเมื่อ ReplayPop เปิดแล้ว (โหมด replay) หรือเมื่อเปิดกล่องและเก็บของเสร็จแล้ว
+				if (not replayImmediate) and petFinished and #partyPending > 0 then
 					statusTxt = string.format("สถานะ: รอเพื่อนเปิดกล่องจบดัน (%s) · เหลือ %d วิ 🎁", table.concat(partyPending, ", "), math.max(0, math.floor(timeLeft)))
-				elseif petFinished then
+				elseif replayImmediate or petFinished then
 					if afterClear == "replay" then
 						local pop = popNow or getReplayPopup()
-						local buyBtn = pop and pop:FindFirstChild("ReplayBuyKey")
-						local acceptBtn = pop and pop:FindFirstChild("ReplayAccept")
+						local buyBtn = pop and pop:FindFirstChild("ReplayBuyKey", true)
+						local acceptBtn = pop and pop:FindFirstChild("ReplayAccept", true)
 						local dungeonId = workspace:GetAttribute("DungeonId")
-						local replayState = HUB.LastReplayState and HUB.LastReplayState.data or nil
-						local hasAccessNow = HUB.HasDungeonAccess(dungeonId)
+						local replayState = nil
+						if type(HUB.LastReplayState) == "table" then
+							replayState = HUB.LastReplayState.data
+						end
+						local hasAccessNow, accessReason = HUB.HasDungeonAccess(dungeonId)
+						local waitUnknownQuota = (accessReason == "need_key_unknown") and (not isClearSummaryOpen()) and ((os.clock() - ac.startedAt) < 1.5)
 						local decision = HUB.EvaluateReplayAction({
 							isLeader = isReplayLeader(),
 							soloRun = #Players:GetPlayers() <= 1,
 							popOpen = (pop ~= nil),
 							clearGuiEnabled = isClearSummaryOpen(),
 							hasAccess = hasAccessNow,
+							waitUnknownQuota = waitUnknownQuota,
 							noKeyDungeon = HUB.IsNoKeyDungeon(dungeonId),
 							autoBuyKey = (HUB.Config.dungeonAutoBuyKey ~= false),
 							silver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0,
@@ -16438,20 +16597,14 @@ end
 
 -- ===== 10.6 Auto Join Dungeon Worker (Key Check & Buy + Party Role + Auto Ready) =====
 do
-	local latestReadyId = nil
-	local latestDungeonInfo = nil
-	local remotes = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
-	local da = remotes and remotes:FindFirstChild("DungeonAction")
-	local dp = remotes and remotes:FindFirstChild("DungeonPrompt")
-
-	if dp and dp:IsA("RemoteEvent") then
-		HUB:AddConnection(dp.OnClientEvent:Connect(function(action, payload)
-			if action == "ready" and type(payload) == "table" and payload.Id then
-				latestReadyId = payload.Id
-			elseif action == "dungeonselect" and type(payload) == "table" then
-				latestDungeonInfo = payload
-			end
-		end))
+	local function getDungeonActionRemote()
+		local rs = game:GetService("ReplicatedStorage")
+		local remotes = rs:FindFirstChild("Remotes")
+		local da = remotes and remotes:FindFirstChild("DungeonAction")
+		if da and da:IsA("RemoteEvent") then
+			return da
+		end
+		return nil
 	end
 
 	local function getDungeonKeyCount()
@@ -16465,20 +16618,25 @@ do
 
 	local function hasFreeRuns(targetId)
 		targetId = targetId or HUB.Config.dungeonSelected or "halloween"
-		if latestDungeonInfo and type(latestDungeonInfo.Dungeons) == "table" then
-			for _, d in ipairs(latestDungeonInfo.Dungeons) do
-				if d.Id == targetId or tostring(d.Id):lower():find(targetId) then
+		local info = nil
+		if type(HUB.LastDungeonSelect) == "table" and type(HUB.LastDungeonSelect.data) == "table" then
+			info = HUB.LastDungeonSelect.data
+		end
+		if info and type(info.Dungeons) == "table" then
+			for _, d in ipairs(info.Dungeons) do
+				if d.Id == targetId or tostring(d.Id):lower():find(targetId, 1, true) then
 					local free = tonumber(d.Free) or 0
 					local used = tonumber(d.Used) or 0
 					if used < free then
-						return true, (free - used)
+						return true, (free - used), true
 					end
+					return false, 0, true
 				end
 			end
-			return false, 0
+			return false, 0, true
 		end
-		-- หากยังไม่มีข้อมูล handshake: คืนค่า false, 0 เพื่อให้ระบบเดินไปเช็คที่หน้า GateKeeper เสมอ
-		return false, 0
+		-- หากยังไม่มีข้อมูล handshake: คืน hasHandshake = false เพื่อให้ระบบไปดึงข้อมูลจาก GateKeeper ก่อนตัดสินใจ
+		return false, 0, false
 	end
 
 	local function findGateKeeperPrompt()
@@ -16517,6 +16675,7 @@ do
 
 		local beforeKeys = HUB.GetDungeonKeyCount()
 		local sent = false
+		local da = getDungeonActionRemote()
 		-- ยิงเพียง 1 ช่องทางต่อ 1 ครั้ง เพื่อป้องกันการส่งคำสั่งซื้อเบิ้ลเมื่อเปิดหน้า HuntDungeonSelect อยู่
 		if da then
 			da:FireServer("selectBuyKey")
@@ -16574,20 +16733,26 @@ do
 		local ldw = pg and pg:FindFirstChild("LumiDungeonWindows")
 		local rc = ldw and ldw:FindFirstChild("ReadyCheck")
 		local pressed = false
+		local da = getDungeonActionRemote()
+		local readyId = HUB.LastReadyId
 
 		-- ช่องทางหลัก 1: ส่งคำสั่งตรงผ่าน RemoteEvent da:ready เมื่อมี readyId (100% Guaranteed)
-		if latestReadyId and da then
-			da:FireServer("ready", latestReadyId, true)
+		if readyId and da then
+			da:FireServer("ready", readyId, true)
 			pressed = true
 		end
 
 		-- ช่องทางเสริม 2: กดปุ่ม "Ready" สีเขียวบน GUI (เฉพาะปุ่มที่มี Label ข้อความว่า "Ready" เท่านั้น ป้องกันกดโดน Not Ready)
 		if rc and rc.Visible then
+			local gc = EXEC.getconnections or rawget(EXEC.env, "getconnections")
 			for _, descendant in ipairs(rc:GetDescendants()) do
 				if (descendant:IsA("TextButton") or descendant:IsA("ImageButton")) and descendant.Name == "KitButton" then
 					local lbl = descendant:FindFirstChild("Label") or descendant:FindFirstChildWhichIsA("TextLabel")
 					if lbl and lbl.Text == "Ready" then
-						local conns = getconnections and getconnections(descendant.Activated)
+						local conns = nil
+						if type(gc) == "function" then
+							conns = gc(descendant.Activated)
+						end
 						if conns and #conns > 0 then
 							for _, c in ipairs(conns) do
 								c:Fire()
@@ -16629,10 +16794,13 @@ do
 				continue
 			end
 
-			-- หากอยู่ในดันเจี้ยนแล้ว: พักรอและส่งต่อให้ Auto Play Dungeon
+			HUB.EnsureDungeonListeners()
+
+			-- หากอยู่ในดันเจี้ยนแล้ว: พักรอและส่งต่อให้ Auto Play Dungeon (ล้างแคช dungeonselect เก่าไว้รับค่าใหม่ตอนกลับเมือง)
 			local inDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
 			if inDungeon then
 				lastDungeonStatus = true
+				HUB.LastDungeonSelect = nil
 				task.wait(2.5)
 				continue
 			end
@@ -16641,6 +16809,7 @@ do
 			if lastDungeonStatus == true then
 				lastDungeonStatus = false
 				lobbyReturnTime = tick()
+				HUB.LastDungeonSelect = nil
 			end
 
 			local char = LocalPlayer.Character
@@ -16657,6 +16826,19 @@ do
 			local rc = ldw and ldw:FindFirstChild("ReadyCheck")
 			if rc and rc.Visible then
 				if HUB.Config.dungeonAutoReady ~= false then
+					local targetDungeon = HUB.Config.dungeonSelected or "halloween"
+					local isGold = (targetDungeon == "gold")
+					local keyCount = getDungeonKeyCount()
+					local freeAvailable, _, hasHandshake = hasFreeRuns(targetDungeon)
+					local keyPrice = HUB.GetDungeonKeyPrice()
+					local silver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
+					if (not isGold) and hasHandshake and (not freeAvailable) and keyCount <= 0 and HUB.Config.dungeonAutoBuyKey ~= false and silver >= keyPrice and (tick() - lastBuyAttempt >= 3.0) then
+						lastBuyAttempt = tick()
+						if HUB.UI.JoinDungeonStatusLabel then
+							HUB.UI.JoinDungeonStatusLabel.Text = "สถานะ: ReadyCheck ขึ้นและกุญแจหมด -> กำลังซื้อกุญแจก่อนกด Ready... 🔑"
+						end
+						buyDungeonKeySafe()
+					end
 					if tick() - lastReadyCheck >= 1.0 then
 						lastReadyCheck = tick()
 						local ok = pressDungeonReady()
@@ -16691,14 +16873,18 @@ do
 			local isGold = (targetDungeon == "gold")
 			local isLeader, inParty, partyData = getPartyRoleInfo()
 			local keyCount = getDungeonKeyCount()
-			local freeAvailable, freeCount = hasFreeRuns(targetDungeon)
+			local freeAvailable, freeCount, hasHandshake = hasFreeRuns(targetDungeon)
 			local silver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
+			local keyPrice = HUB.GetDungeonKeyPrice()
 			local diff = HUB.Config.dungeonDifficulty or "easy"
-			local diffLabel = (diff == "normal") and "Hard" or "Easy"
+			local diffLabel = "Easy"
+			if diff == "normal" then
+				diffLabel = "Hard"
+			end
 			local gateDist = (root.Position - DUNGEON_GATE_POS).Magnitude
 
 			-- หากเลือก Gold Dungeon และรอบฟรีหมดแล้ว (และมีข้อมูล handshake แล้ว) ให้แจ้งเตือนและพักรอ
-			if isGold and latestDungeonInfo and not freeAvailable then
+			if isGold and hasHandshake and not freeAvailable then
 				if HUB.UI.JoinDungeonStatusLabel then
 					HUB.UI.JoinDungeonStatusLabel.Text = "สถานะ: รอบฟรี Gold Dungeon ครบแล้ว (3/3 รอบ) · พักรอ..."
 				end
@@ -16711,7 +16897,12 @@ do
 			if gateDist > 8.0 then
 				if not HUB.Navigating then
 					if HUB.UI.JoinDungeonStatusLabel then
-						local reason = isGold and "ไปเข้า Gold Dungeon" or ((keyCount <= 0 and not freeAvailable) and "ไปซื้อกุญแจและเข้าดันเจี้ยน" or "ไปเข้าดันเจี้ยน")
+						local reason = "ไปเข้าดันเจี้ยน"
+						if isGold then
+							reason = "ไปเข้า Gold Dungeon"
+						elseif keyCount <= 0 and (not hasHandshake or not freeAvailable) then
+							reason = "ไปเช็คสิทธิ์และซื้อกุญแจ"
+						end
 						HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: เดินทางไปหา GateKeeper เพื่อ%s (ห่าง %.0fm)... 🏃", reason, gateDist / 3.57)
 					end
 					HUB.NavigatePath(DUNGEON_GATE_POS, {
@@ -16732,32 +16923,68 @@ do
 			end
 
 			-- 4. เมื่ออยู่ในระยะหน้า NPC GateKeeper (gateDist <= 8.0 studs):
-			-- ก) ส่ง Handshake ผ่าน ProximityPrompt ก่อนเสมอเพื่อเปิดเซสชันและดึงข้อมูลรอบฟรี/สต็อกสด
-			if tick() - lastPromptTrigger >= 3.0 then
+			-- ก) ส่ง Handshake ผ่าน ProximityPrompt เฉพาะเมื่อยังไม่มีข้อมูลสด (หรือหัวตี้เตรียมเปิดห้อง) แล้วปิดหน้าต่างไม่ให้บังจอ
+			local needHandshake = not hasHandshake
+			if isLeader and (not needHandshake) and (type(HUB.LastDungeonSelect) ~= "table" or (os.clock() - (HUB.LastDungeonSelect.receivedAt or 0)) > 10.0) then
+				needHandshake = true
+			end
+			if needHandshake and (tick() - lastPromptTrigger >= 3.0) then
 				lastPromptTrigger = tick()
 				local prompt = findGateKeeperPrompt()
 				if prompt then
+					local triggerTime = os.clock()
 					triggerPromptLocal(prompt)
-					task.wait(0.35)
+					local waitStart = os.clock()
+					while (os.clock() - waitStart) < 1.0 do
+						if type(HUB.LastDungeonSelect) == "table" and (HUB.LastDungeonSelect.receivedAt or 0) >= triggerTime then
+							break
+						end
+						task.wait(0.1)
+					end
+					closeGamePage("HuntDungeonSelect")
+				end
+			else
+				local hds = pg and pg:FindFirstChild("HuntDungeonSelect")
+				if hds and hds.Enabled then
+					closeGamePage("HuntDungeonSelect")
 				end
 			end
 
 			-- รีเฟรชข้อมูลล่าสุดหลัง Handshake
 			keyCount = getDungeonKeyCount()
-			freeAvailable, freeCount = hasFreeRuns(targetDungeon)
+			freeAvailable, freeCount, hasHandshake = hasFreeRuns(targetDungeon)
 			silver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
+			keyPrice = HUB.GetDungeonKeyPrice()
+
+			if not hasHandshake then
+				if HUB.UI.JoinDungeonStatusLabel then
+					HUB.UI.JoinDungeonStatusLabel.Text = "สถานะ: กำลังดึงข้อมูลสิทธิ์รอบฟรีจาก GateKeeper... ⏳"
+				end
+				task.wait(0.5)
+				continue
+			end
+
+			if isGold and not freeAvailable then
+				if HUB.UI.JoinDungeonStatusLabel then
+					HUB.UI.JoinDungeonStatusLabel.Text = "สถานะ: รอบฟรี Gold Dungeon ครบแล้ว (3/3 รอบ) · พักรอ..."
+				end
+				task.wait(2.5)
+				continue
+			end
 
 			-- ข) ตรวจสอบและดำเนินการ "ซื้อกุญแจอัตโนมัติ" (เฉพาะ Crypt เท่านั้น — Gold Dungeon ฟรี 100% ไม่ต้องใช้กุญแจ)
 			if not isGold and not freeAvailable and keyCount <= 0 then
 				if HUB.Config.dungeonAutoBuyKey ~= false then
-					if silver >= 500000 then
+					if silver >= keyPrice then
 						if tick() - lastBuyAttempt >= 2.5 then
 							lastBuyAttempt = tick()
 							if HUB.UI.JoinDungeonStatusLabel then
-								HUB.UI.JoinDungeonStatusLabel.Text = "สถานะ: กุญแจไม่พอ -> กำลังซื้อกุญแจดันเจี้ยนที่ GateKeeper (500K Silver)... 🔑"
+								HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: กุญแจไม่พอ -> กำลังซื้อกุญแจดันเจี้ยนที่ GateKeeper (%s Silver)... 🔑", formatComma(keyPrice))
 							end
-							buyDungeonKeySafe()
-							task.wait(1.2)
+							local okBuy = buyDungeonKeySafe()
+							if not okBuy then
+								task.wait(0.5)
+							end
 							-- ตรวจสอบผลการซื้อกุญแจจริงจาก ItemsJson
 							keyCount = getDungeonKeyCount()
 							if keyCount > 0 then
@@ -16765,12 +16992,13 @@ do
 									HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: ซื้อกุญแจสำเร็จ! (มีกุญแจ x%d) กำลังเตรียมเข้าดันเจี้ยน... ✨", keyCount)
 								end
 							end
+							closeGamePage("HuntDungeonSelect")
 						end
 						task.wait(0.5)
 						continue
 					else
 						if HUB.UI.JoinDungeonStatusLabel then
-							HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: กุญแจไม่พอ และ Silver ไม่พอซื้อ (มี %s / 500K)", formatComma(silver))
+							HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: กุญแจไม่พอ และ Silver ไม่พอซื้อ (มี %s / %s)", formatComma(silver), formatComma(keyPrice))
 						end
 						task.wait(2.5)
 						continue
@@ -16788,8 +17016,16 @@ do
 			if not isLeader then
 				-- กรณีเป็นสมาชิกปาร์ตี้ (Member): มีกุญแจ/รอบฟรีพร้อมแล้ว -> รอหัวหน้ากดสร้างห้อง
 				if HUB.UI.JoinDungeonStatusLabel then
-					local partyCount = partyData and partyData.Members and #partyData.Members or "?"
-					local keyMsg = isGold and "รอบฟรีพร้อม" or string.format("กุญแจ x%d", keyCount)
+					local partyCount = "?"
+					if partyData and partyData.Members then
+						partyCount = #partyData.Members
+					end
+					local keyMsg = string.format("กุญแจ x%d", keyCount)
+					if isGold then
+						keyMsg = "รอบฟรีพร้อม"
+					elseif freeAvailable then
+						keyMsg = string.format("รอบฟรี x%d", freeCount)
+					end
 					HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: สมาชิกปาร์ตี้ (%s คน) · %s · รอหัวหน้ากดเริ่ม... ⏳", tostring(partyCount), keyMsg)
 				end
 				task.wait(1.0)
@@ -16798,12 +17034,18 @@ do
 
 			-- ง) กรณีเป็นหัวหน้าปาร์ตี้ หรือเล่นคนเดียว (Solo Leader): สั่งสร้างห้องเริ่มเล่น!
 			-- ★ Lobby Join Delay Guard: หน่วงเวลารอตามที่ตั้งค่าไว้ (0วิ / 10วิ / 20วิ) แยกตามดันเจี้ยน เพื่อรอสมาชิกโหลดครบ
-			local delaySec = isGold and (tonumber(HUB.Config.dungeonGoldJoinDelay) or 10) or (tonumber(HUB.Config.dungeonCryptJoinDelay) or 10)
+			local delaySec = tonumber(HUB.Config.dungeonCryptJoinDelay) or 10
+			if isGold then
+				delaySec = tonumber(HUB.Config.dungeonGoldJoinDelay) or 10
+			end
 			local elapsedLobby = tick() - lobbyReturnTime
 			if delaySec > 0 and elapsedLobby < delaySec then
 				local waitLeft = math.ceil(delaySec - elapsedLobby)
 				if HUB.UI.JoinDungeonStatusLabel then
-					local dungLabel = isGold and "Gold Dungeon" or "ดันเจี้ยน"
+					local dungLabel = "ดันเจี้ยน"
+					if isGold then
+						dungLabel = "Gold Dungeon"
+					end
 					HUB.UI.JoinDungeonStatusLabel.Text = string.format("สถานะ: กลับถึง Lobby · รอสมาชิกโหลดครบอีก %d วิ ก่อนเปิดห้อง %s... ⏳", waitLeft, dungLabel)
 				end
 				task.wait(1.0)
@@ -16812,19 +17054,30 @@ do
 
 			if tick() - lastEnterAttempt >= 3.5 then
 				lastEnterAttempt = tick()
+				local da = getDungeonActionRemote()
 				if da then
-					local enterTarget = isGold and "gold" or "halloween"
-					local enterDiff = isGold and "easy" or diff
+					local enterTarget = "halloween"
+					local enterDiff = diff
+					if isGold then
+						enterTarget = "gold"
+						enterDiff = "easy"
+					end
 					da:FireServer("selectEnter", enterTarget, enterDiff)
 					HUB.Stats.dungeonRoomsEntered = (HUB.Stats.dungeonRoomsEntered or 0) + 1
 					if not inParty then
 						if HUB.UI.JoinDungeonStatusLabel then
-							local msg = isGold and "สถานะ: สั่งเข้า Gold Dungeon แบบ Solo สำเร็จ! รอนับถอยหลัง... 💰" or string.format("สถานะ: สั่งเข้าแบบ Solo (%s) สำเร็จ! รอนับถอยหลังเข้าดันเจี้ยน... ⚔️", diffLabel)
+							local msg = string.format("สถานะ: สั่งเข้าแบบ Solo (%s) สำเร็จ! รอนับถอยหลังเข้าดันเจี้ยน... ⚔️", diffLabel)
+							if isGold then
+								msg = "สถานะ: สั่งเข้า Gold Dungeon แบบ Solo สำเร็จ! รอนับถอยหลัง... 💰"
+							end
 							HUB.UI.JoinDungeonStatusLabel.Text = msg
 						end
 					else
 						if HUB.UI.JoinDungeonStatusLabel then
-							local msg = isGold and "สถานะ: สั่งเข้า Gold Dungeon แล้ว! รอ Ready... 💰" or string.format("สถานะ: สั่งเข้าดันเจี้ยน (%s) แล้ว! รอ Ready... ⚔️", diffLabel)
+							local msg = string.format("สถานะ: สั่งเข้าดันเจี้ยน (%s) แล้ว! รอ Ready... ⚔️", diffLabel)
+							if isGold then
+								msg = "สถานะ: สั่งเข้า Gold Dungeon แล้ว! รอ Ready... 💰"
+							end
 							HUB.UI.JoinDungeonStatusLabel.Text = msg
 						end
 					end
