@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.11)
+-- Hunting Together Hub (v10.12)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.11"
+local VERSION = "10.12"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -585,16 +585,343 @@ end
 -- นอกดันเจี้ยนถือว่าเริ่มแล้วเสมอ
 do
 	local _dungeonData = nil
-	local function getDungeonDef(id)
-		if not _dungeonData then
-			local shared = game:GetService("ReplicatedStorage"):FindFirstChild("Shared")
-			local mod = shared and shared:FindFirstChild("DungeonData")
-			if mod then
-				local ok, res = pcall(require, mod)
-				if ok and type(res) == "table" and type(res.Dungeons) == "table" then _dungeonData = res end
+	local function getDungeonData()
+		if _dungeonData then return _dungeonData end
+		local rs = game:GetService("ReplicatedStorage")
+		local shared = rs:FindFirstChild("Shared")
+		local mod = shared and shared:FindFirstChild("DungeonData")
+		if mod then
+			local ok, res = pcall(require, mod)
+			if ok and type(res) == "table" and type(res.Dungeons) == "table" then
+				_dungeonData = res
 			end
 		end
-		return _dungeonData and id and _dungeonData.Dungeons[id] or nil
+		return _dungeonData
+	end
+
+	local function getDungeonDef(id)
+		local data = getDungeonData()
+		if data and id then
+			return data.Dungeons[id]
+		end
+		return nil
+	end
+
+	function HUB.GetDungeonData()
+		return getDungeonData()
+	end
+
+	function HUB.GetDungeonDef(id)
+		return getDungeonDef(id)
+	end
+
+	function HUB.GetDungeonKeyPrice()
+		local data = getDungeonData()
+		local price = data and tonumber(data.KeyPrice)
+		if price and price > 0 then
+			return price
+		end
+		return 500000
+	end
+
+	function HUB.IsNoKeyDungeon(id)
+		local def = getDungeonDef(id)
+		return def ~= nil and def.NoKey == true
+	end
+
+	function HUB.IsFreeEntryGame()
+		local data = getDungeonData()
+		local freeMap = data and data.FreeEntryGames
+		return type(freeMap) == "table" and freeMap[game.GameId] == true
+	end
+
+	function HUB.GetDungeonDailyFreeCap(id)
+		local def = getDungeonDef(id)
+		local cap = def and tonumber(def.DailyRewards)
+		if cap and cap >= 0 then
+			return cap
+		end
+		if id == "gold" then
+			return 3
+		end
+		return 2
+	end
+
+	function HUB.GetDungeonKeyCount()
+		local raw = LocalPlayer:GetAttribute("ItemsJson") or "{}"
+		local ok, items = pcall(HttpService.JSONDecode, HttpService, raw)
+		if ok and type(items) == "table" then
+			return tonumber(items.dungeon_key) or 0
+		end
+		return 0
+	end
+
+	function HUB.HasDungeonAccess(id)
+		if HUB.IsFreeEntryGame() then
+			return true, "free_game"
+		end
+		local runs = tonumber(LocalPlayer:GetAttribute("DungeonRunsToday")) or 0
+		if runs < HUB.GetDungeonDailyFreeCap(id) then
+			return true, "free_run"
+		end
+		if HUB.IsNoKeyDungeon(id) then
+			return false, "daily_limit_nokey"
+		end
+		if HUB.GetDungeonKeyCount() >= 1 then
+			return true, "key"
+		end
+		return false, "need_key"
+	end
+
+	-- เชื่อมต่อ Listener แบบ passive เพื่ออ่านสถานะ Replay และคำเตือนจากเซิร์ฟเวอร์แบบ Real-time
+	function HUB.EnsureDungeonListeners()
+		local rs = game:GetService("ReplicatedStorage")
+		local remotes = rs:FindFirstChild("Remotes")
+		if not remotes then return end
+
+		if not HUB._dungeonPromptBound then
+			local dp = remotes:FindFirstChild("DungeonPrompt")
+			if dp and dp:IsA("RemoteEvent") then
+				HUB._dungeonPromptBound = true
+				HUB:AddConnection(dp.OnClientEvent:Connect(function(a1, a2)
+					if a1 == "replay" then
+						if type(a2) == "table" then
+							HUB.LastReplayState = { data = a2, receivedAt = os.clock() }
+						else
+							HUB.LastReplayState = nil
+						end
+					elseif a1 == "teleporting" then
+						HUB.LastReplayState = nil
+					end
+				end))
+			end
+		end
+
+		if not HUB._dungeonNotifyBound then
+			local nf = remotes:FindFirstChild("Notify")
+			if nf and nf:IsA("RemoteEvent") then
+				HUB._dungeonNotifyBound = true
+				HUB:AddConnection(nf.OnClientEvent:Connect(function(msg, kind)
+					if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
+						HUB.LastDungeonNotify = {
+							text = tostring(msg or ""),
+							kind = tostring(kind or ""),
+							at = os.clock(),
+						}
+					end
+				end))
+			end
+		end
+	end
+	pcall(HUB.EnsureDungeonListeners)
+
+	-- ตรวจสอบผลลัพธ์คำสั่งซื้อกุญแจที่ยิงค้างไว้ (Side-Effect Lock ป้องกันการซื้อเบิ้ล 2 ดอก)
+	function HUB.ReconcileDungeonKeyBuy(ac, keyCount, silver, replayState, buyBtnVisible, isLeader, now)
+		if type(ac) ~= "table" or not ac.buyInFlight then
+			return nil
+		end
+		local flight = ac.buyInFlight
+		local keyGained = keyCount > (flight.beforeKeys or 0)
+		local silverSpent = ((flight.beforeSilver or 0) - silver) >= ((flight.keyPrice or 500000) * 0.9)
+		local serverCanRunNow = (not isLeader)
+			and (type(replayState) == "table")
+			and (replayState.CanRun == true)
+			and (not buyBtnVisible)
+
+		if keyGained or silverSpent or serverCanRunNow then
+			local method = flight.method
+			ac.buyInFlight = nil
+			ac.buyConfirmedAt = now
+			ac.replayStarts = 0
+			ac.leaderBuyBlocked = false
+			if method == "replayBuyKey" or method == "selectBuyKey" then
+				HUB.VerifiedDungeonBuyMethod = method
+			end
+			HUB.Stats.dungeonKeysBought = (HUB.Stats.dungeonKeysBought or 0) + 1
+			return "confirmed", method
+		end
+
+		if (now - (flight.sentAt or 0)) < 1.8 then
+			return "pending", flight.method
+		end
+
+		if type(ac.triedBuyMethods) ~= "table" then
+			ac.triedBuyMethods = {}
+		end
+		if flight.method then
+			ac.triedBuyMethods[flight.method] = true
+		end
+		ac.buyInFlight = nil
+		return "timeout", flight.method
+	end
+
+	-- Pure Decision Engine สำหรับ Replay & Key Auto-Purchase (Solo / หัวตี้ / สมาชิกตี้)
+	function HUB.EvaluateReplayAction(ctx)
+		local ac = ctx.ac or {}
+		local now = ctx.now or os.clock()
+		local replayState = ctx.replayState
+		local popOpen = (ctx.popOpen == true)
+		local hasAccess = (ctx.hasAccess == true)
+		local isNoKey = (ctx.noKeyDungeon == true) or (type(replayState) == "table" and replayState.NoKey == true)
+		local keyPrice = tonumber(type(replayState) == "table" and replayState.KeyPrice) or tonumber(ctx.keyPrice) or 500000
+		local silver = tonumber(ctx.silver) or 0
+		local keyCount = tonumber(ctx.keyCount) or 0
+
+		local reconcileState, reconcileMethod = HUB.ReconcileDungeonKeyBuy(
+			ac, keyCount, silver, replayState, ctx.buyBtnVisible == true, ctx.isLeader == true, now
+		)
+		if reconcileState == "pending" then
+			return {
+				action = "wait",
+				status = "สถานะ: กำลังรอเซิร์ฟเวอร์ยืนยันการซื้อกุญแจ (500K Silver)... 🔑",
+				reconcile = reconcileState,
+				method = reconcileMethod,
+			}
+		end
+
+		if ctx.isLeader then
+			if popOpen then
+				-- กรณีเปิด ReplayPop เพื่อปลดล็อกเซสชัน "replay" บนเซิร์ฟเวอร์ (S3 fallback) แล้วหัวตี้ยังไม่มีกุญแจ
+				if (not hasAccess) and (not isNoKey) and ctx.autoBuyKey and (silver >= keyPrice) and (not ac.leaderBuyBlocked) then
+					local tried = type(ac.triedBuyMethods) == "table" and ac.triedBuyMethods or {}
+					if not tried["replayBuyKey_inpop"] then
+						return {
+							action = "buyKey",
+							method = "replayBuyKey_inpop",
+							remoteArg = "replayBuyKey",
+							keyPrice = keyPrice,
+							status = "สถานะ: เปิดหน้าต่าง Replay แล้ว · กำลังซื้อกุญแจในดัน (500K Silver)... 🔑",
+						}
+					end
+				end
+				if ctx.soloRun then
+					return { action = "wait", status = "สถานะ: กด Replay แล้ว รอเริ่มรอบใหม่ 🔁" }
+				end
+				return { action = "wait", status = "สถานะ: ขอ Replay แล้ว รอสมาชิกกด Accept 🔁" }
+			end
+
+			if not hasAccess then
+				if (ac.buyConfirmedAt ~= nil) and ((now - ac.buyConfirmedAt) < 2.0) then
+					return { action = "wait", status = "สถานะ: ซื้อกุญแจสำเร็จ กำลังอัปเดตสิทธิ์ในกระเป๋า... 🔑" }
+				end
+				if isNoKey then
+					return { action = "wait", status = "สถานะ: ไม่มีรอบเหลือวันนี้สำหรับดันเจี้ยนนี้ ⏳" }
+				end
+				if not ctx.autoBuyKey then
+					return { action = "wait", status = "สถานะ: ไม่มีรอบฟรี/กุญแจสำหรับ Replay · ปิดซื้อกุญแจอัตโนมัติอยู่ ⏳" }
+				end
+				if silver < keyPrice then
+					return { action = "wait", status = "สถานะ: ไม่มีกุญแจสำหรับ Replay · เงิน Silver ไม่พอซื้อ (ต้องการ 500K) ⚠️" }
+				end
+				if ac.leaderBuyBlocked then
+					return { action = "wait", status = "สถานะ: เซิร์ฟเวอร์ไม่อนุญาตให้หัวตี้/เดี่ยวซื้อกุญแจในดัน · รอระบบพาออก ⏳" }
+				end
+
+				local tried = type(ac.triedBuyMethods) == "table" and ac.triedBuyMethods or {}
+				local candidates = {}
+				if ctx.preferredMethod == "replayBuyKey" or ctx.preferredMethod == "selectBuyKey" then
+					table.insert(candidates, { method = ctx.preferredMethod, remoteArg = ctx.preferredMethod })
+				end
+				table.insert(candidates, { method = "replayBuyKey", remoteArg = "replayBuyKey" })
+				table.insert(candidates, { method = "selectBuyKey", remoteArg = "selectBuyKey" })
+
+				for _, cand in ipairs(candidates) do
+					if not tried[cand.method] then
+						return {
+							action = "buyKey",
+							method = cand.method,
+							remoteArg = cand.remoteArg,
+							keyPrice = keyPrice,
+							status = "สถานะ: ไม่มีรอบฟรี/กุญแจสำหรับ Replay · กำลังซื้อกุญแจในดัน (500K Silver)... 🔑",
+						}
+					end
+				end
+
+				-- Fallback ขั้น 3: ลองเปิด Replay session ด้วย replayStart 1 ครั้ง เผื่อ Server ต้องการ u3606 ก่อน replayBuyKey
+				if (not tried["replayStart_for_buy"]) and (ctx.remaining > ctx.minRemaining) then
+					return {
+						action = "replayStartForBuy",
+						method = "replayStart_for_buy",
+						status = "สถานะ: กำลังเปิดหน้าต่าง Replay เพื่อซื้อกุญแจในดัน... 🔑",
+					}
+				end
+
+				ac.leaderBuyBlocked = true
+				return {
+					action = "wait",
+					status = "สถานะ: เซิร์ฟเวอร์ไม่อนุญาตให้หัวตี้/เดี่ยวซื้อกุญแจในดัน · รอระบบพาออก ⏳",
+				}
+			end
+
+			-- หัวตี้/Solo มีสิทธิ์แล้ว -> รอ ClearUI พร้อม (หรือ grace 5 วิ / ใกล้หมดเวลา) แล้วกด replayStart
+			local readyForReplay = ctx.clearGuiEnabled or ((ctx.timeSincePetDone or 0) >= 5.0) or (ctx.remaining <= 20.0)
+			if not readyForReplay then
+				return { action = "wait", status = "สถานะ: รอหน้าต่างสรุปผลดันเจี้ยนพร้อมก่อนกด Replay... ⏳" }
+			end
+			if ctx.remaining <= ctx.minRemaining then
+				return {
+					action = "wait",
+					status = string.format("สถานะ: Replay ไม่ทัน (เหลือ %d วิ) รอให้ดันพาออก ⏳", math.max(0, math.floor(ctx.remaining))),
+				}
+			end
+			if (ac.replayStarts or 0) >= 3 then
+				return { action = "wait", status = "สถานะ: ขอ Replay ครบ 3 ครั้งแล้วไม่สำเร็จ รอให้ดันพาออก ⏳" }
+			end
+			if (now - (ac.lastReplayStart or 0)) >= 3.0 then
+				return { action = "replayStart", status = "สถานะ: กำลังกด Replay... 🔁" }
+			end
+			return { action = "wait", status = "สถานะ: กำลังกด Replay... 🔁" }
+		end
+
+		-- ===== ฝั่งสมาชิกปาร์ตี้ (isLeader == false) =====
+		if not popOpen then
+			if hasAccess then
+				return { action = "wait", status = "สถานะ: รอหัวตี้กด Replay (ถ้าไม่กดจะรอให้ดันพาออก) ⏳" }
+			end
+			return { action = "wait", status = "สถานะ: รอหัวตี้กด Replay (เมื่อป๊อปอัปเปิดจะซื้อกุญแจให้อัตโนมัติ) ⏳" }
+		end
+
+		local justConfirmedBuy = (ac.buyConfirmedAt ~= nil) and ((now - ac.buyConfirmedAt) < 2.5) and hasAccess
+		local canRun = false
+		if justConfirmedBuy then
+			canRun = true
+		elseif type(replayState) == "table" and replayState.CanRun ~= nil then
+			canRun = (replayState.CanRun == true) and (not ctx.buyBtnVisible)
+		else
+			canRun = (not ctx.buyBtnVisible) and hasAccess
+		end
+
+		if isNoKey and not canRun then
+			return { action = "wait", status = "สถานะ: ไม่มีรอบเหลือวันนี้ (ดันเจี้ยนนี้ไม่ใช้กุญแจ) ⚠️" }
+		end
+
+		if not canRun then
+			local canAfford = (ctx.buyBtnCanBuy == true) or (silver >= keyPrice)
+			if not ctx.autoBuyKey then
+				return { action = "wait", status = "สถานะ: ไม่มีรอบฟรี/กุญแจสำหรับ Replay · ปิดซื้อกุญแจอัตโนมัติอยู่ ⏳" }
+			end
+			if not canAfford then
+				return { action = "wait", status = "สถานะ: ไม่มีกุญแจสำหรับ Replay · เงิน Silver ไม่พอซื้อ (ต้องการ 500K) ⚠️" }
+			end
+			if (now - (ac.lastKeyBuyAttempt or 0)) >= 0.4 then
+				return {
+					action = "buyKey",
+					method = "replayBuyKey_pop",
+					remoteArg = "replayBuyKey",
+					keyPrice = keyPrice,
+					status = "สถานะ: กุญแจไม่พอสำหรับ Replay · กำลังซื้อกุญแจในป๊อปอัป (500K Silver)... 🔑",
+				}
+			end
+			return { action = "wait", status = "สถานะ: กำลังซื้อกุญแจในป๊อปอัป Replay... 🔑" }
+		end
+
+		if ctx.acceptVoted then
+			return { action = "wait", status = "สถานะ: กด Accept Replay แล้ว รอหัวตี้เริ่มรอบใหม่ 🔁" }
+		end
+		if (now - (ac.lastReplayVote or 0)) >= 1.2 then
+			return { action = "replayVote", status = "สถานะ: กำลังกด Accept Replay ที่หัวตี้ขอ... 🔁" }
+		end
+		return { action = "wait", status = "สถานะ: กำลังกด Accept Replay ที่หัวตี้ขอ... 🔁" }
 	end
 
 	local function hasLiveDungeonMonster()
@@ -14610,18 +14937,13 @@ do
 		return workspace:GetAttribute("DungeonReplayLeader") == LocalPlayer.UserId
 	end
 
-	local function hasDungeonAccess()
-		local runs = tonumber(LocalPlayer:GetAttribute("DungeonRunsToday")) or 0
-		if runs < 2 then return true end
-		local raw = LocalPlayer:GetAttribute("ItemsJson") or "{}"
-		local ok, items = pcall(HttpService.JSONDecode, HttpService, raw)
-		if ok and type(items) == "table" and (tonumber(items.dungeon_key) or 0) >= 1 then
-			return true
-		end
-		return false
+	local function isClearSummaryOpen()
+		local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		local clr = pg and pg:FindFirstChild("LumiDungeonClear")
+		return clr ~= nil and clr.Enabled == true
 	end
 
-	-- ป๊อปอัป "X wants to replay!" ที่สมาชิกที่ไม่ใช่หัวหน้าเห็น (ต้องทั้ง ScreenGui เปิดอยู่และ ReplayPop มองเห็น)
+	-- ป๊อปอัป "X wants to replay!" (LumiDungeonReplay.Enabled + ReplayPop.Visible)
 	local function getReplayPopup()
 		local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
 		local gui = pg and pg:FindFirstChild("LumiDungeonReplay")
@@ -15247,10 +15569,26 @@ do
 
 			-- 2. เมื่อเคลียร์ดันเจี้ยนสำเร็จ (State == 'cleared'): เปิดกล่องจบ → รอสัตว์เลี้ยงเก็บของ → ค่อยทำ action หลังจบ (Replay / Leave / รอ)
 			if dState == "cleared" then
+				HUB.EnsureDungeonListeners()
 				local afterClear = HUB.Config.dungeonAfterClear or "wait"
 				local ac = HUB.AfterClear
 				if not ac then
-					ac = { leaveFired = false, replayStarts = 0, lastReplayStart = 0, lastReplayVote = 0, lastReplayBuy = 0, lastChestTrigger = 0, chestDoneAt = nil, startedAt = os.clock(), navCancelled = false }
+					ac = {
+						leaveFired = false,
+						replayStarts = 0,
+						lastReplayStart = 0,
+						lastReplayVote = 0,
+						lastKeyBuyAttempt = 0,
+						lastChestTrigger = 0,
+						chestDoneAt = nil,
+						petFinishedAt = nil,
+						startedAt = os.clock(),
+						navCancelled = false,
+						buyInFlight = nil,
+						buyConfirmedAt = nil,
+						triedBuyMethods = {},
+						leaderBuyBlocked = false,
+					}
 					HUB.AfterClear = ac
 				end
 				local remaining = getReplayRemaining()
@@ -15311,7 +15649,7 @@ do
 										return not HUB.Alive or not HUB.Config.autoPlayDungeon
 											or workspace:GetAttribute("DungeonState") ~= "cleared"
 											or not chest.Parent or isExitChestOpened(chest)
-										or (workspace:GetAttribute("DungeonReturnAt") ~= nil and getReplayRemaining() <= REPLAY_MIN_REMAINING + 1.5)
+											or (workspace:GetAttribute("DungeonReturnAt") ~= nil and getReplayRemaining() <= REPLAY_MIN_REMAINING + 1.5)
 											or not (HUB.IsDungeonPlace and HUB.IsDungeonPlace())
 									end
 								})
@@ -15331,6 +15669,9 @@ do
 					ac.chestDoneAt = ac.chestDoneAt or os.clock()
 					petFinished = lastChance or (not lootNearby(root.Position, 45)) or (os.clock() - ac.chestDoneAt >= 8)
 				end
+				if petFinished and not ac.petFinishedAt then
+					ac.petFinishedAt = os.clock()
+				end
 
 				-- ระหว่างยังเปิดกล่อง/รอสัตว์เลี้ยง ห้ามให้ Auto Play พาวิ่งไปไหน
 				HUB.DungeonClearHold = not petFinished
@@ -15338,75 +15679,82 @@ do
 					HUB.DisableGameAutoPlay()
 				end
 
-				-- C2) ลงเป็นปาร์ตี้: รอให้ทุกคนเปิดกล่องของตัวเองก่อน (Replay/Leave ก่อนนั้นทำให้กล่องของเพื่อนหาย)
+				-- C2) ลงเป็นปาร์ตี้: รอเพื่อนเปิดกล่องเฉพาะเมื่อป๊อปอัป Replay ยังไม่เปิด และจำกัดเวลารอไม่ให้เลยโหวต 15 วิ
+				local popNow = getReplayPopup()
 				local partyPending = {}
-				if petFinished and not lastChance then
+				local canWaitParty = petFinished
+					and (not lastChance)
+					and (popNow == nil)
+					and (timeLeft > 22)
+					and ((os.clock() - (ac.petFinishedAt or os.clock())) < 12)
+				if canWaitParty then
 					partyPending = getPartyChestPending(graceOver, HUB.Config.dungeonAutoExitChest == false)
 				end
 
-				-- D) action หลังจบดัน: ทำเฉพาะเมื่อเปิดกล่องและเก็บของเสร็จแล้ว และทุกคนในปาร์ตี้เปิดกล่องครบ
+				-- D) action หลังจบดัน: ทำเฉพาะเมื่อเปิดกล่องและเก็บของเสร็จแล้ว (หรือ ReplayPop เปิดแล้ว)
 				if petFinished and #partyPending > 0 then
 					statusTxt = string.format("สถานะ: รอเพื่อนเปิดกล่องจบดัน (%s) · เหลือ %d วิ 🎁", table.concat(partyPending, ", "), math.max(0, math.floor(timeLeft)))
 				elseif petFinished then
 					if afterClear == "replay" then
-						-- ตามโค้ดเกม (DungeonClient.refreshReplayBtn): ปุ่ม REPLAY โชว์เฉพาะคนที่ DungeonReplayLeader == UserId ตัวเอง
-						-- (ลงเดี่ยว = ตัวเรา · ลงปาร์ตี้ = หัวตี้) · ยังไม่มีคำขอค้าง (ป๊อปอัปปิด) · เหลือ > 4 วิ
-						local pop = getReplayPopup()
-						local soloRun = #Players:GetPlayers() <= 1
+						local pop = popNow or getReplayPopup()
 						local buyBtn = pop and pop:FindFirstChild("ReplayBuyKey")
-						local hasAccess = hasDungeonAccess()
-						local needKey = (buyBtn and buyBtn.Visible) or (not hasAccess)
+						local acceptBtn = pop and pop:FindFirstChild("ReplayAccept")
+						local dungeonId = workspace:GetAttribute("DungeonId")
+						local replayState = HUB.LastReplayState and HUB.LastReplayState.data or nil
+						local hasAccessNow = HUB.HasDungeonAccess(dungeonId)
+						local decision = HUB.EvaluateReplayAction({
+							isLeader = isReplayLeader(),
+							soloRun = #Players:GetPlayers() <= 1,
+							popOpen = (pop ~= nil),
+							clearGuiEnabled = isClearSummaryOpen(),
+							hasAccess = hasAccessNow,
+							noKeyDungeon = HUB.IsNoKeyDungeon(dungeonId),
+							autoBuyKey = (HUB.Config.dungeonAutoBuyKey ~= false),
+							silver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0,
+							keyCount = HUB.GetDungeonKeyCount(),
+							keyPrice = HUB.GetDungeonKeyPrice(),
+							remaining = remaining,
+							minRemaining = REPLAY_MIN_REMAINING,
+							timeSincePetDone = os.clock() - (ac.petFinishedAt or ac.chestDoneAt or ac.startedAt),
+							replayState = replayState,
+							buyBtnVisible = (buyBtn ~= nil and buyBtn.Visible == true),
+							buyBtnCanBuy = (buyBtn ~= nil and buyBtn:GetAttribute("CanBuy") == true),
+							acceptVoted = (acceptBtn ~= nil and acceptBtn:GetAttribute("Voted") == true) or (type(replayState) == "table" and replayState.Vote == true),
+							ac = ac,
+							now = os.clock(),
+							preferredMethod = HUB.VerifiedDungeonBuyMethod,
+						})
 
-						if needKey then
-							local silver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
-							local canAfford = (silver >= 500000) or (buyBtn and buyBtn:GetAttribute("CanBuy") == true)
-							if HUB.Config.dungeonAutoBuyKey ~= false then
-								if canAfford then
-									if os.clock() - (ac.lastReplayBuy or 0) >= 2 then
-										ac.lastReplayBuy = os.clock()
-										fireDungeonAction("replayBuyKey")
-									end
-									statusTxt = "สถานะ: ไม่มีรอบฟรี/กุญแจสำหรับ Replay · กำลังซื้อกุญแจในดัน (500K Silver)... 🔑"
-								else
-									statusTxt = "สถานะ: ไม่มีกุญแจสำหรับ Replay · เงิน Silver ไม่พอซื้อ (ต้องการ 500K) ⚠️"
-								end
-							else
-								statusTxt = "สถานะ: ไม่มีรอบฟรี/กุญแจสำหรับ Replay · ปิดซื้อกุญแจอัตโนมัติอยู่ ⏳"
+						if decision.action == "buyKey" then
+							local nowClock = os.clock()
+							ac.lastKeyBuyAttempt = nowClock
+							local snapKeys = HUB.GetDungeonKeyCount()
+							local snapSilver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
+							if fireDungeonAction(decision.remoteArg) then
+								ac.buyInFlight = {
+									beforeKeys = snapKeys,
+									beforeSilver = snapSilver,
+									keyPrice = decision.keyPrice or HUB.GetDungeonKeyPrice(),
+									sentAt = nowClock,
+									method = decision.method,
+								}
 							end
-						elseif isReplayLeader() then
-							if not pop and remaining > REPLAY_MIN_REMAINING and os.clock() - (ac.lastReplayStart or 0) >= 3 and (ac.replayStarts or 0) < 3 then
-								-- คำขอเดิมถูกยกเลิก (ป๊อปอัปปิด) เกมจะโชว์ปุ่มให้กดใหม่ ⇒ ขอซ้ำได้ เว้น 3 วิ สูงสุด 3 ครั้ง
-								if fireDungeonAction("replayStart") then
-									ac.lastReplayStart = os.clock()
-									ac.replayStarts = (ac.replayStarts or 0) + 1
-									HUB.Stats.replayRequests = (HUB.Stats.replayRequests or 0) + 1
-								end
+						elseif decision.action == "replayStart" then
+							if fireDungeonAction("replayStart") then
+								ac.lastReplayStart = os.clock()
+								ac.replayStarts = (ac.replayStarts or 0) + 1
+								HUB.Stats.replayRequests = (HUB.Stats.replayRequests or 0) + 1
 							end
-							if pop then
-								statusTxt = soloRun and "สถานะ: กด Replay แล้ว รอเริ่มรอบใหม่ 🔁" or "สถานะ: ขอ Replay แล้ว รอสมาชิกกด Accept 🔁"
-							elseif remaining <= REPLAY_MIN_REMAINING then
-								statusTxt = string.format("สถานะ: Replay ไม่ทัน (เหลือ %d วิ) รอให้ดันพาออก ⏳", math.max(0, math.floor(remaining)))
-							elseif (ac.replayStarts or 0) >= 3 then
-								statusTxt = "สถานะ: ขอ Replay ครบ 3 ครั้งแล้วไม่สำเร็จ รอให้ดันพาออก ⏳"
-							else
-								statusTxt = "สถานะ: กำลังกด Replay... 🔁"
+						elseif decision.action == "replayStartForBuy" then
+							ac.triedBuyMethods[decision.method] = true
+							if fireDungeonAction("replayStart") then
+								ac.lastReplayStart = os.clock()
 							end
-						elseif pop then
-							-- สมาชิก: ป๊อปอัป "X wants to replay!" · ReplayAccept (attribute Voted)
-							local acceptBtn = pop:FindFirstChild("ReplayAccept")
-							local voted = acceptBtn and acceptBtn:GetAttribute("Voted") == true
-							if voted then
-								statusTxt = "สถานะ: กด Accept Replay แล้ว รอหัวตี้เริ่มรอบใหม่ 🔁"
-							else
-								if os.clock() - (ac.lastReplayVote or 0) >= 1.5 then
-									ac.lastReplayVote = os.clock()
-									fireDungeonAction("replayVote", true)
-								end
-								statusTxt = "สถานะ: กำลังกด Accept Replay ที่หัวตี้ขอ... 🔁"
-							end
-						else
-							statusTxt = "สถานะ: รอหัวตี้กด Replay (ถ้าไม่กดจะรอให้ดันพาออก) ⏳"
+						elseif decision.action == "replayVote" then
+							ac.lastReplayVote = os.clock()
+							fireDungeonAction("replayVote", true)
 						end
+						statusTxt = decision.status
 					elseif afterClear == "leave" then
 						if not ac.leaveFired then
 							ac.leaveFired = fireDungeonAction("leave") and true or false
@@ -16161,36 +16509,54 @@ do
 	end
 
 	local function buyDungeonKeySafe()
-		local silver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
-		if silver < 500000 then
+		local keyPrice = HUB.GetDungeonKeyPrice()
+		local beforeSilver = tonumber(LocalPlayer:GetAttribute("Silver")) or 0
+		if beforeSilver < keyPrice then
 			return false, "silver_insufficient"
 		end
 
-		local bought = false
-		-- ช่องทางหลัก 1: ส่งคำสั่งซื้อตรงผ่าน RemoteEvent da:selectBuyKey
+		local beforeKeys = HUB.GetDungeonKeyCount()
+		local sent = false
+		-- ยิงเพียง 1 ช่องทางต่อ 1 ครั้ง เพื่อป้องกันการส่งคำสั่งซื้อเบิ้ลเมื่อเปิดหน้า HuntDungeonSelect อยู่
 		if da then
 			da:FireServer("selectBuyKey")
-			bought = true
-		end
-
-		-- ช่องทางเสริม 2: กดปุ่ม "BuyKey" บน HuntDungeonSelect GUI (ถ้าเปิดอยู่)
-		pcall(function()
-			local pg = LocalPlayer:FindFirstChild("PlayerGui")
-			local hds = pg and pg:FindFirstChild("HuntDungeonSelect")
-			local buyBtn = hds and (hds:FindFirstChild("BuyKey", true) or hds:FindFirstChildWhichIsA("TextButton", true))
-			if buyBtn and buyBtn.Name == "BuyKey" then
-				local fs = EXEC.firesignal or rawget(EXEC.env, "firesignal")
-				if type(fs) == "function" then
-					fs(buyBtn.MouseButton1Click)
-					fs(buyBtn.Activated)
+			sent = true
+		else
+			pcall(function()
+				local pg = LocalPlayer:FindFirstChild("PlayerGui")
+				local hds = pg and pg:FindFirstChild("HuntDungeonSelect")
+				local buyBtn = hds and hds:FindFirstChild("BuyKey", true)
+				if buyBtn then
+					local fs = EXEC.firesignal or rawget(EXEC.env, "firesignal")
+					if type(fs) == "function" then
+						fs(buyBtn.MouseButton1Click)
+						sent = true
+					end
 				end
-			end
-		end)
-
-		if bought then
-			HUB.Stats.dungeonKeysBought = (HUB.Stats.dungeonKeysBought or 0) + 1
+			end)
 		end
-		return bought, "ok"
+
+		if not sent then
+			return false, "no_channel"
+		end
+
+		local t0 = os.clock()
+		local verified = false
+		while (os.clock() - t0) < 1.5 do
+			task.wait(0.15)
+			local nowKeys = HUB.GetDungeonKeyCount()
+			local nowSilver = tonumber(LocalPlayer:GetAttribute("Silver")) or beforeSilver
+			if nowKeys > beforeKeys or (beforeSilver - nowSilver) >= (keyPrice * 0.9) then
+				verified = true
+				break
+			end
+		end
+
+		if verified then
+			HUB.Stats.dungeonKeysBought = (HUB.Stats.dungeonKeysBought or 0) + 1
+			return true, "ok"
+		end
+		return false, "unverified"
 	end
 
 	local function getPartyRoleInfo()
