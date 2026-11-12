@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.09)
+-- Hunting Together Hub (v10.11)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.09"
+local VERSION = "10.11"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -399,6 +399,18 @@ local HUB = {
 			[4] = false,
 			[5] = true,
 			[6] = true,
+		},
+		autoLockSets = {
+			all = true,
+			warrior = true,
+			archmage = true,
+			guardian = true,
+			gale = true,
+			luckystar = true,
+			azurestar = true,
+			blackstar = true,
+			bloodlord = true,
+			none = true,
 		},
 		autoLockEquipRules = {},
 		autoSalvage = false,
@@ -1070,6 +1082,7 @@ local function saveConfig()
 		autoLockTiers = HUB.Config.autoLockTiers,
 		autoLockStars = HUB.Config.autoLockStars,
 		autoLockGameTiers = HUB.Config.autoLockGameTiers,
+		autoLockSets = HUB.Config.autoLockSets,
 		autoLockEquipRules = HUB.Config.autoLockEquipRules,
 		autoSalvage = HUB.Config.autoSalvage,
 		autoSalvageThresholdPct = HUB.Config.autoSalvageThresholdPct,
@@ -1191,6 +1204,11 @@ local function loadConfig()
 						if tNum then
 							HUB.Config.autoLockGameTiers[tNum] = (v == true)
 						end
+					end
+				end
+				if type(data.autoLockSets) == "table" then
+					for s, v in pairs(data.autoLockSets) do
+						HUB.Config.autoLockSets[s] = (v == true)
 					end
 				end
 				if type(data.autoLockEquipRules) == "table" then
@@ -1407,12 +1425,13 @@ do
 		local resolved = GearUtil.Resolve(ref, { [ref] = rawGear })
 		if not resolved then return nil end
 
-		local tier = rawGear.T or 1
-		local might = rawGear.M or 0
+		local tier = tonumber(rawGear.T) or tonumber(resolved.Tier) or 1
+		local might = tonumber(rawGear.M) or tonumber(resolved.Might) or 0
 		local options = rawGear.O or {}
-		local setId = rawGear.S
+		local setId = rawGear.S or resolved.SetId
 		local kind = resolved.Kind
 		local slot = resolved.Slot
+		local t6Grp = (tier == 6 and type(GearData.T6Group) == "function" and GearData.T6Group(resolved)) or nil
 
 		local archetype = classifyArchetype(resolved, rawGear)
 		local forbiddenMap = FORBIDDEN_RULES[archetype]
@@ -1454,7 +1473,7 @@ do
 				specVal = val
 				local r = nil
 				if type(GearData.OptionRange) == "function" then
-					local okRange, resRange = pcall(GearData.OptionRange, optKey, tier, true)
+					local okRange, resRange = pcall(GearData.OptionRange, optKey, tier, true, t6Grp)
 					if okRange and type(resRange) == "table" then r = resRange end
 				end
 				if not r and GearData.Options and GearData.Options.SpecialRange and GearData.Options.SpecialRange[optKey] then
@@ -1491,7 +1510,7 @@ do
 				else
 					local r = nil
 					if type(GearData.OptionRange) == "function" then
-						local okRange, resRange = pcall(GearData.OptionRange, optKey, tier)
+						local okRange, resRange = pcall(GearData.OptionRange, optKey, tier, false, t6Grp)
 						if okRange and type(resRange) == "table" then r = resRange end
 					end
 					local sMin, sMax = 1, tier * 2
@@ -1525,9 +1544,10 @@ do
 		local sRandom = 0
 		local sSet = 0
 
-		local isGearWithSet = (archetype == "armor")
+		-- เฉพาะเกราะ Tier 5 และ Tier 6 เท่านั้นที่สุ่มติดเซ็ตได้ตาม GearData.CanHaveSet
+		local isGearWithSet = (archetype == "armor" and tier >= 5)
 		if isGearWithSet then
-			-- Armor: Main 30 | Special 30 | Random 25 | Set 15
+			-- Armor (T5-T6): Main 30 | Special 30 | Random 25 | Set 15
 			local maxMain, maxSpecial, maxRandom, maxSet = 30, 30, 25, 15
 			if not hasSpecialOpt and tier <= 2 then
 				maxMain, maxSpecial, maxRandom = 45, 0, 40
@@ -1545,19 +1565,19 @@ do
 				else
 					sSet = 10
 				end
-				if setId == "warrior" and (options.STR or options.ATK or options.CRIT or options.VIT) then
+				if setId == "warrior" and (options.STR or options.ATK or options.CRIT or options.VIT or options.DEF or options.HpPercent or options.DefPercent) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "archmage" and (options.INT or options.MATK or options.SP or options.CastSpeed) then
+				elseif setId == "archmage" and (options.INT or options.MATK or options.SP or options.CastSpeed or options.MDEF or options.SpPercent or options.SpCost or options.SpRegenPercent) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "guardian" and (options.DEF or options.VIT or options.HP or options.DefPercent) then
+				elseif setId == "guardian" and (options.DEF or options.VIT or options.HP or options.DefPercent or options.HpPercent or options.DmgReduce) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "gale" and (options.AGI or options.ASPD or options.Speed or options.FLEE) then
+				elseif setId == "gale" and (options.AGI or options.ASPD or options.Speed or options.FLEE or options.SpeedR) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "luckystar" and (options.LUK or options.CRIT) then
+				elseif setId == "luckystar" and (options.LUK or options.CRIT or options.FLEE or options.HP or options.VIT) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "azurestar" and (options.INT or options.MATK or options.CastSpeed or options.SP) then
+				elseif setId == "azurestar" and (options.INT or options.MATK or options.CastSpeed or options.SP or options.MDEF or options.SpPercent or options.SpCost or options.SpRegenPercent) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "blackstar" and (options.Pierce or options.MPierce or options.CRIT or options.ATK or options.MATK) then
+				elseif setId == "blackstar" and (options.Pierce or options.MPierce or options.CRIT or options.ATK or options.MATK or options.DmgReduce or options.HP or options.VIT or options.DEF) then
 					sSet = math.min(15, sSet + 2)
 				end
 			end
@@ -3069,9 +3089,21 @@ do
 			end
 		end
 		local count = 0
-		for gId, _ in pairs(gearJson) do
+		local wantTiers = HUB.Config.autoLockTiers or {}
+		local wantStars = HUB.Config.autoLockStars or {}
+		local equipRules = HUB.Config.autoLockEquipRules or {}
+		local GearData = HUB.GearData
+		local GearUtil = HUB.GearUtil
+		local specKeys = (GearData and GearData.SpecialKeys) or {}
+		for gId, gData in pairs(gearJson) do
 			if not locksJson[gId] and not equippedSet[gId] then
-				count = count + 1
+				local isProtected = false
+				if HUB.Config.autoLock and HUB.ShouldItemBeLocked and HUB.ShouldItemBeLocked(gId, gData, wantTiers, wantStars, equipRules, specKeys, GearData, GearUtil) then
+					isProtected = true
+				end
+				if not isProtected then
+					count = count + 1
+				end
 			end
 		end
 		return count
@@ -5546,7 +5578,7 @@ do
 				SampleKey = "Items/helm_t5",
 				FallbackIcon = "rbxassetid://94616329517195",
 				Specials = { "HpPercent", "PotionPct", "DmgReduce" },
-				Pool = { "HP", "VIT", "DEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
+				Pool = { "HP", "VIT", "DEF", "MDEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
 				ForbiddenCandidates = { "SP", "INT", "STR", "MDEF" }
 			},
 			{
@@ -5566,7 +5598,7 @@ do
 				SampleKey = "Items/armor_t5",
 				FallbackIcon = "rbxassetid://87889334606143",
 				Specials = { "HpPercent", "DefPercent", "DmgReduce" },
-				Pool = { "HP", "VIT", "DEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
+				Pool = { "HP", "VIT", "DEF", "MDEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
 				ForbiddenCandidates = { "SP", "INT", "STR", "MDEF" }
 			},
 			{
@@ -5576,7 +5608,7 @@ do
 				SampleKey = "Items/cloak_t5",
 				FallbackIcon = "rbxassetid://119982170018269",
 				Specials = { "DmgReduce", "HpRegenMax", "SpRegenPercent", "DefPercent", "Speed" },
-				Pool = { "HP", "VIT", "DEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
+				Pool = { "HP", "VIT", "DEF", "MDEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
 				ForbiddenCandidates = { "STR", "INT", "DEX", "LUK" }
 			},
 			{
@@ -5586,12 +5618,12 @@ do
 				SampleKey = "Items/boots_t5",
 				FallbackIcon = "rbxassetid://125143879461934",
 				Specials = { "Speed", "DmgReduce", "DefPercent", "HpPercent" },
-				Pool = { "HP", "VIT", "DEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
+				Pool = { "HP", "VIT", "DEF", "MDEF", "FLEE", "SpeedR", "SkillTaken", "HitTaken" },
 				ForbiddenCandidates = { "SP", "INT", "STR", "MDEF" }
 			}
 		}
 
-		-- v9.80: เติม Special Option ที่เกมสุ่มได้จริงแต่ไม่อยู่ในรายการ (โดยเฉพาะ T6 ที่สุ่มจากกลุ่ม weapon/ring/armor ทั้งกลุ่ม)
+		-- v9.80 / v10.11: เติม Special Option ที่เกมสุ่มได้จริงแต่ไม่อยู่ในรายการ (โดยเฉพาะ T6 ที่สุ่มจากกลุ่ม weapon/magic/ring/ringMatk/armor)
 		-- ไม่งั้นไอเทมที่ได้ออปชันนอกรายการ จะไม่มีวันถูกล็อคเมื่อเปิดเงื่อนไขหมวด (เลือกออปชันนั้นไม่ได้)
 		do
 			local GD = HUB.GearData
@@ -5602,7 +5634,11 @@ do
 					local have = {}
 					for _, k in ipairs(catDef.Specials) do have[k] = true end
 					local gameGroup = (catDef.Id == "WeaponPhysMelee" or catDef.Id == "WeaponPhysRanged") and "WeaponPhys" or catDef.Id
-					local t6Group = (string.sub(catDef.Id, 1, 6) == "Weapon" and "weapon") or (string.sub(catDef.Id, 1, 4) == "Ring" and "ring") or "armor"
+					local t6Group = (catDef.Id == "WeaponMagic" and "magic")
+						or (string.sub(catDef.Id, 1, 6) == "Weapon" and "weapon")
+						or (catDef.Id == "RingMatk" and "ringMatk")
+						or (string.sub(catDef.Id, 1, 4) == "Ring" and "ring")
+						or "armor"
 					for _, src in ipairs({ optSpecial and optSpecial[gameGroup] or false, t6Special and t6Special[t6Group] or false }) do
 						if type(src) == "table" then
 							for _, k in ipairs(src) do
@@ -6004,7 +6040,7 @@ do
 				ghSub.Size = UDim2.new(1, -54, 0, 16)
 				ghSub.Position = UDim2.new(0, 48, 0, 26)
 				ghSub.BackgroundTransparency = 1
-				ghSub.Text = "ไอเทมที่ได้เกรดหรือระดับดาวที่เลือก จะถูกสั่งล็อคทันทีที่เข้ากระเป๋า"
+				ghSub.Text = "คัดกรองไอเทมตามเกรด, ดาว, Tier และเซ็ต (ต้องผ่านครบทุกมิติที่เลือก)"
 				ghSub.TextColor3 = THEME.TextAmber
 				ghSub.TextSize = 11
 				ghSub.TextXAlignment = Enum.TextXAlignment.Left
@@ -6105,6 +6141,7 @@ do
 						if not HUB.Config.autoLockTiers then HUB.Config.autoLockTiers = {} end
 						HUB.Config.autoLockTiers[t] = not HUB.Config.autoLockTiers[t]
 						refreshTierBtn()
+						if HUB.RefreshQuickAutoLockCard then HUB.RefreshQuickAutoLockCard() end
 						if HUB.Config.autoSave then saveConfig() end
 						if HUB.Config.autoLock and HUB.RunAutoLockCheck then task.spawn(HUB.RunAutoLockCheck) end
 					end))
@@ -6232,6 +6269,7 @@ do
 						if not HUB.Config.autoLockStars then HUB.Config.autoLockStars = {} end
 						HUB.Config.autoLockStars[sDef.Key] = not HUB.Config.autoLockStars[sDef.Key]
 						refreshStarBtn()
+						if HUB.RefreshQuickAutoLockCard then HUB.RefreshQuickAutoLockCard() end
 						if HUB.Config.autoSave then saveConfig() end
 						if HUB.Config.autoLock and HUB.RunAutoLockCheck then task.spawn(HUB.RunAutoLockCheck) end
 					end))
@@ -6328,6 +6366,129 @@ do
 						local cur = (HUB.Config.autoLockGameTiers[gtDef.Tier] == true or HUB.Config.autoLockGameTiers[tostring(gtDef.Tier)] == true)
 						HUB.Config.autoLockGameTiers[gtDef.Tier] = not cur
 						refreshGameTierBtn()
+						if HUB.Config.autoSave then saveConfig() end
+						if HUB.Config.autoLock and HUB.RunAutoLockCheck then task.spawn(HUB.RunAutoLockCheck) end
+					end))
+				end
+
+				-- Section 4: Equipment Sets (เซ็ตอุปกรณ์: warrior, archmage, guardian, gale, luckystar, azurestar, blackstar, bloodlord, none)
+				local setSec = Instance.new("Frame")
+				setSec.Name = "SetSection"
+				setSec.LayoutOrder = 5
+				setSec.Size = UDim2.new(1, 0, 0, 162)
+				setSec.BackgroundColor3 = Color3.fromRGB(242, 236, 222)
+				setSec.BorderSizePixel = 0
+				setSec.ZIndex = 65
+				setSec.Parent = rightScroll
+				local setCorner = Instance.new("UICorner")
+				setCorner.CornerRadius = UDim.new(0, 6)
+				setCorner.Parent = setSec
+
+				local setTitle = Instance.new("TextLabel")
+				setTitle.Name = "Title"
+				setTitle.Size = UDim2.new(1, -16, 0, 18)
+				setTitle.Position = UDim2.new(0, 8, 0, 6)
+				setTitle.BackgroundTransparency = 1
+				setTitle.Text = "เลือกเซ็ตอุปกรณ์ที่ต้องการล็อค (คลิกเพื่อสลับ):"
+				setTitle.TextColor3 = THEME.TextDark
+				setTitle.TextSize = 12
+				setTitle.TextXAlignment = Enum.TextXAlignment.Left
+				applyFont(setTitle, true)
+				setTitle.ZIndex = 66
+				setTitle.Parent = setSec
+
+				local setGrid = Instance.new("Frame")
+				setGrid.Name = "SetGrid"
+				setGrid.Size = UDim2.new(1, -16, 0, 126)
+				setGrid.Position = UDim2.new(0, 8, 0, 28)
+				setGrid.BackgroundTransparency = 1
+				setGrid.ZIndex = 66
+				setGrid.Parent = setSec
+
+				local sgLayout = Instance.new("UIGridLayout")
+				sgLayout.CellSize = UDim2.new(0, 132, 0, 25)
+				sgLayout.CellPadding = UDim2.new(0, 6, 0, 6)
+				sgLayout.SortOrder = Enum.SortOrder.LayoutOrder
+				sgLayout.Parent = setGrid
+
+				local setDefs = {
+					{ Key = "all",        Label = "🌟 ทุกเซ็ต (All)",          Color = Color3.fromRGB(180, 130, 20) },
+					{ Key = "warrior",    Label = "⚔️ Warrior (ATK)",         Color = Color3.fromRGB(185, 45, 45) },
+					{ Key = "archmage",   Label = "🪄 Archmage (MATK)",       Color = Color3.fromRGB(125, 55, 190) },
+					{ Key = "guardian",   Label = "🛡️ Guardian (DEF)",        Color = Color3.fromRGB(35, 105, 185) },
+					{ Key = "gale",       Label = "💨 Gale (ASPD)",           Color = Color3.fromRGB(30, 140, 125) },
+					{ Key = "luckystar",  Label = "🍀 Lucky Star (CRIT)",     Color = Color3.fromRGB(40, 150, 60) },
+					{ Key = "azurestar",  Label = "✨ Azure Star (Cast)",     Color = Color3.fromRGB(35, 125, 200) },
+					{ Key = "blackstar",  Label = "🎯 Black Star (Pierce)",   Color = Color3.fromRGB(50, 60, 75) },
+					{ Key = "bloodlord",  Label = "🩸 Blood Lord (Life)",     Color = Color3.fromRGB(150, 25, 45) },
+					{ Key = "none",       Label = "💍 อาวุธ/แหวน (ไม่มีเซ็ต)", Color = Color3.fromRGB(95, 85, 115) },
+				}
+
+				local setRefreshFns = {}
+				local function refreshAllSetButtons()
+					for _, fn in ipairs(setRefreshFns) do
+						fn()
+					end
+				end
+
+				for idx, sDef in ipairs(setDefs) do
+					local b = Instance.new("TextButton")
+					b.Name = "Btn_Set_" .. sDef.Key
+					b.LayoutOrder = idx
+					b.BorderSizePixel = 0
+					b.Text = sDef.Label
+					b.TextSize = 10.5
+					b.TextColor3 = Color3.fromRGB(255, 255, 255)
+					applyFont(b, true)
+					b.ZIndex = 67
+					b.Parent = setGrid
+
+					local bc = Instance.new("UICorner")
+					bc.CornerRadius = UDim.new(0, 4)
+					bc.Parent = b
+
+					local bs = Instance.new("UIStroke")
+					bs.Thickness = 1.2
+					bs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+					bs.Parent = b
+
+					local function refreshSetBtn()
+						local setsConf = HUB.Config.autoLockSets or {}
+						local active = (setsConf[sDef.Key] == true)
+						b.TextStrokeTransparency = 1
+						if active then
+							b.BackgroundColor3 = sDef.Color
+							bs.Color = sDef.Color
+							b.TextColor3 = Color3.fromRGB(255, 255, 255)
+						else
+							b.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
+							b.TextColor3 = Color3.fromRGB(150, 160, 175)
+							bs.Color = Color3.fromRGB(50, 60, 80)
+						end
+					end
+					table.insert(setRefreshFns, refreshSetBtn)
+					refreshSetBtn()
+
+					table.insert(detailConns, b.MouseButton1Click:Connect(function()
+						if not HUB.Config.autoLockSets then HUB.Config.autoLockSets = {} end
+						local setsConf = HUB.Config.autoLockSets
+						if sDef.Key == "all" then
+							local newAll = not (setsConf.all == true)
+							for _, def in ipairs(setDefs) do
+								setsConf[def.Key] = newAll
+							end
+						else
+							setsConf[sDef.Key] = not (setsConf[sDef.Key] == true)
+							local allActive = true
+							for _, def in ipairs(setDefs) do
+								if def.Key ~= "all" and setsConf[def.Key] ~= true then
+									allActive = false
+									break
+								end
+							end
+							setsConf.all = allActive
+						end
+						refreshAllSetButtons()
 						if HUB.Config.autoSave then saveConfig() end
 						if HUB.Config.autoLock and HUB.RunAutoLockCheck then task.spawn(HUB.RunAutoLockCheck) end
 					end))
@@ -7147,6 +7308,8 @@ do
 				F  = Color3.fromRGB(90, 90, 90)
 			}
 
+			local quickRefreshFns = {}
+
 			for idx, t in ipairs(tiers) do
 				local b = Instance.new("TextButton")
 				b.Name = "Btn_" .. t
@@ -7183,6 +7346,7 @@ do
 					end
 				end
 				refreshTierBtn()
+				table.insert(quickRefreshFns, refreshTierBtn)
 
 				HUB:AddConnection(b.MouseButton1Click:Connect(function()
 					if not HUB.Config.autoLockTiers then HUB.Config.autoLockTiers = {} end
@@ -7298,6 +7462,7 @@ do
 					end
 				end
 				refreshStarBtn()
+				table.insert(quickRefreshFns, refreshStarBtn)
 
 				HUB:AddConnection(b.MouseButton1Click:Connect(function()
 					if not HUB.Config.autoLockStars then HUB.Config.autoLockStars = {} end
@@ -7308,6 +7473,12 @@ do
 						task.spawn(HUB.RunAutoLockCheck)
 					end
 				end))
+			end
+
+			HUB.RefreshQuickAutoLockCard = function()
+				for _, fn in ipairs(quickRefreshFns) do
+					pcall(fn)
+				end
 			end
 		end,
 		openAutoLockModal
@@ -10189,59 +10360,87 @@ do
 		local eval = HUB.ItemTier and HUB.ItemTier.EvaluateGear and HUB.ItemTier.EvaluateGear(id, data)
 		if not eval then return false end
 
-		-- ด่านที่ 1: ตรวจสอบเงื่อนไขหลัก (Grade & Star & GameTier Pre-requisite Gate จากแท็บ ⭐ เกรด & ระดับดาว)
+		-- ด่านที่ 1: ตรวจสอบเงื่อนไขหลัก (Global Multi-Dimensional Pre-requisite Gate จากแท็บ ⭐ เกรด & ระดับดาว)
+		-- ทั้ง 4 มิติ (Grade, Star, GameTier, Set) ทำงานร่วมกันแบบ AND Logic
 		local wantGameTiers = HUB.Config.autoLockGameTiers or {}
+		local wantSets = HUB.Config.autoLockSets or {}
 		local resolved = eval.Resolved or (GearUtil and GearUtil.Resolve and GearUtil.Resolve(id, { [id] = data }))
 		local itemTier = tonumber(data.T) or (eval and tonumber(eval.Tier)) or (resolved and tonumber(resolved.Tier))
+		local itemSetId = data.S or (eval and eval.SetId) or (resolved and resolved.SetId)
 
-		-- 1.1 ตรวจสอบระดับ Tier ในเกม (I - VI)
+		-- 1.1 ตรวจสอบว่ามีการเลือกตัวกรองในแต่ละมิติหรือไม่
 		local hasGameTierFilter = false
 		for _, v in pairs(wantGameTiers) do
 			if v == true then hasGameTierFilter = true break end
 		end
+
+		local hasGradeFilter = false
+		for _, v in pairs(wantTiers or {}) do
+			if v == true then hasGradeFilter = true break end
+		end
+
+		local hasStarFilter = false
+		for _, v in pairs(wantStars or {}) do
+			if v == true then hasStarFilter = true break end
+		end
+
+		local hasSetFilter = false
+		for _, v in pairs(wantSets) do
+			if v == true then hasSetFilter = true break end
+		end
+
+		-- ถ้าไม่ได้เลือกเงื่อนไขใดๆ ในแท็บนี้เลย = ไม่ล็อค
+		if not hasGradeFilter and not hasStarFilter and not hasGameTierFilter and not hasSetFilter then
+			return false
+		end
+
+		-- 1.2 ตรวจสอบระดับ Tier ในเกม (I - VI)
 		if hasGameTierFilter then
 			local matchGameTier = false
 			if itemTier and (wantGameTiers[itemTier] == true or wantGameTiers[tostring(itemTier)] == true) then
 				matchGameTier = true
 			end
 			if not matchGameTier then
-				return false -- ตกเกณฑ์ระดับ Tier ในเกมทันที (เช่น ไม่ได้เลือก Tier I-IV แต่ไอเทมเป็น Tier I-IV)
+				return false -- ตกเกณฑ์ระดับ Tier ในเกม
 			end
 		end
 
-		-- 1.2 ตรวจสอบเกรด Tierlist (F..SS) และระดับดาว (Silver, Gold, Rainbow)
-		local hasGradeFilter = false
-		for _, v in pairs(wantTiers or {}) do
-			if v == true then hasGradeFilter = true break end
-		end
-		local hasStarFilter = false
-		for _, v in pairs(wantStars or {}) do
-			if v == true then hasStarFilter = true break end
+		-- 1.3 ตรวจสอบเกรด Tierlist (F..SS)
+		if hasGradeFilter then
+			local matchGrade = (eval.Grade and wantTiers[eval.Grade] == true)
+			if not matchGrade then
+				return false -- ตกเกณฑ์เกรด
+			end
 		end
 
-		if hasGradeFilter or hasStarFilter then
-			local matchGrade = (eval.Grade and wantTiers and wantTiers[eval.Grade] == true)
-			local matchStar = (eval.Star and wantStars and wantStars[eval.Star] == true)
-			local passQuality = false
-			if hasGradeFilter and hasStarFilter then
-				passQuality = (matchGrade or matchStar)
-			elseif hasGradeFilter then
-				passQuality = matchGrade
-			elseif hasStarFilter then
-				passQuality = matchStar
+		-- 1.4 ตรวจสอบระดับดาว (Silver, Gold, Rainbow)
+		if hasStarFilter then
+			local matchStar = (eval.Star and wantStars[eval.Star] == true)
+			if not matchStar then
+				return false -- ตกเกณฑ์ระดับดาว
 			end
-			if not passQuality then
-				return false -- ตกเกณฑ์เกรดหรือระดับดาวที่กำหนดไว้ในแท็บหลัก
+		end
+
+		-- 1.5 ตรวจสอบเซ็ตอุปกรณ์ (Equipment Sets)
+		if hasSetFilter then
+			local matchSet = false
+			if wantSets.all == true then
+				matchSet = true
+			elseif itemSetId and wantSets[itemSetId] == true then
+				matchSet = true
+			elseif not itemSetId and wantSets.none == true then
+				-- ไอเทมที่ไม่มีเซ็ต (อาวุธ, แหวน, เกราะ T1-T4)
+				matchSet = true
 			end
-		elseif not hasGameTierFilter then
-			-- ไม่ได้เลือกเงื่อนไขใดๆ ในแท็บ ⭐ เกรด & ระดับดาว เลย = ไม่ล็อค
-			return false
+			if not matchSet then
+				return false -- ตกเกณฑ์เซ็ตอุปกรณ์
+			end
 		end
 
 		-- ตรวจสอบเงื่อนไขเฉพาะหมวดหมู่อุปกรณ์
 		local grp = (resolved and GearData and type(GearData.GroupOf) == "function" and GearData.GroupOf(resolved))
 		if grp == "WeaponPhys" then
-			local idLower = string.lower(id or "")
+			local idLower = string.lower(tostring(data.Id or (resolved and resolved.Id) or id or ""))
 			if (resolved and (resolved.SubKind == "bow" or resolved.WeaponType == "bow")) or idLower:find("bow") then
 				grp = "WeaponPhysRanged"
 			else
@@ -10267,6 +10466,18 @@ do
 		end
 
 		-- ด่านย่อย 2: ตรวจหา Special Option ของไอเทม
+		local hasWantedSpecialSelection = false
+		if type(rule.wantedSpecials) == "table" then
+			for _, v in pairs(rule.wantedSpecials) do
+				if v == true then hasWantedSpecialSelection = true break end
+			end
+		end
+		if not hasWantedSpecialSelection and type(rule.special) == "table" then
+			for _, v in pairs(rule.special) do
+				if v == true then hasWantedSpecialSelection = true break end
+			end
+		end
+
 		local itemSpecialKey = nil
 		for optK, _ in pairs(options) do
 			if specKeys[optK] then
@@ -10276,6 +10487,11 @@ do
 		end
 
 		if itemSpecialKey then
+			-- กรณีไม่ได้ติ๊กเลือก Special Option ใดๆ เลยในหัวข้อที่ 1 (เช่น เปิดหมวดเพื่อกรองเฉพาะ Forbidden Stats) -> ผ่านทันที
+			if not hasWantedSpecialSelection then
+				return true
+			end
+
 			-- ไอเทมมี Special Option: ตรวจสอบว่าผู้ใช้ติ๊กเลือกเก็บออปชันนี้ไว้ที่ด้านบนหรือไม่
 			local isWanted = (rule.wantedSpecials and rule.wantedSpecials[itemSpecialKey] == true)
 			if not isWanted and rule.special and rule.special[itemSpecialKey] == true then
@@ -10308,10 +10524,14 @@ do
 			end
 			return matchCount >= minMatch
 		else
-			-- ไอเทมไม่มี Special Option เลย แต่ผ่านเกรด & ดาวหลักมาแล้ว -> ล็อค
+			-- ไอเทมไม่มี Special Option เลย: หากผู้ใช้ระบุ Special Option ที่ต้องการไว้ จะไม่ผ่านเกณฑ์
+			if hasWantedSpecialSelection then
+				return false
+			end
 			return true
 		end
 	end
+	HUB.ShouldItemBeLocked = shouldItemBeLocked
 
 	local function runAutoLockCheck()
 		if not HUB.Alive or not HUB.Config.autoLock or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return false, 0 end
@@ -10366,6 +10586,14 @@ do
 			end
 		end)
 	end))
+
+	-- Initial Startup Scan: สแกนล็อคของในกระเป๋าทันทีที่โหลดสคริปต์หากเปิด Auto Lock ไว้
+	task.defer(function()
+		task.wait(1.5)
+		if HUB.Alive and HUB.Config.autoLock and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN then
+			runAutoLockCheck()
+		end
+	end)
 
 	-- -------------------- Auto Salvage Worker --------------------
 	local _isSalvagingRoutine = false
@@ -10607,6 +10835,12 @@ do
 				return
 			end
 		else
+			if HUB.Config.autoLock and runAutoLockCheck then
+				local lockedAny, lockCount = runAutoLockCheck()
+				if lockedAny and lockCount > 0 then
+					task.wait(0.25)
+				end
+			end
 			local canSell = hasSellableItems()
 			if not canSell and not forceRun then
 				return
