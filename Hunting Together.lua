@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.14)
+-- Hunting Together Hub (v10.15)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.14"
+local VERSION = "10.15"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -5919,24 +5919,31 @@ do
 	local _, claimStatus = createCard(
 		scrollItem,
 		"Auto Claim Rewards (ตรวจจับและเคลมอัตโนมัติ)",
-		"ตรวจจับแบบ Real-Time และเคลมทันทีเมื่อมีของรางวัลให้รับ (Daily, Mailbox, Battle Pass, Playtime, Ach)",
+		"ตรวจจับอัตโนมัติทุกหมวดที่เซิร์ฟเวอร์ไม่เช็คระยะ (Online, Check-in, Mail, Achieve, Quest, Newbie, BP)",
 		HUB.Config.autoClaim,
 		function(enabled, label)
 			HUB.Config.autoClaim = enabled
-			label.Text = string.format("สถานะ: %s (เคลมแล้ว %d รอบ)", enabled and "เปิดใช้งาน (ตรวจจับอัตโนมัติ)" or "ปิดใช้งาน", HUB.Stats.rewardsClaimed)
-			if enabled and type(HUB.DetectClaimableRewards) == "function" then
-				local det = HUB.DetectClaimableRewards()
-				if det.any and type(HUB.ClaimAllRewards) == "function" then
-					HUB.ClaimAllRewards(table.concat(det.reasons, ", "))
-				end
+			local statusWord = if enabled then "เปิดใช้งาน (ตรวจจับอัตโนมัติ)" else "ปิดใช้งาน"
+			label.Text = string.format("สถานะ: %s (เคลมสำเร็จ %d รอบ)", statusWord, HUB.Stats.rewardsClaimed)
+			if enabled then
+				task.spawn(function()
+					if type(HUB.DetectClaimableRewards) == "function" then
+						local det = HUB.DetectClaimableRewards(true)
+						if det.any and type(HUB.ClaimAllRewards) == "function" then
+							HUB.ClaimAllRewards(table.concat(det.reasons, ", "), true)
+						end
+					end
+				end)
 			end
 		end,
 		{
 			Text = "🎁 เคลมทันที",
 			OnClick = function(label)
 				if type(HUB.ClaimAllRewards) == "function" then
-					HUB.ClaimAllRewards()
-					label.Text = "สถานะ: ส่งคำขอเคลมรางวัลแล้ว!"
+					label.Text = "สถานะ: กำลังตรวจสอบและเคลม..."
+					task.spawn(function()
+						HUB.ClaimAllRewards("กดเคลมทันที", true)
+					end)
 				end
 			end
 		}
@@ -10625,266 +10632,898 @@ task.spawn(function()
 	end
 end)
 
--- ===== 9.2 Reactive Event-Driven Auto Claim Engine (ตรวจจับและเคลมทันทีเมื่อมีของรางวัล 100% Location-Independent) =====
+-- ===== 9.2 Smart Event-Driven Auto Claim Engine (Zero Heavy Scan · Rate-Limit Safe · Side-Effect Verified) =====
+-- สำรวจจริง (v10.15):
+--   • Location-Independent (เคลมได้ทุกที่ ไม่เช็คระยะตัวละคร):
+--       1) RewardAction: "online" (RewardData.Online = {5,15,30,60,120,180} นาที · เว้น ≥0.58s กัน server drop)
+--       2) RewardAction: "c8" (8-Day Check-in) / "month" (Monthly Today) / "mile" (RewardData.Milestones)
+--       3) MailAction: "claimall" (+ "deleteclaimed" เฉพาะหลังเคลมสำเร็จ)
+--       4) AchieveAction: "claim", id, false (ตรวจจาก AchievementData.List + AchieveJson.C + Level)
+--       5) QuestAction: "claim", id (ส่งเควสสำเร็จจาก QuestsJson.Active ผ่าน PageQuest ได้ทุกที่)
+--       6) NewbieCampaign:InvokeServer("claim", ...) (เมื่อ NewbieActive == true)
+--       7) BattlePassAction: "claimAll" / "missionAll" (ทำงานอัตโนมัติเมื่อ ComingSoon.Is("battlepass") == false)
+--   • ยกเว้นจงใจ: EventNpcAction เช็คระยะ NPC บน Server ("Come closer to the Event NPC first")
+--     และ DailyClaim/IntroGift เป็นของเก่าที่ถูกถอดออกจากไคลเอนต์แล้ว
 do
-	local shared = ReplicatedStorage:FindFirstChild("Shared")
-	local achieveData = shared and shared:FindFirstChild("AchievementData") and require(shared.AchievementData)
+	local modCache = {}
+	local function getSharedModule(modName)
+		if modCache[modName] ~= nil then return modCache[modName] end
+		local sharedFolder = ReplicatedStorage:FindFirstChild("Shared")
+		local mod = sharedFolder and sharedFolder:FindFirstChild(modName)
+		if not mod or not mod:IsA("ModuleScript") then return nil end
+		local ok, res = pcall(require, mod)
+		if ok and res ~= nil then
+			modCache[modName] = res
+			return res
+		end
+		return nil
+	end
 
-	-- 1. ฟังก์ชันตรวจจับว่ามีของรางวัลรอให้เคลมอยู่หรือไม่ (Smart Ground-Truth Detection)
-	local function detectClaimableRewards()
-		local claimable = {
-			daily = false,
-			mail = false,
-			pass = false,
-			reward = false,
-			achieve = false,
+	local lpdRef = nil
+	local function getLumiPrivateData()
+		if lpdRef and lpdRef.Parent then return lpdRef end
+		local pgui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		local found = pgui and pgui:FindFirstChild("LumiPrivateData")
+		if found then
+			lpdRef = found
+		end
+		return found
+	end
+
+	local function getPlayerAttr(attrName)
+		local v = LocalPlayer:GetAttribute(attrName)
+		if v ~= nil then return v end
+		local lpd = getLumiPrivateData()
+		if lpd then
+			return lpd:GetAttribute(attrName)
+		end
+		return nil
+	end
+
+	local jsonCache = {}
+	local function decodePlayerJson(attrName)
+		local raw = getPlayerAttr(attrName)
+		if type(raw) ~= "string" or raw == "" then
+			jsonCache[attrName] = nil
+			return nil, nil
+		end
+		local cached = jsonCache[attrName]
+		if cached and cached.raw == raw then
+			return cached.data, raw
+		end
+		local ok, decoded = pcall(HttpService.JSONDecode, HttpService, raw)
+		if ok and type(decoded) == "table" then
+			jsonCache[attrName] = { raw = raw, data = decoded }
+			return decoded, raw
+		end
+		return nil, raw
+	end
+
+	local function getServerNow()
+		local ok, t = pcall(workspace.GetServerTimeNow, workspace)
+		if ok and type(t) == "number" and t > 0 then
+			return t
+		end
+		return os.time()
+	end
+
+	local function getOnlineElapsedSec(onlineTbl)
+		local sec = tonumber(onlineTbl.Sec) or 0
+		if type(onlineTbl.At) == "number" and onlineTbl.At > 0 then
+			local dt = math.clamp(getServerNow() - onlineTbl.At, 0, 75)
+			sec = sec + dt
+		end
+		return sec
+	end
+
+	-- Backoff ต่อเนื่องเพื่อกันลูปยิงซ้ำเมื่อเซิร์ฟเวอร์ปฏิเสธ/กระเป๋าเต็ม/ติดเงื่อนไข
+	local backoffUntil = {}
+	local backoffStep = {}
+	local BACKOFF_STEPS = { 15, 45, 120, 300 }
+
+	local function clearBackoff(key)
+		backoffUntil[key] = nil
+		backoffStep[key] = nil
+	end
+
+	local function clearBackoffPrefix(prefix)
+		for k in pairs(backoffUntil) do
+			if string.sub(k, 1, #prefix) == prefix then
+				backoffUntil[k] = nil
+				backoffStep[k] = nil
+			end
+		end
+	end
+
+	local function markBackoff(key)
+		local step = math.min((backoffStep[key] or 0) + 1, #BACKOFF_STEPS)
+		backoffStep[key] = step
+		backoffUntil[key] = os.clock() + BACKOFF_STEPS[step]
+	end
+
+	local function isBackedOff(key, nowClk, forceManual)
+		if forceManual then return false end
+		local t = backoffUntil[key]
+		return t ~= nil and nowClk < t
+	end
+
+	-- Rate-limit spacing ตามข้อมูลจริงของแต่ละ Remote (กัน server drop)
+	local lastRemoteFire = {}
+	local function fireWithSpacing(remoteObj, minGapSec, ...)
+		if not remoteObj then return false end
+		local rName = remoteObj.Name
+		local gap = os.clock() - (lastRemoteFire[rName] or 0)
+		if gap < minGapSec then
+			task.wait(minGapSec - gap)
+		end
+		if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then
+			return false
+		end
+		lastRemoteFire[rName] = os.clock()
+		local args = { ... }
+		local ok, res = pcall(function()
+			if remoteObj:IsA("RemoteFunction") then
+				return remoteObj:InvokeServer(table.unpack(args))
+			end
+			remoteObj:FireServer(table.unpack(args))
+			return true
+		end)
+		return ok, res
+	end
+
+	local function asTable(v)
+		if type(v) == "table" then return v end
+		return {}
+	end
+
+	local function snapshotAttrs(attrNames)
+		local snap = {}
+		for _, name in ipairs(attrNames) do
+			local v = getPlayerAttr(name)
+			snap[name] = if v == nil then "__NIL__" else tostring(v)
+		end
+		return snap
+	end
+
+	local function attrsChanged(snap, attrNames)
+		for _, name in ipairs(attrNames) do
+			local v = getPlayerAttr(name)
+			local cur = if v == nil then "__NIL__" else tostring(v)
+			if snap[name] ~= cur then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function waitForAttrDelta(snap, attrNames, maxWaitSec)
+		local deadline = os.clock() + (maxWaitSec or 0.75)
+		while os.clock() < deadline do
+			if attrsChanged(snap, attrNames) then
+				return true
+			end
+			task.wait(0.05)
+		end
+		return attrsChanged(snap, attrNames)
+	end
+
+	local DEFAULT_ONLINE_SEC = { 300, 900, 1800, 3600, 7200, 10800 }
+	local function getOnlineThresholds()
+		local rewardData = getSharedModule("RewardData")
+		if rewardData and type(rewardData.Online) == "table" and #rewardData.Online > 0 then
+			local out = {}
+			for i, entry in ipairs(rewardData.Online) do
+				local mins = if type(entry) == "table" then tonumber(entry.Minutes) else tonumber(entry)
+				out[i] = (mins or 5) * 60
+			end
+			return out, rewardData
+		end
+		return DEFAULT_ONLINE_SEC, rewardData
+	end
+
+	local function listContains(arr, val)
+		if type(arr) ~= "table" then return false end
+		for _, v in ipairs(arr) do
+			if v == val then return true end
+		end
+		return false
+	end
+
+	local function allKindsSupported(rewards, supported)
+		if type(supported) ~= "table" or type(rewards) ~= "table" then return true end
+		for _, rw in ipairs(rewards) do
+			if type(rw) == "table" and rw.kind ~= nil and not supported[rw.kind] then
+				return false
+			end
+		end
+		return true
+	end
+
+	-- 1. ฟังก์ชันตรวจจับของรางวัลจริงทุกหมวด (Zero Heavy Scan · Real Thresholds)
+	local function detectClaimableRewards(forceManual)
+		local nowClk = os.clock()
+		local det = {
 			any = false,
-			reasons = {}
+			reasons = {},
+			nextWakeIn = nil,
+			targets = {
+				onlineSlots = {},
+				c8 = false,
+				month = false,
+				milestones = {},
+				mail = false,
+				bpRewards = false,
+				bpMissions = false,
+				achieveIds = {},
+				questIds = {},
+				newbieItems = {},
+			}
 		}
 
-		-- 1.1 Daily Login Claim Check
-		local dailyStr = LocalPlayer:GetAttribute("DailyJson")
-		if dailyStr then
-			local ok, d = pcall(HttpService.JSONDecode, HttpService, dailyStr)
-			if ok and d and d.CanClaim == true then
-				claimable.daily = true
-				claimable.any = true
-				table.insert(claimable.reasons, "Daily Login")
+		local function noteNextWake(sec)
+			if type(sec) == "number" and sec > 0 then
+				if det.nextWakeIn == nil or sec < det.nextWakeIn then
+					det.nextWakeIn = sec
+				end
 			end
 		end
 
-		-- 1.2 Mailbox Check (MailUnclaimed > 0 หรือมีจดหมายที่มีไอเทม/เงิน)
-		local mailUnclaimed = tonumber(LocalPlayer:GetAttribute("MailUnclaimed")) or 0
-		if mailUnclaimed > 0 then
-			claimable.mail = true
-			claimable.any = true
-			table.insert(claimable.reasons, "Mailbox (" .. tostring(mailUnclaimed) .. ")")
-		else
-			local mailStr = LocalPlayer:GetAttribute("MailJson")
-			if mailStr and mailStr ~= "[]" then
-				local ok, mails = pcall(HttpService.JSONDecode, HttpService, mailStr)
-				if ok and type(mails) == "table" and #mails > 0 then
-					for _, m in ipairs(mails) do
-						if (m.Items and #m.Items > 0) or (m.Silver and m.Silver > 0) or m.Gold then
-							claimable.mail = true
-							claimable.any = true
-							table.insert(claimable.reasons, "Mailbox")
+		-- 1.1 Rewards: Online Playtime + C8 + Monthly Check-in + Milestones
+		local rewardsTbl = decodePlayerJson("RewardsJson")
+		local onlineThresholds, rewardData = getOnlineThresholds()
+		if type(rewardsTbl) == "table" then
+			if type(rewardsTbl.C8) == "table" and rewardsTbl.C8.Can == true then
+				if not isBackedOff("reward:c8", nowClk, forceManual) then
+					det.targets.c8 = true
+					det.any = true
+					table.insert(det.reasons, "8-Day Check-in")
+				else
+					noteNextWake((backoffUntil["reward:c8"] or nowClk) - nowClk)
+				end
+			end
+
+			if type(rewardsTbl.Month) == "table" then
+				local monthTbl = rewardsTbl.Month
+				local today = tonumber(monthTbl.Today)
+				if today and today > 0 and not listContains(monthTbl.Days, today) then
+					if not isBackedOff("reward:month", nowClk, forceManual) then
+						det.targets.month = true
+						det.any = true
+						table.insert(det.reasons, "Monthly Check-in")
+					else
+						noteNextWake((backoffUntil["reward:month"] or nowClk) - nowClk)
+					end
+				end
+
+				if rewardData and type(rewardData.Milestones) == "table" and #rewardData.Milestones > 0 then
+					local dayCount = if type(monthTbl.Days) == "table" then #monthTbl.Days else 0
+					for _, ms in ipairs(rewardData.Milestones) do
+						local reqDays = if type(ms) == "table" then tonumber(ms.Days) else tonumber(ms)
+						if reqDays and dayCount >= reqDays and not listContains(monthTbl.Miles, reqDays) then
+							local bKey = "reward:mile:" .. tostring(reqDays)
+							if not isBackedOff(bKey, nowClk, forceManual) then
+								table.insert(det.targets.milestones, reqDays)
+								det.any = true
+								table.insert(det.reasons, "Milestone " .. tostring(reqDays) .. "d")
+							else
+								noteNextWake((backoffUntil[bKey] or nowClk) - nowClk)
+							end
+						end
+					end
+				end
+			end
+
+			if type(rewardsTbl.Online) == "table" then
+				local gotMap = {}
+				if type(rewardsTbl.Online.Got) == "table" then
+					for _, slot in ipairs(rewardsTbl.Online.Got) do
+						gotMap[slot] = true
+					end
+				end
+				local elapsed = getOnlineElapsedSec(rewardsTbl.Online)
+				local readyOnlineCount = 0
+				for slot, reqSec in ipairs(onlineThresholds) do
+					if not gotMap[slot] then
+						if elapsed >= reqSec then
+							local bKey = "reward:online:" .. tostring(slot)
+							if not isBackedOff(bKey, nowClk, forceManual) then
+								table.insert(det.targets.onlineSlots, slot)
+								readyOnlineCount = readyOnlineCount + 1
+								det.any = true
+							else
+								noteNextWake((backoffUntil[bKey] or nowClk) - nowClk)
+							end
+						else
+							noteNextWake((reqSec - elapsed) + 1.5)
+						end
+					end
+				end
+				if readyOnlineCount > 0 then
+					table.insert(det.reasons, "Online (" .. tostring(readyOnlineCount) .. ")")
+				end
+			end
+		end
+
+		-- 1.2 Mailbox
+		local mailUnclaimed = tonumber(getPlayerAttr("MailUnclaimed")) or 0
+		local mailReady = mailUnclaimed > 0
+		if not mailReady then
+			local mails = decodePlayerJson("MailJson")
+			if type(mails) == "table" then
+				for _, m in ipairs(mails) do
+					if type(m) == "table" and not m.Claimed then
+						if m.Silver ~= nil or m.Items ~= nil or m.Crystal ~= nil or m.Product ~= nil
+							or m.Mount ~= nil or m.Pet ~= nil or m.Gear ~= nil or m.Skin ~= nil or m.GiveTitle ~= nil then
+							mailReady = true
 							break
 						end
 					end
 				end
 			end
 		end
-
-		-- 1.3 Battle Pass Check (BattlePassReady > 0)
-		local bpReady = tonumber(LocalPlayer:GetAttribute("BattlePassReady")) or 0
-		if bpReady > 0 then
-			claimable.pass = true
-			claimable.any = true
-			table.insert(claimable.reasons, "Battle Pass (" .. tostring(bpReady) .. ")")
+		if mailReady then
+			if not isBackedOff("mail:claimall", nowClk, forceManual) then
+				det.targets.mail = true
+				det.any = true
+				local mailLbl = if mailUnclaimed > 0 then ("Mailbox (" .. tostring(mailUnclaimed) .. ")") else "Mailbox"
+				table.insert(det.reasons, mailLbl)
+			else
+				noteNextWake((backoffUntil["mail:claimall"] or nowClk) - nowClk)
+			end
 		end
 
-		-- 1.4 Playtime & Check-in Check (RewardsReady > 0 หรือ C8 / Online พร้อมรับ)
-		local rewardsReady = tonumber(LocalPlayer:GetAttribute("RewardsReady")) or 0
-		if rewardsReady > 0 then
-			claimable.reward = true
-			claimable.any = true
-			table.insert(claimable.reasons, "Rewards (" .. tostring(rewardsReady) .. ")")
-		else
-			local rewStr = LocalPlayer:GetAttribute("RewardsJson")
-			if rewStr then
-				local ok, r = pcall(HttpService.JSONDecode, HttpService, rewStr)
-				if ok and type(r) == "table" then
-					if r.C8 and r.C8.Can == true then
-						claimable.reward = true
-						claimable.any = true
-						table.insert(claimable.reasons, "8-Day Check-in")
-					end
-					if r.Online and type(r.Online.Got) == "table" and type(r.Online.Sec) == "number" then
-						local gotMap = {}
-						for _, slot in ipairs(r.Online.Got) do gotMap[slot] = true end
-						local thresholds = { 300, 600, 1200, 1800, 2700, 3600 }
-						for slot, reqSec in ipairs(thresholds) do
-							if not gotMap[slot] and r.Online.Sec >= reqSec then
-								claimable.reward = true
-								claimable.any = true
-								table.insert(claimable.reasons, "Online " .. tostring(math.floor(reqSec / 60)) .. "m")
+		-- 1.3 Battle Pass (ข้ามอัตโนมัติถ้า ComingSoon.Is("battlepass") == true)
+		local comingSoon = getSharedModule("ComingSoon")
+		local bpDisabled = comingSoon and type(comingSoon.Is) == "function" and comingSoon.Is("battlepass") == true
+		if not bpDisabled then
+			local bpData = getSharedModule("BattlePassData")
+			local bpTbl = decodePlayerJson("BattlePassJson")
+			if type(bpTbl) == "table" and bpData then
+				local ppl = tonumber(bpData.PointsPerLevel) or 100
+				local maxLvl = tonumber(bpData.MaxLevel) or 30
+				local bpLvl = math.clamp(math.floor((tonumber(bpTbl.Points) or 0) / ppl), 0, maxLvl)
+				local freeMap = asTable(bpTbl.Free)
+				local paidMap = asTable(bpTbl.Paid)
+				local hasPremium = bpTbl.Premium == true
+				if type(bpData.Rewards) == "table" then
+					for lv = 1, bpLvl do
+						local rw = bpData.Rewards[lv]
+						if rw then
+							local k = "L" .. tostring(lv)
+							if (rw.Free and not freeMap[k]) or (hasPremium and rw.Premium and not paidMap[k]) then
+								if not isBackedOff("bp:claimAll", nowClk, forceManual) then
+									det.targets.bpRewards = true
+									det.any = true
+								else
+									noteNextWake((backoffUntil["bp:claimAll"] or nowClk) - nowClk)
+								end
 								break
 							end
 						end
 					end
 				end
+				local dailyProg = asTable(bpTbl.Daily)
+				local dailyDone = asTable(bpTbl.DailyDone)
+				local weeklyProg = asTable(bpTbl.Weekly)
+				local weeklyDone = asTable(bpTbl.WeeklyDone)
+				local function hasReadyMission(list, prog, done)
+					if type(list) ~= "table" then return false end
+					for _, m in ipairs(list) do
+						if not done[m.Id] and (tonumber(prog[m.Id]) or 0) >= (tonumber(m.Count) or 1) then
+							return true
+						end
+					end
+					return false
+				end
+				if hasReadyMission(bpData.Daily, dailyProg, dailyDone) or hasReadyMission(bpData.Weekly, weeklyProg, weeklyDone) then
+					if not isBackedOff("bp:missionAll", nowClk, forceManual) then
+						det.targets.bpMissions = true
+						det.any = true
+					else
+						noteNextWake((backoffUntil["bp:missionAll"] or nowClk) - nowClk)
+					end
+				end
+			elseif (tonumber(getPlayerAttr("BattlePassReady")) or 0) > 0 then
+				if not isBackedOff("bp:claimAll", nowClk, forceManual) then
+					det.targets.bpRewards = true
+					det.targets.bpMissions = true
+					det.any = true
+				end
+			end
+			if det.targets.bpRewards or det.targets.bpMissions then
+				table.insert(det.reasons, "Battle Pass")
 			end
 		end
 
-		-- 1.5 Achievements Check (AchieveReady > 0)
-		local achReady = tonumber(LocalPlayer:GetAttribute("AchieveReady")) or 0
-		if achReady > 0 then
-			claimable.achieve = true
-			claimable.any = true
-			table.insert(claimable.reasons, "Achievements (" .. tostring(achReady) .. ")")
-		end
-
-		return claimable
-	end
-
-	-- 2. ฟังก์ชันส่งคำขอเคลมรางวัล (Targeted & Rate-Limit Spacing)
-	local claimingNow = false
-	local function claimAll(reason)
-		if claimingNow then return end
-		local rFolder = ReplicatedStorage:FindFirstChild("Remotes")
-		if not rFolder then return end
-
-		claimingNow = true
-
-		-- 2.1 Daily Login Claim
-		local daily = rFolder:FindFirstChild("DailyClaim")
-		if daily then
-			pcall(function() daily:FireServer() end)
-			task.wait(0.08)
-		end
-
-		-- 2.2 Intro Gift
-		local intro = rFolder:FindFirstChild("IntroGift")
-		if intro then
-			pcall(function() intro:FireServer() end)
-			task.wait(0.08)
-		end
-
-		-- 2.3 Mailbox
-		local mail = rFolder:FindFirstChild("MailAction")
-		if mail then
-			pcall(function()
-				mail:FireServer("claimall")
-				task.wait(0.12)
-				mail:FireServer("deleteclaimed")
-			end)
-			task.wait(0.08)
-		end
-
-		-- 2.4 Battle Pass
-		local battlePass = rFolder:FindFirstChild("BattlePassAction")
-		if battlePass then
-			pcall(function()
-				battlePass:FireServer("claimAll")
-				task.wait(0.1)
-				battlePass:FireServer("missionAll")
-			end)
-			task.wait(0.08)
-		end
-
-		-- 2.5 Playtime & Check-in (RewardAction)
-		local rewardAction = rFolder:FindFirstChild("RewardAction")
-		if rewardAction then
-			pcall(function() rewardAction:FireServer("c8", nil) end)
-			task.wait(0.05)
-			pcall(function() rewardAction:FireServer("month", nil) end)
-			task.wait(0.05)
-			for _, m in ipairs({ 7, 14, 21, 28 }) do
-				pcall(function() rewardAction:FireServer("mile", m) end)
-				task.wait(0.04)
-			end
-			for slot = 1, 6 do
-				pcall(function() rewardAction:FireServer("online", slot) end)
-				task.wait(0.06)
-			end
-		end
-
-		-- 2.6 Achievements
-		local achieveAction = rFolder:FindFirstChild("AchieveAction")
-		if achieveAction and achieveData then
-			local aAttr = LocalPlayer:GetAttribute("AchieveJson")
-			if aAttr then
-				local decOk, aJson = pcall(HttpService.JSONDecode, HttpService, aAttr)
-				if decOk and type(aJson) == "table" then
-					local got = aJson.Got or {}
-					local counts = aJson.C or {}
-					local myLvl = LocalPlayer:GetAttribute("Level") or 1
-					local allAch = achieveData.List or achieveData.Achievements or {}
-					for _, ach in ipairs(allAch) do
-						if not got[ach.Id] then
-							local val = (ach.Type == "level") and myLvl or (counts[ach.Type] or 0)
-							if val >= (ach.Count or 1) then
-								pcall(function() achieveAction:FireServer("claim", ach.Id, false) end)
-								task.wait(0.08)
-							end
+		-- 1.4 Achievements
+		local myLvl = tonumber(getPlayerAttr("Level")) or 1
+		local achData = getSharedModule("AchievementData")
+		local achTbl = decodePlayerJson("AchieveJson")
+		if achData and type(achTbl) == "table" then
+			local got = asTable(achTbl.Got)
+			local counts = asTable(achTbl.C)
+			local allAch = achData.List or {}
+			for _, ach in ipairs(allAch) do
+				if ach.Id and not got[ach.Id] then
+					local val = if ach.Type == "level" then myLvl else (tonumber(counts[ach.Type]) or 0)
+					if val >= (tonumber(ach.Count) or 1) then
+						local bKey = "ach:" .. tostring(ach.Id)
+						if not isBackedOff(bKey, nowClk, forceManual) then
+							table.insert(det.targets.achieveIds, ach.Id)
+							det.any = true
+						else
+							noteNextWake((backoffUntil[bKey] or nowClk) - nowClk)
 						end
 					end
 				end
 			end
+			if #det.targets.achieveIds > 0 then
+				table.insert(det.reasons, "Achieve (" .. tostring(#det.targets.achieveIds) .. ")")
+			end
 		end
 
-		HUB.Stats.rewardsClaimed = HUB.Stats.rewardsClaimed + 1
-		local triggerInfo = (reason and reason ~= "") and (" [" .. tostring(reason) .. "]") or ""
-		if HUB.UI.ClaimStatusLabel then
-			HUB.UI.ClaimStatusLabel.Text = string.format("สถานะ: ตรวจจับอัตโนมัติ · เคลมแล้ว %d รอบ (%s)%s", HUB.Stats.rewardsClaimed, os.date("%H:%M:%S"), triggerInfo)
+		-- 1.5 Completed Active Quests (Turn In & Claim ผ่าน PageQuest ได้จากทุกที่)
+		local questData = getSharedModule("QuestData")
+		local questsTbl = decodePlayerJson("QuestsJson")
+		if questData and type(questData.Quests) == "table" and type(questsTbl) == "table" and type(questsTbl.Active) == "table" then
+			local itemsTbl = nil
+			for qid, prog in pairs(questsTbl.Active) do
+				local q = questData.Quests[qid]
+				if q then
+					local val = tonumber(prog) or 0
+					if q.Type == "collect" then
+						if itemsTbl == nil then
+							itemsTbl = decodePlayerJson("ItemsJson") or {}
+						end
+						val = tonumber(itemsTbl[q.Target]) or 0
+					elseif q.Type == "level" then
+						val = myLvl
+					end
+					if val >= (tonumber(q.Count) or 1) then
+						local bKey = "quest:" .. tostring(qid)
+						if not isBackedOff(bKey, nowClk, forceManual) then
+							table.insert(det.targets.questIds, qid)
+							det.any = true
+						else
+							noteNextWake((backoffUntil[bKey] or nowClk) - nowClk)
+						end
+					end
+				end
+			end
+			if #det.targets.questIds > 0 then
+				table.insert(det.reasons, "Quests (" .. tostring(#det.targets.questIds) .. ")")
+			end
 		end
-		if HUB.UI.StatRewardCount then
-			HUB.UI.StatRewardCount.Text = tostring(HUB.Stats.rewardsClaimed) .. " รอบ"
+
+		-- 1.6 Newbie Campaign (เฉพาะบัญชีที่ NewbieActive == true)
+		if getPlayerAttr("NewbieActive") == true then
+			local nbData = getSharedModule("NewbieCampaignData")
+			local nbTbl = decodePlayerJson("NewbieJson")
+			if nbData and type(nbTbl) == "table" then
+				local nbClaimed = asTable(nbTbl.claimed)
+				local onlineMin = (tonumber(nbTbl.online) or 0) / 60
+				local supported = nbData.SupportedKinds
+				local function queueNb(kind, id, rewards)
+					if not allKindsSupported(rewards, supported) then return end
+					local bKey = "nb:" .. kind .. ":" .. tostring(id)
+					if not isBackedOff(bKey, nowClk, forceManual) then
+						table.insert(det.targets.newbieItems, { kind = kind, id = id, bKey = bKey })
+						det.any = true
+					else
+						noteNextWake((backoffUntil[bKey] or nowClk) - nowClk)
+					end
+				end
+				for _, pt in ipairs(nbData.PlayTime or {}) do
+					if not nbClaimed["time:" .. tostring(pt.id)] and onlineMin >= (tonumber(pt.min) or 0) then
+						queueNb("time", pt.id, pt.rewards)
+					end
+				end
+				for _, lvItem in ipairs(nbData.Levels or {}) do
+					if not nbClaimed["level:" .. tostring(lvItem.id)] and myLvl >= (tonumber(lvItem.lv) or 0) then
+						queueNb("level", lvItem.id, lvItem.rewards)
+					end
+				end
+				local nbMissions = asTable(nbTbl.missions)
+				for _, ms in ipairs(nbData.Missions or {}) do
+					if not nbClaimed["mission:" .. tostring(ms.id)] and nbMissions[ms.id] then
+						queueNb("mission", ms.id, ms.rewards)
+					end
+				end
+				local claimedDayCnt = 0
+				for k in pairs(nbClaimed) do
+					if string.sub(k, 1, 4) == "day:" then
+						claimedDayCnt = claimedDayCnt + 1
+					end
+				end
+				local nbDay = tonumber(nbTbl.day) or 0
+				local checkInList = nbData.CheckIn or {}
+				if claimedDayCnt < nbDay and claimedDayCnt < #checkInList then
+					local nextDay = claimedDayCnt + 1
+					local entry = checkInList[nextDay]
+					if entry and not nbClaimed["day:" .. tostring(nextDay)] then
+						queueNb("day", tostring(nextDay), entry.rewards)
+					end
+				end
+				if #det.targets.newbieItems > 0 then
+					table.insert(det.reasons, "Newbie (" .. tostring(#det.targets.newbieItems) .. ")")
+				end
+			end
+		end
+
+		return det
+	end
+
+	-- 2. ฟังก์ชันเคลมแบบเจาะจง + เว้นระยะกัน Rate-Limit + ยืนยันผลจาก State จริง
+	local claimingNow = false
+	local scheduleSmartWake
+
+	local function claimAll(reason, forceManual)
+		if claimingNow then return false, 0 end
+		local rFolder = ReplicatedStorage:FindFirstChild("Remotes")
+		if not rFolder then return false, 0 end
+
+		local det = detectClaimableRewards(forceManual)
+		if not det.any then
+			if forceManual and HUB.UI.ClaimStatusLabel then
+				HUB.UI.ClaimStatusLabel.Text = string.format("สถานะ: ไม่มีรางวัลที่พร้อมเคลมตอนนี้ (เคลมสำเร็จ %d รอบ)", HUB.Stats.rewardsClaimed)
+			end
+			if type(scheduleSmartWake) == "function" then
+				scheduleSmartWake(det.nextWakeIn)
+			end
+			return false, 0
+		end
+
+		claimingNow = true
+		local verifiedClaims = 0
+		local attemptedClaims = 0
+		local claimedSummary = {}
+
+		local function updateClaimedStats(labelTag)
+			verifiedClaims = verifiedClaims + 1
+			table.insert(claimedSummary, labelTag)
+		end
+
+		local t = det.targets
+
+		-- 2.1 RewardAction (เว้น ≥0.58s ต่อคำสั่ง ป้องกัน server rate-limit drop)
+		local rewardAction = rFolder:FindFirstChild("RewardAction")
+		if rewardAction then
+			if t.c8 then
+				attemptedClaims = attemptedClaims + 1
+				local snap = snapshotAttrs({ "RewardsJson", "RewardsReady" })
+				fireWithSpacing(rewardAction, 0.58, "c8", nil)
+				if waitForAttrDelta(snap, { "RewardsJson", "RewardsReady" }, 0.75) then
+					clearBackoff("reward:c8")
+					updateClaimedStats("8-Day")
+				else
+					markBackoff("reward:c8")
+				end
+			end
+
+			if t.month then
+				attemptedClaims = attemptedClaims + 1
+				local snap = snapshotAttrs({ "RewardsJson", "RewardsReady" })
+				fireWithSpacing(rewardAction, 0.58, "month", nil)
+				if waitForAttrDelta(snap, { "RewardsJson", "RewardsReady" }, 0.75) then
+					clearBackoff("reward:month")
+					updateClaimedStats("Monthly")
+				else
+					markBackoff("reward:month")
+				end
+			end
+
+			for _, days in ipairs(t.milestones) do
+				attemptedClaims = attemptedClaims + 1
+				local bKey = "reward:mile:" .. tostring(days)
+				local snap = snapshotAttrs({ "RewardsJson", "RewardsReady" })
+				fireWithSpacing(rewardAction, 0.58, "mile", days)
+				if waitForAttrDelta(snap, { "RewardsJson", "RewardsReady" }, 0.75) then
+					clearBackoff(bKey)
+					updateClaimedStats("Milestone " .. tostring(days) .. "d")
+				else
+					markBackoff(bKey)
+				end
+			end
+
+			for _, slot in ipairs(t.onlineSlots) do
+				attemptedClaims = attemptedClaims + 1
+				local bKey = "reward:online:" .. tostring(slot)
+				local snap = snapshotAttrs({ "RewardsJson", "RewardsReady" })
+				fireWithSpacing(rewardAction, 0.58, "online", slot)
+				if waitForAttrDelta(snap, { "RewardsJson", "RewardsReady" }, 0.75) then
+					clearBackoff(bKey)
+					updateClaimedStats("Online #" .. tostring(slot))
+				else
+					markBackoff(bKey)
+				end
+			end
+		end
+
+		-- 2.2 MailAction (เคลม + ลบเฉพาะจดหมายที่เคลมแล้วเมื่อเคลมจริงเท่านั้น)
+		local mailAction = rFolder:FindFirstChild("MailAction")
+		if mailAction and t.mail then
+			attemptedClaims = attemptedClaims + 1
+			local snap = snapshotAttrs({ "MailUnclaimed", "MailJson" })
+			fireWithSpacing(mailAction, 0.30, "claimall")
+			if waitForAttrDelta(snap, { "MailUnclaimed", "MailJson" }, 0.85) then
+				clearBackoff("mail:claimall")
+				updateClaimedStats("Mailbox")
+				fireWithSpacing(mailAction, 0.25, "deleteclaimed")
+			else
+				markBackoff("mail:claimall")
+			end
+		end
+
+		-- 2.3 BattlePassAction
+		local bpAction = rFolder:FindFirstChild("BattlePassAction")
+		if bpAction and (t.bpRewards or t.bpMissions) then
+			if t.bpRewards then
+				attemptedClaims = attemptedClaims + 1
+				local snap = snapshotAttrs({ "BattlePassJson", "BattlePassReady" })
+				fireWithSpacing(bpAction, 0.28, "claimAll")
+				if waitForAttrDelta(snap, { "BattlePassJson", "BattlePassReady" }, 0.75) then
+					clearBackoff("bp:claimAll")
+					updateClaimedStats("BP Rewards")
+				else
+					markBackoff("bp:claimAll")
+				end
+			end
+			if t.bpMissions then
+				attemptedClaims = attemptedClaims + 1
+				local snap = snapshotAttrs({ "BattlePassJson", "BattlePassReady" })
+				fireWithSpacing(bpAction, 0.28, "missionAll")
+				if waitForAttrDelta(snap, { "BattlePassJson", "BattlePassReady" }, 0.75) then
+					clearBackoff("bp:missionAll")
+					updateClaimedStats("BP Missions")
+				else
+					markBackoff("bp:missionAll")
+				end
+			end
+		end
+
+		-- 2.4 AchieveAction
+		local achAction = rFolder:FindFirstChild("AchieveAction")
+		if achAction and #t.achieveIds > 0 then
+			local snap = snapshotAttrs({ "AchieveJson", "AchieveReady" })
+			for _, achId in ipairs(t.achieveIds) do
+				attemptedClaims = attemptedClaims + 1
+				fireWithSpacing(achAction, 0.22, "claim", achId, false)
+			end
+			if waitForAttrDelta(snap, { "AchieveJson", "AchieveReady" }, 0.85) then
+				local afterAch = decodePlayerJson("AchieveJson")
+				local gotAfter = if afterAch then asTable(afterAch.Got) else {}
+				local okCount = 0
+				for _, achId in ipairs(t.achieveIds) do
+					if gotAfter[achId] then
+						clearBackoff("ach:" .. tostring(achId))
+						okCount = okCount + 1
+					else
+						markBackoff("ach:" .. tostring(achId))
+					end
+				end
+				if okCount > 0 then
+					updateClaimedStats("Achieve x" .. tostring(okCount))
+				end
+			else
+				for _, achId in ipairs(t.achieveIds) do
+					markBackoff("ach:" .. tostring(achId))
+				end
+			end
+		end
+
+		-- 2.5 QuestAction ("claim", qid)
+		local questAction = rFolder:FindFirstChild("QuestAction")
+		if questAction and #t.questIds > 0 then
+			local snap = snapshotAttrs({ "QuestsJson" })
+			for _, qid in ipairs(t.questIds) do
+				attemptedClaims = attemptedClaims + 1
+				fireWithSpacing(questAction, 0.25, "claim", qid)
+			end
+			if waitForAttrDelta(snap, { "QuestsJson" }, 0.85) then
+				local afterQ = decodePlayerJson("QuestsJson")
+				local activeAfter = if afterQ then asTable(afterQ.Active) else {}
+				local okCount = 0
+				for _, qid in ipairs(t.questIds) do
+					if activeAfter[qid] == nil then
+						clearBackoff("quest:" .. tostring(qid))
+						okCount = okCount + 1
+					else
+						markBackoff("quest:" .. tostring(qid))
+					end
+				end
+				if okCount > 0 then
+					updateClaimedStats("Quest x" .. tostring(okCount))
+				end
+			else
+				for _, qid in ipairs(t.questIds) do
+					markBackoff("quest:" .. tostring(qid))
+				end
+			end
+		end
+
+		-- 2.6 NewbieCampaign (InvokeServer คืนผล true/false ตรงจากเซิร์ฟเวอร์)
+		local newbieRemote = rFolder:FindFirstChild("NewbieCampaign")
+		if newbieRemote and #t.newbieItems > 0 then
+			local nbOkCount = 0
+			for _, item in ipairs(t.newbieItems) do
+				attemptedClaims = attemptedClaims + 1
+				local callOk, srvOk = fireWithSpacing(newbieRemote, 0.25, "claim", item.kind, item.id)
+				if callOk and srvOk == true then
+					clearBackoff(item.bKey)
+					nbOkCount = nbOkCount + 1
+				else
+					markBackoff(item.bKey)
+				end
+			end
+			if nbOkCount > 0 then
+				updateClaimedStats("Newbie x" .. tostring(nbOkCount))
+			end
+		end
+
+		-- อัปเดตสถิติเฉพาะเมื่อมีการเคลมสำเร็จจริงเท่านั้น!
+		if verifiedClaims > 0 then
+			HUB.Stats.rewardsClaimed = HUB.Stats.rewardsClaimed + verifiedClaims
+			local sumStr = table.concat(claimedSummary, ", ")
+			local modeWord = if HUB.Config.autoClaim then "ตรวจจับอัตโนมัติ" else "กำหนดเอง"
+			if HUB.UI.ClaimStatusLabel then
+				HUB.UI.ClaimStatusLabel.Text = string.format(
+					"สถานะ: %s · เคลมสำเร็จ %d รอบ (%s) [%s]",
+					modeWord,
+					HUB.Stats.rewardsClaimed,
+					os.date("%H:%M:%S"),
+					sumStr
+				)
+			end
+			if HUB.UI.StatRewardCount then
+				HUB.UI.StatRewardCount.Text = tostring(HUB.Stats.rewardsClaimed) .. " รอบ"
+			end
+		elseif attemptedClaims > 0 and HUB.UI.ClaimStatusLabel then
+			local infoTag = if reason and reason ~= "" then (" (" .. tostring(reason) .. ")") else ""
+			HUB.UI.ClaimStatusLabel.Text = string.format(
+				"สถานะ: รอเซิร์ฟเวอร์/คูลดาวน์%s · เคลมแล้ว %d รอบ",
+				infoTag,
+				HUB.Stats.rewardsClaimed
+			)
 		end
 
 		claimingNow = false
+
+		if HUB.Config.autoClaim and type(scheduleSmartWake) == "function" then
+			local postDet = detectClaimableRewards(false)
+			scheduleSmartWake(postDet.nextWakeIn)
+		end
+
+		return verifiedClaims > 0, verifiedClaims
 	end
 
 	HUB.ClaimAllRewards = claimAll
 	HUB.DetectClaimableRewards = detectClaimableRewards
 
-	-- 3. Reactive Event Listeners (ตรวจจับอัตโนมัติ Real-Time เมื่อเซิร์ฟเวอร์แจ้งมีของให้รับ)
-	local scheduled = false
-	local function triggerReactiveClaim(attrName)
+	-- 3. Adaptive Smart Timer (ปลุกเฉพาะตอนถึงเวลา Online Slot หรือหมด Backoff · ไม่ polling ถี่)
+	local wakeGeneration = 0
+	scheduleSmartWake = function(delaySec)
+		wakeGeneration = wakeGeneration + 1
+		local myGen = wakeGeneration
 		if not HUB.Alive or not HUB.Config.autoClaim then return end
-		if scheduled then return end
-		scheduled = true
-		task.delay(0.25, function()
-			scheduled = false
-			if not HUB.Alive or not HUB.Config.autoClaim then return end
-			local det = detectClaimableRewards()
-			if det.any then
-				local reasonStr = table.concat(det.reasons, ", ")
-				claimAll(reasonStr)
+		if type(delaySec) ~= "number" or delaySec <= 0 then return end
+		local cappedDelay = math.clamp(delaySec, 2, 180)
+		task.delay(cappedDelay, function()
+			if myGen ~= wakeGeneration or not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then
+				return
+			end
+			if HUB.Config.autoClaim then
+				claimAll("Timer")
 			end
 		end)
 	end
 
-	-- ดักจับสัญญาณการเปลี่ยนแปลงของ Attributes รางวัลทั้งหมด
+	-- 4. Reactive Event Listeners (Debounce 0.25s · เชื่อมทั้ง LocalPlayer และ LumiPrivateData)
+	local scheduled = false
+	local lastItemQuestCheck = 0
+	local function triggerReactiveClaim(attrName)
+		if not HUB.Alive or not HUB.Config.autoClaim then return end
+		if attrName == "RewardsJson" or attrName == "RewardsReady" then
+			clearBackoffPrefix("reward:")
+		elseif attrName == "MailJson" or attrName == "MailUnclaimed" then
+			clearBackoffPrefix("mail:")
+		elseif attrName == "BattlePassJson" or attrName == "BattlePassReady" then
+			clearBackoffPrefix("bp:")
+		elseif attrName == "AchieveJson" or attrName == "AchieveReady" then
+			clearBackoffPrefix("ach:")
+		elseif attrName == "QuestsJson" then
+			clearBackoffPrefix("quest:")
+		elseif attrName == "NewbieJson" or attrName == "NewbieActive" then
+			clearBackoffPrefix("nb:")
+		end
+		if scheduled then return end
+		scheduled = true
+		task.delay(0.25, function()
+			scheduled = false
+			if not HUB.Alive or not HUB.Config.autoClaim or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+			local det = detectClaimableRewards(false)
+			if det.any then
+				claimAll(table.concat(det.reasons, ", "))
+			else
+				scheduleSmartWake(det.nextWakeIn)
+			end
+		end)
+	end
+
+	local function hasActiveCollectQuest()
+		local qd = getSharedModule("QuestData")
+		local qt = decodePlayerJson("QuestsJson")
+		if not qd or type(qd.Quests) ~= "table" or type(qt) ~= "table" or type(qt.Active) ~= "table" then
+			return false
+		end
+		for qid in pairs(qt.Active) do
+			local q = qd.Quests[qid]
+			if q and q.Type == "collect" then
+				return true
+			end
+		end
+		return false
+	end
+
 	local rewardSignals = {
 		"RewardsReady",
-		"DailyJson",
+		"RewardsJson",
 		"MailUnclaimed",
 		"MailJson",
 		"BattlePassReady",
 		"BattlePassJson",
 		"AchieveReady",
-		"RewardsJson",
+		"AchieveJson",
+		"QuestsJson",
+		"NewbieActive",
+		"NewbieJson",
 		"Level",
 	}
-	for _, attr in ipairs(rewardSignals) do
-		HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal(attr):Connect(function()
-			triggerReactiveClaim(attr)
+
+	local hookedTargets = {}
+	local function bindRewardListenersOn(inst)
+		if not inst or hookedTargets[inst] then return end
+		hookedTargets[inst] = true
+		for _, attr in ipairs(rewardSignals) do
+			HUB:AddConnection(inst:GetAttributeChangedSignal(attr):Connect(function()
+				triggerReactiveClaim(attr)
+			end))
+		end
+		HUB:AddConnection(inst:GetAttributeChangedSignal("ItemsJson"):Connect(function()
+			if not HUB.Alive or not HUB.Config.autoClaim then return end
+			local nowClk = os.clock()
+			if nowClk - lastItemQuestCheck < 0.8 then return end
+			lastItemQuestCheck = nowClk
+			if hasActiveCollectQuest() then
+				triggerReactiveClaim("QuestsJson")
+			end
 		end))
 	end
 
-	-- 4. Initial Check on Startup / Boot
+	bindRewardListenersOn(LocalPlayer)
+	local initLpd = getLumiPrivateData()
+	if initLpd then
+		bindRewardListenersOn(initLpd)
+	else
+		local pgui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		if pgui then
+			HUB:AddConnection(pgui.ChildAdded:Connect(function(ch)
+				if ch.Name == "LumiPrivateData" then
+					lpdRef = ch
+					bindRewardListenersOn(ch)
+				end
+			end))
+		end
+	end
+
+	-- 5. Initial Check on Startup / Boot
 	task.defer(function()
 		task.wait(2.0)
-		if HUB.Alive and HUB.Config.autoClaim then
-			local det = detectClaimableRewards()
+		if HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN and HUB.Config.autoClaim then
+			local det = detectClaimableRewards(false)
 			if det.any then
 				claimAll(table.concat(det.reasons, ", "))
-			end
-		end
-	end)
-
-	-- 5. Fallback Safety Net (ตรวจเช็คทุก 60 วินาที เฉพาะเมื่อมีของรอเคลม เพื่อกันหลุดรอบ)
-	task.spawn(function()
-		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
-			task.wait(60)
-			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
-			if HUB.Config.autoClaim then
-				local det = detectClaimableRewards()
-				if det.any then
-					claimAll("Safety Net: " .. table.concat(det.reasons, ", "))
-				end
+			else
+				scheduleSmartWake(det.nextWakeIn)
 			end
 		end
 	end)
