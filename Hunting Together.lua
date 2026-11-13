@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.13)
+-- Hunting Together Hub (v10.14)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.13"
+local VERSION = "10.14"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -114,7 +114,36 @@ local function purgeAllGhostConnections()
 	local getInfoFn = EXEC.getinfo or (debug and debug.getinfo)
 	local getUpvalsFn = EXEC.getupvalues or (debug and debug.getupvalues)
 
-	local function disconnectExecSignal(sig)
+	local function inspectFnForGhostHub(fn, depth, visited)
+		if type(getUpvalsFn) ~= "function" or type(fn) ~= "function" or depth > 2 then
+			return false
+		end
+		if visited[fn] then
+			return false
+		end
+		visited[fn] = true
+		local found = false
+		local okUv, uvs = pcall(getUpvalsFn, fn)
+		if okUv and type(uvs) == "table" then
+			for _, uv in pairs(uvs) do
+				if type(uv) == "table" and type(uv.Connections) == "table" and uv.Alive ~= nil then
+					found = true
+					uv.Alive = false
+					for _, oldConn in ipairs(uv.Connections) do
+						pcall(function() oldConn:Disconnect() end)
+					end
+					table.clear(uv.Connections)
+				elseif type(uv) == "function" and depth < 2 then
+					if inspectFnForGhostHub(uv, depth + 1, visited) then
+						found = true
+					end
+				end
+			end
+		end
+		return found
+	end
+
+	local function disconnectExecSignal(sig, ghostOnly)
 		if not sig then return end
 		local okConn, conns = pcall(EXEC.getconnections, sig)
 		if not okConn or type(conns) ~= "table" then return end
@@ -122,27 +151,15 @@ local function purgeAllGhostConnections()
 			local fn = c.Function
 			if fn then
 				local isExec = false
-				if type(getInfoFn) == "function" then
+				if not ghostOnly and type(getInfoFn) == "function" then
 					local okInfo, info = pcall(getInfoFn, fn)
 					if okInfo and info and info.source and (info.source:find("loadstring") or info.source == "=") then
 						isExec = true
 					end
 				end
-				-- ค้นหาตาราง Ghost HUB เก่าใน Upvalues เพื่อสั่งปิด Alive = false และ Disconnect ทุก Connection ที่สะสมค้างอยู่
-				if type(getUpvalsFn) == "function" then
-					local okUv, uvs = pcall(getUpvalsFn, fn)
-					if okUv and type(uvs) == "table" then
-						for _, uv in pairs(uvs) do
-							if type(uv) == "table" and type(uv.Connections) == "table" and uv.Alive ~= nil then
-								isExec = true
-								uv.Alive = false
-								for _, oldConn in ipairs(uv.Connections) do
-									pcall(function() oldConn:Disconnect() end)
-								end
-								table.clear(uv.Connections)
-							end
-						end
-					end
+				-- ค้นหาตาราง Ghost HUB เก่าใน Upvalues (รวม nested helper) เพื่อสั่งปิด Alive = false และ Disconnect ทุก Connection ที่สะสมค้างอยู่
+				if inspectFnForGhostHub(fn, 0, {}) then
+					isExec = true
 				end
 				if isExec then
 					pcall(function() c:Disconnect() end)
@@ -153,12 +170,34 @@ local function purgeAllGhostConnections()
 
 	local attrSignals = {
 		"GearJson", "StorageGearJson", "LocksJson", "EquipJson", "WeaponId",
-		"BagSlotsUsed", "Silver", "AutoOn", "LumiSprintLock", "BotReviveWalk", "LumiFollowUserId"
+		"BagSlotsUsed", "Silver", "AutoOn", "LumiSprintLock", "BotReviveWalk", "LumiFollowUserId",
+		"LumiBaseSpeed", "SpeedPct", "MountId", "LumiSprinting", "TrickBatsSlow",
+		"HuntGachaFXOpen", "IntroCutscenePlaying", "IntroLoadingDone", "DungeonDowned", "Sitting"
 	}
 	for _, sigName in ipairs(attrSignals) do
 		local ok, sig = pcall(LocalPlayer.GetAttributeChangedSignal, LocalPlayer, sigName)
 		if ok and sig then
 			disconnectExecSignal(sig)
+		end
+	end
+
+	-- ตรวจจับ Ghost Heartbeat / Character Connections เฉพาะที่เป็นของ HUB เวอร์ชันเก่า (ghostOnly = true ไม่แตะสคริปต์เกมหรือเครื่องมืออื่น)
+	pcall(function()
+		disconnectExecSignal(RunService.Heartbeat, true)
+	end)
+	local curChar = LocalPlayer.Character
+	if curChar then
+		for _, cSigName in ipairs({ "TrickBatsSlow", "LumiWarpIn" }) do
+			local ok, sig = pcall(curChar.GetAttributeChangedSignal, curChar, cSigName)
+			if ok and sig then
+				disconnectExecSignal(sig, true)
+			end
+		end
+		local curHum = curChar:FindFirstChildOfClass("Humanoid")
+		if curHum then
+			pcall(function()
+				disconnectExecSignal(curHum:GetPropertyChangedSignal("WalkSpeed"), true)
+			end)
 		end
 	end
 
@@ -522,9 +561,13 @@ function HUB.Unload(self, isShuttingDown, isReloading)
 		if self.ClearStalledMobs then
 			pcall(self.ClearStalledMobs)
 		end
+		self.BrazierSprintHold = false
 		pcall(function()
 			LocalPlayer:SetAttribute("LumiSprintLock", false)
 			LocalPlayer:SetAttribute("BotReviveWalk", nil)
+			if self.RestoreSpeedOnUnload then
+				pcall(self.RestoreSpeedOnUnload)
+			end
 			local char = LocalPlayer.Character
 			if char then
 				for _, p in ipairs(char:GetDescendants()) do
@@ -541,6 +584,7 @@ function HUB.Unload(self, isShuttingDown, isReloading)
 		purgeAllGhostConnections()
 		print("[Hunting Together Hub] Unloaded สำเร็จ")
 	else
+		self.BrazierSprintHold = false
 		pcall(function()
 			if self.UI and self.UI.ScreenGui then
 				self.UI.ScreenGui:Destroy()
@@ -1559,8 +1603,8 @@ local function saveConfig()
 		dungeonCandleOrder = HUB.Config.dungeonCandleOrder or "nearest",
 		dungeonAfterClear = HUB.Config.dungeonAfterClear or "wait",
 		speedBoostOn = (HUB.Config.speedBoostOn == true),
-		speedBoostPct = HUB.Config.speedBoostPct or 15,
-		speedBaseClean = HUB.Config.speedBaseClean or 0,
+		speedBoostPct = math.clamp(tonumber(HUB.Config.speedBoostPct) or 15, 0, 30),
+		speedBaseClean = 0,
 		autoJoinDungeon = (HUB.Config.autoJoinDungeon == true),
 		dungeonAutoJoin = (HUB.Config.dungeonAutoJoin ~= false),
 		dungeonCryptJoinDelay = tonumber(HUB.Config.dungeonCryptJoinDelay) or 10,
@@ -8655,16 +8699,45 @@ do
 	)
 	HUB.UI.RejoinStatusLabel = rejoinStatusLabel
 
-	-- Speed Boost: เปิด/ปิด + เลือกเปอร์เซ็นต์โบนัสความเร็ว (ใช้ฐานจาก LumiBaseSpeed ของเกม)
+	-- Speed Boost: เปิด/ปิด + เลือกเปอร์เซ็นต์โบนัสความเร็ว (คำนวณจากค่าฐานจริงของเกม + ซิงค์กับ SprintClient)
+	local function updateSpeedBoostLabel(label)
+		local targetLabel = label or HUB.UI.SpeedBoostStatusLabel
+		if not targetLabel then return end
+		local pct = math.clamp(tonumber(HUB.Config.speedBoostPct) or 15, 0, 30)
+		local stateText = "ปิดใช้งาน"
+		if HUB.Config.speedBoostOn == true then
+			if HUB.IsSpeedBoostFrozen == true then
+				stateText = "พักชั่วคราว (แช่แข็ง)"
+			else
+				stateText = "เปิดใช้งาน"
+			end
+		end
+		local wsText = ""
+		if HUB.ComputeTrueNormalWalkSpeed then
+			local base = HUB.ComputeTrueNormalWalkSpeed()
+			if base and base > 0 then
+				if HUB.Config.speedBoostOn == true then
+					wsText = string.format(" · เป้า %.1f WS", base * (1 + pct / 100))
+				else
+					wsText = string.format(" · ปกติ %.1f WS", base)
+				end
+			end
+		end
+		targetLabel.Text = string.format("สถานะ: %s · โบนัส %d%%%s", stateText, pct, wsText)
+	end
+	HUB.UpdateSpeedBoostLabel = updateSpeedBoostLabel
+
 	local _, speedBoostStatus = createCard(
 			scrollSettings,
 			"Speed Boost (วิ่งเร็วขึ้นตามค่าที่เซิร์ฟเวอร์อนุญาต)",
-			"เพิ่มความเร็วเดินจากค่า LumiBaseSpeed ของเกมตามเปอร์เซ็นต์ที่เลือก ระหว่างกด Sprint เกมจะคุมความเร็วเอง",
+			"เพิ่มความเร็วเดินและสปรินต์จากค่าฐานจริงของเกมตามเปอร์เซ็นต์ที่เลือก (ปลด/คืนค่าอัตโนมัติทันที)",
 			HUB.Config.speedBoostOn == true,
 			function(enabled, label)
-				HUB.Config.speedBoostOn = enabled
-				label.Text = string.format("สถานะ: %s · โบนัส %d%%", enabled and "เปิดใช้งาน" or "ปิดใช้งาน", HUB.Config.speedBoostPct or 15)
-				if HUB.Config.autoSave then saveConfig() end
+				HUB.Config.speedBoostOn = (enabled == true)
+				updateSpeedBoostLabel(label)
+				if HUB.ApplySpeedBoostNow then
+					HUB.ApplySpeedBoostNow(true)
+				end
 			end,
 			nil,
 			function(subPanel, card, cStatus, setExpandHeight)
@@ -8683,12 +8756,18 @@ do
 
 				local pctBtns = {}
 				local function refreshPctBtns()
-					local cur = HUB.Config.speedBoostPct or 15
+					local cur = math.clamp(tonumber(HUB.Config.speedBoostPct) or 15, 0, 30)
 					for _, item in ipairs(pctBtns) do
 						local on = (item.pct == cur)
-						item.btn.BackgroundColor3 = on and THEME.BtnGreen or THEME.BtnOff
-						item.btn.TextColor3 = on and Color3.fromRGB(255, 255, 255) or THEME.TextDark
-						item.btn.Text = (on and "✓ " or "") .. tostring(item.pct) .. "%"
+						if on then
+							item.btn.BackgroundColor3 = THEME.BtnGreen
+							item.btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+							item.btn.Text = "✓ " .. tostring(item.pct) .. "%"
+						else
+							item.btn.BackgroundColor3 = THEME.BtnOff
+							item.btn.TextColor3 = THEME.TextDark
+							item.btn.Text = tostring(item.pct) .. "%"
+						end
 					end
 				end
 
@@ -8707,13 +8786,19 @@ do
 					HUB:AddConnection(b.MouseButton1Click:Connect(function()
 						HUB.Config.speedBoostPct = pct
 						refreshPctBtns()
+						updateSpeedBoostLabel(cStatus)
 						if HUB.Config.autoSave then saveConfig() end
+						if HUB.ApplySpeedBoostNow then
+							HUB.ApplySpeedBoostNow(true)
+						end
 					end))
 				end
 				refreshPctBtns()
+				HUB.RefreshSpeedBoostPctBtns = refreshPctBtns
 			end
 		)
 		HUB.UI.SpeedBoostStatusLabel = speedBoostStatus
+		updateSpeedBoostLabel(speedBoostStatus)
 
 	local _, saveStatusLabel = createCard(
 		scrollSettings,
@@ -12457,6 +12542,7 @@ do
 			local hum = char and char:FindFirstChildOfClass("Humanoid")
 			if root then root.Anchored = false end
 			if hum and root then hum:MoveTo(root.Position) end
+			setSprinting(false)
 		end)
 		if HUB.UI.BossStatusLabel and not HUB.Config.autoFarmBoss then
 			HUB.UI.BossStatusLabel.Text = "สถานะ: ปิดใช้งาน"
@@ -13319,7 +13405,8 @@ do
 			end
 		end
 
-		local function cleanupDodge()
+		local dodgeLoopWasActive = true
+		local function cleanupDodge(forceStopSprint)
 			isDodging = false
 			HUB.Dodging = false
 			didDodgeCount = false
@@ -13338,9 +13425,15 @@ do
 			pcall(function()
 				LocalPlayer:SetAttribute("BotReviveWalk", nil)
 			end)
-			local isAuto = isGameAutoActive()
-			local autoPlayTargeting = (HUB.Config.targetSprint ~= false) and isAuto and isPlayerInActiveCombat()
-			setSprinting(isAuto and autoPlayTargeting)
+			if forceStopSprint then
+				if not HUB.Navigating and not HUB.CollectingSkull then
+					setSprinting(false)
+				end
+			else
+				local isAuto = isGameAutoActive()
+				local autoPlayTargeting = (HUB.Config.targetSprint ~= false) and isAuto and isPlayerInActiveCombat()
+				setSprinting(isAuto and autoPlayTargeting)
+			end
 			if HUB.UI.DodgeStatusLabel and HUB.Config.autoDodge then
 				local buf = getDodgeBuffer()
 				HUB.UI.DodgeStatusLabel.Text = string.format("สถานะ: เปิดใช้งาน · หลบแล้ว %d ครั้ง (ระยะเผื่อ %.1f studs)", HUB.Stats.dodgesPerformed, buf)
@@ -13370,21 +13463,27 @@ do
 
 			local isHomeWarping = (HUB.IsHomeWarpActive and HUB.IsHomeWarpActive()) == true
 			if not HUB.Config.autoDodge or HUB.IsSellingRoutineActive or isHomeWarping or HUB.LightingCandle then
-				cleanupDodge()
+				if dodgeLoopWasActive or isDodging or isBound then
+					cleanupDodge((not HUB.Config.autoDodge) or isHomeWarping)
+					dodgeLoopWasActive = false
+				elseif isHomeWarping and LocalPlayer:GetAttribute("LumiSprintLock") == true then
+					setSprinting(false)
+				end
 				continue
 			end
+			dodgeLoopWasActive = true
 
 			pcall(function()
 				local char = LocalPlayer.Character
 				local root = char and char:FindFirstChild("HumanoidRootPart")
 				local hum = char and char:FindFirstChildOfClass("Humanoid")
 				if not (root and hum and hum.Health > 0) then
-					cleanupDodge()
+					cleanupDodge(true)
 					return
 				end
 
 				if isPlayerManualInput() then
-					cleanupDodge()
+					cleanupDodge(true)
 					return
 				end
 
@@ -13859,6 +13958,8 @@ do
 		HUB.IsSalvagingRoutineActive = false
 		HUB.Navigating = false
 		HUB.Dodging = false
+		HUB.BrazierSprintHold = false
+		setSprinting(false)
 		triggerAutoRespawn()
 	end
 
@@ -14052,6 +14153,8 @@ do
 		HUB.Navigating = false
 		HUB.Dodging = false
 		HUB.IsSalvagingRoutineActive = false
+		HUB.BrazierSprintHold = false
+		setSprinting(false)
 		HUB.UserManuallyStoppedFollow = false -- ปลดล็อคสถานะ เพื่อให้ Guardian กู้คืน Follow หลังเกิดใหม่
 		if HUB.CancelAutoBossRoutine then pcall(HUB.CancelAutoBossRoutine) end
 		if HUB.CancelAutoSellRoutine then pcall(HUB.CancelAutoSellRoutine) end
@@ -14111,107 +14214,585 @@ do
 	end))
 end
 
--- ===== 9.9 Speed Boost + ตัวแก้ฐานความเร็วที่ปนเปื้อน (v9.70) =====
--- เกมคูณฐานความเร็วด้วย 1.4 ตอน Sprint และบางครั้งค่าคูณนี้ค้างเป็นฐาน (LumiBaseSpeed) หลัง Sprint จบ
--- สคริปต์จำ "ฐานที่สะอาด" (cleanBase) ไว้ใน config แล้วแก้ค่าที่ปนเปื้อนอัตโนมัติเมื่อไม่ได้ Sprint
--- Speed Boost ใช้ cleanBase × (1 + %) เป็นเป้าหมาย และไม่แทรกตอน Sprint หรือตอนเกมตั้งค่าความเร็วเป็น 0 (แช่แข็ง/สตัน)
+-- ===== 9.9 Ground-Truth Speed Boost & SprintClient Sync Engine (v10.14) =====
+-- คำนวณความเร็วฐานที่แท้จริงของเกมแบบ Real-time จาก GameConfig.BaseWalkSpeed * (1 + SpeedPct / 100)
+-- รองรับการขี่ Mount (จับความเร็วเซิร์ฟเวอร์ช่วงเปลี่ยนสถานะ), TrickBatsSlow (*0.6), Freeze Guard ครบทุกสถานะของเกม
+-- และซิงค์ฐานความเร็วเข้ากับ SprintClient อย่างปลอดภัย ไม่สู้เฟรมและไม่คูณ 1.4x ซ้ำซ้อน รวมถึงคืนค่าสะอาดทันทีเมื่อปิด OFF
 do
 	local SPRINT_MULT = 1.4
-	local lastApplied = nil -- ค่า WalkSpeed ที่สคริปต์ตั้งล่าสุด ใช้แยกเสียงสะท้อนจาก LumiBaseSpeed
-	local lastAttr = nil -- ค่า LumiBaseSpeed ล่าสุดที่เห็น
+	local TRICK_BATS_MULT = 0.6
+	local WALK_EPSILON = 0.05
+	local SPRINT_SYNC_HOLD = 0.18
+	local MOUNT_TRANSITION_HOLD = 0.45
+
+	local GameConfigMod = nil
+	local mountedNormalSpeed = nil
+	local mountHoldUntil = 0
+	local mountPrevAppliedWalk = nil
+	local mountPrevAppliedSprint = nil
+	local prevMountId = LocalPlayer:GetAttribute("MountId")
+
+	local syncedTargetWalk = nil
+	local syncPendingUntil = 0
+	local lastWrittenWalk = nil
+	local wasBoostOn = (HUB.Config.speedBoostOn == true)
+	local needOffRestore = false
+	local pendingAfterFreeze = false
+	local wasFrozen = false
+	local prevWantSprint = false
+	local deferCheckScheduled = false
+	local charConns = {}
+
+	local function clearCharConns()
+		for _, c in ipairs(charConns) do
+			pcall(function() c:Disconnect() end)
+		end
+		table.clear(charConns)
+	end
+
+	local function getBaseWalkConstant()
+		if not GameConfigMod then
+			local shared = ReplicatedStorage:FindFirstChild("Shared")
+			local gc = nil
+			if shared then
+				gc = shared:FindFirstChild("GameConfig")
+			end
+			if gc and gc:IsA("ModuleScript") then
+				local ok, mod = pcall(require, gc)
+				if ok and type(mod) == "table" then
+					GameConfigMod = mod
+				end
+			end
+		end
+		if GameConfigMod then
+			local bw = tonumber(GameConfigMod.BaseWalkSpeed)
+			if bw and bw > 0 then
+				return bw
+			end
+		end
+		return 17.6
+	end
 
 	local function readBaseSpeed()
 		local v = tonumber(LocalPlayer:GetAttribute("LumiBaseSpeed"))
-		if v and v > 0 then return v end
+		if v and v > 0 then
+			return v
+		end
 		return nil
 	end
 
+	local function getBoostPct()
+		return math.clamp(tonumber(HUB.Config.speedBoostPct) or 15, 0, 30)
+	end
+
 	local function boostFactor()
-		if HUB.Config.speedBoostOn ~= true then return 1 end
-		return 1 + math.clamp(tonumber(HUB.Config.speedBoostPct) or 15, 0, 30) / 100
+		if HUB.Config.speedBoostOn ~= true then
+			return 1
+		end
+		return 1 + getBoostPct() / 100
 	end
 
-	local function sprintActive()
-		return LocalPlayer:GetAttribute("LumiSprinting") == true
-			or LocalPlayer:GetAttribute("LumiSprintLock") == true
-			or HUB.BrazierSprintHold == true
+	local function stripTrickBatsSlow(rawSpeed, char)
+		if not rawSpeed or rawSpeed <= 0 then
+			return nil
+		end
+		local ch = char
+		if not ch then
+			ch = LocalPlayer.Character
+		end
+		if ch and ch:GetAttribute("TrickBatsSlow") == true then
+			return rawSpeed / TRICK_BATS_MULT
+		end
+		return rawSpeed
 	end
 
-	-- ฐานที่สะอาด: ค่าความเร็วฐานโดยไม่มีโบนัสของสคริปต์และไม่มีตัวคูณ Sprint
-	local cleanBase = nil
-	local stored = tonumber(HUB.Config.speedBaseClean)
-	if stored and stored > 0 then cleanBase = stored end
-	do
-		local cur = readBaseSpeed()
-		local f0 = boostFactor()
-		lastAttr = cur
-		if cur then
-			if not cleanBase then
-				cleanBase = cur / f0
-			elseif math.abs(cur - cleanBase * f0) < 0.05 or math.abs(cur - cleanBase * f0 * SPRINT_MULT) < 0.05 then
-				-- ตรงกับฐานที่จำไว้ (หรือปนเปื้อน ซึ่งจะถูกแก้ใน Heartbeat)
+	local function computeUnmountedBase()
+		local speedPct = tonumber(LocalPlayer:GetAttribute("SpeedPct")) or 0
+		return getBaseWalkConstant() * (1 + speedPct / 100)
+	end
+
+	local function computeTrueNormalBase(char)
+		local ch = char
+		if not ch then
+			ch = LocalPlayer.Character
+		end
+		local base = computeUnmountedBase()
+		local mountId = LocalPlayer:GetAttribute("MountId")
+		if mountId ~= nil and mountedNormalSpeed and mountedNormalSpeed > 0 then
+			base = mountedNormalSpeed
+		end
+		if ch and ch:GetAttribute("TrickBatsSlow") == true then
+			base = base * TRICK_BATS_MULT
+		end
+		return base
+	end
+
+	HUB.ComputeTrueNormalWalkSpeed = function()
+		return computeTrueNormalBase(LocalPlayer.Character)
+	end
+
+	local function isScreenGuiEnabled(pgui, guiName)
+		if not pgui then return false end
+		local g = pgui:FindFirstChild(guiName)
+		if g and g:IsA("ScreenGui") and g.Enabled == true then
+			return true
+		end
+		return false
+	end
+
+	local function isPlayerMovementFrozen(char, hum, hrp)
+		if not char or not hum or hum.Health <= 0 then return true end
+		if hrp and hrp.Anchored then return true end
+		if hum.WalkSpeed <= 0.01 then return true end
+		if hum.Sit or hum.PlatformStand then return true end
+		if LocalPlayer:GetAttribute("HuntGachaFXOpen") == true then return true end
+		if char:GetAttribute("LumiWarpIn") == true then return true end
+		if LocalPlayer:GetAttribute("IntroCutscenePlaying") == true then return true end
+		if LocalPlayer:GetAttribute("IntroLoadingDone") ~= true then return true end
+		if LocalPlayer:GetAttribute("DungeonDowned") == true then return true end
+		if LocalPlayer:GetAttribute("Sitting") == true then return true end
+		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+		if pgui then
+			if pgui:FindFirstChild("ReturnWarpSkip") ~= nil then return true end
+			if pgui:FindFirstChild("IntroCutscene") ~= nil then return true end
+			if isScreenGuiEnabled(pgui, "IntroLoading") then return true end
+			if isScreenGuiEnabled(pgui, "LumiCutscene") then return true end
+			if isScreenGuiEnabled(pgui, "DownedShield") then return true end
+		end
+		return false
+	end
+
+	local function isWantingSprint()
+		if UIS:GetFocusedTextBox() ~= nil then
+			return false
+		end
+		if LocalPlayer:GetAttribute("LumiStaminaEmpty") == true then
+			return false
+		end
+		if LocalPlayer:GetAttribute("LumiSprintLock") == true then
+			return true
+		end
+		if LocalPlayer:GetAttribute("OptAutoRun") == true then
+			return true
+		end
+		if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then
+			return true
+		end
+		return false
+	end
+
+	-- เขียน WalkSpeed ให้ SprintClient จับค่า u36 และ LumiBaseSpeed ใหม่ได้อย่างถูกต้อง (ปลดกับดัก u37 == targetWalk)
+	local function writeWalkSpeedForSprintClient(hum, targetWalk, curLumiBase)
+		if not hum or not targetWalk or targetWalk <= 0 then return end
+		if math.abs(hum.WalkSpeed - targetWalk) <= 0.02 then
+			if curLumiBase == nil or math.abs(curLumiBase - targetWalk) > 0.02 then
+				hum.WalkSpeed = targetWalk + 0.025
+			end
+		end
+		hum.WalkSpeed = targetWalk
+	end
+
+	local function tryCaptureMountSpeed(char, hum)
+		local mountId = LocalPlayer:GetAttribute("MountId")
+		if mountId == nil then
+			mountedNormalSpeed = nil
+			mountHoldUntil = 0
+			return false
+		end
+		if mountedNormalSpeed and mountedNormalSpeed > 0 then
+			return true
+		end
+		local lumiBase = readBaseSpeed()
+		local curWS = 0
+		if hum then
+			curWS = hum.WalkSpeed
+		end
+		if curWS <= 0.01 then
+			return false
+		end
+		local prevW = mountPrevAppliedWalk
+		local prevS = mountPrevAppliedSprint
+		local lumiChanged = false
+		if lumiBase ~= nil then
+			if prevW == nil or math.abs(lumiBase - prevW) > 0.15 then
+				if not prevS or math.abs(lumiBase - prevS) > 0.15 then
+					lumiChanged = true
+				end
+			end
+		end
+		local wsChanged = false
+		if (prevW == nil or math.abs(curWS - prevW) > 0.15) and (prevS == nil or math.abs(curWS - prevS) > 0.15) then
+			wsChanged = true
+		end
+		if lumiChanged then
+			mountedNormalSpeed = stripTrickBatsSlow(lumiBase, char)
+			mountHoldUntil = 0
+			return true
+		elseif wsChanged then
+			local raw = curWS
+			if isWantingSprint() then
+				if lumiBase and math.abs(curWS - lumiBase * SPRINT_MULT) <= 0.15 then
+					raw = lumiBase
+				elseif prevW == nil then
+					raw = curWS / SPRINT_MULT
+				end
+			end
+			mountedNormalSpeed = stripTrickBatsSlow(raw, char)
+			mountHoldUntil = 0
+			return true
+		end
+		return false
+	end
+
+	local function applySpeedBoost(force)
+		if not HUB.Alive then return end
+
+		local char = LocalPlayer.Character
+		local hum = nil
+		local hrp = nil
+		if char then
+			hum = char:FindFirstChildOfClass("Humanoid")
+			hrp = char:FindFirstChild("HumanoidRootPart")
+		end
+
+		local boostOn = (HUB.Config.speedBoostOn == true)
+		if boostOn then
+			wasBoostOn = true
+			needOffRestore = false
+		elseif wasBoostOn then
+			wasBoostOn = false
+			needOffRestore = true
+		end
+
+		-- ขณะปิด OFF และคืนค่าเสร็จแล้ว ไม่ต้องเขียนทับ WalkSpeed อีกเลย
+		if not boostOn and not needOffRestore then
+			HUB.IsSpeedBoostFrozen = false
+			if wasFrozen then
+				wasFrozen = false
+			end
+			if force and HUB.UpdateSpeedBoostLabel then
+				pcall(HUB.UpdateSpeedBoostLabel)
+			end
+			return
+		end
+
+		local frozen = isPlayerMovementFrozen(char, hum, hrp)
+		if frozen then
+			local prevFrozen = wasFrozen
+			wasFrozen = true
+			if boostOn then
+				pendingAfterFreeze = true
+				HUB.IsSpeedBoostFrozen = true
 			else
-				cleanBase = cur / f0 -- เปลี่ยนจริง (เช่นอุปกรณ์) รับค่าใหม่
+				needOffRestore = true
+				HUB.IsSpeedBoostFrozen = false
 			end
-		end
-	end
-
-	local function persistClean()
-		HUB.Config.speedBaseClean = cleanBase or 0
-		if HUB.Config.autoSave then pcall(saveConfig) end
-	end
-	if cleanBase then persistClean() end
-
-	-- เกมหรือสคริปต์เปลี่ยนความเร็วฐาน: ถ้าค่าใหม่เป็นตัวคูณ Sprint ของค่าที่สะอาด ถือว่าปนเปื้อน ไม่รับเป็นฐาน
-	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("LumiBaseSpeed"):Connect(function()
-		local v = readBaseSpeed()
-		if not v then return end
-		local prev = lastAttr
-		lastAttr = v
-		if lastApplied and math.abs(v - lastApplied) < 0.05 then return end -- เสียงสะท้อนจาก Speed Boost ของเราเอง
-		local f = boostFactor()
-		local ref = cleanBase or prev
-		if ref then
-			local ratio1 = v / ref
-			local ratio2 = v / (ref * f)
-			if math.abs(ratio1 - SPRINT_MULT) < 0.01 or math.abs(ratio2 - SPRINT_MULT) < 0.01 then
-				return -- ปนเปื้อนด้วยตัวคูณ Sprint: เก็บฐานเดิมไว้ แล้วให้ Heartbeat แก้ค่า
+			if (force or prevFrozen ~= true) and HUB.UpdateSpeedBoostLabel then
+				pcall(HUB.UpdateSpeedBoostLabel)
 			end
+			return
 		end
-		if math.abs((cleanBase or 0) - v) > 0.01 then
-			cleanBase = v
-			persistClean()
-		end
-	end))
 
-	HUB:AddConnection(RunService.Heartbeat:Connect(function()
-		if not cleanBase then return end
-		local ch = LocalPlayer.Character
-		local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-		if not hum or hum.Health <= 0 then return end
+		local justUnfroze = wasFrozen
+		wasFrozen = false
+		HUB.IsSpeedBoostFrozen = false
 
-		-- ระหว่าง Sprint ให้เกมคุมความเร็วเอง และไม่แตะค่าที่เป็น 0 (แช่แข็ง/สตัน)
-		if sprintActive() then return end
-		local ws = hum.WalkSpeed
-		if ws <= 0.5 then return end
-
-		local f = boostFactor()
-		local target = cleanBase * f
-		if f > 1 then
-			if math.abs(ws - target) > 0.05 then
-				lastApplied = target -- ตั้งค่าก่อนเขียน เพื่อให้เสียงสะท้อนที่มาถึงทีหลังถูกข้าม
-				hum.WalkSpeed = target
+		local now = os.clock()
+		local mountId = LocalPlayer:GetAttribute("MountId")
+		if mountId ~= nil then
+			if mountedNormalSpeed == nil then
+				tryCaptureMountSpeed(char, hum)
+				if mountedNormalSpeed == nil and mountHoldUntil > 0 and now < mountHoldUntil then
+					return
+				end
+				if mountHoldUntil > 0 and now >= mountHoldUntil then
+					mountHoldUntil = 0
+				end
 			end
 		else
-			if ws > cleanBase + 0.05 then
-				-- เร็วกว่าฐานที่สะอาด (ปนเปื้อนหรือโบนัสค้าง) ⇒ แก้ให้เท่าฐาน
-				lastApplied = cleanBase
-				hum.WalkSpeed = cleanBase
-			elseif lastApplied and math.abs(ws - cleanBase) < 0.05 then
-				lastApplied = nil
+			mountedNormalSpeed = nil
+			mountHoldUntil = 0
+		end
+
+		local trueNormal = computeTrueNormalBase(char)
+		local curWS = hum.WalkSpeed
+		local lumiBase = readBaseSpeed()
+		local wantSprint = isWantingSprint()
+
+		-- ปิด OFF (หรือเพิ่งปลดแช่แข็งขณะปิด OFF): คืนค่าฐานปกติให้ทั้ง WalkSpeed และ SprintClient 1 ครั้ง
+		if not boostOn then
+			if needOffRestore then
+				needOffRestore = false
+				pendingAfterFreeze = false
+				syncedTargetWalk = nil
+				syncPendingUntil = 0
+				lastWrittenWalk = nil
+				if math.abs(curWS - trueNormal) > 0.02 or (lumiBase ~= nil and math.abs(lumiBase - trueNormal) > 0.02) then
+					writeWalkSpeedForSprintClient(hum, trueNormal, lumiBase)
+				end
+				if HUB.UpdateSpeedBoostLabel then
+					pcall(HUB.UpdateSpeedBoostLabel)
+				end
+			end
+			return
+		end
+
+		local f = boostFactor()
+		local desiredWalk = trueNormal * f
+		local desiredSprint = desiredWalk * SPRINT_MULT
+
+		local shouldForce = (force == true) or pendingAfterFreeze or justUnfroze
+		pendingAfterFreeze = false
+
+		if not wantSprint then
+			if prevWantSprint then
+				prevWantSprint = false
+			end
+			if shouldForce or math.abs(curWS - desiredWalk) > WALK_EPSILON then
+				if math.abs(curWS - desiredWalk) > 0.01 or (lumiBase ~= nil and math.abs(lumiBase - desiredWalk) > 0.02) then
+					writeWalkSpeedForSprintClient(hum, desiredWalk, lumiBase)
+				end
+				syncedTargetWalk = desiredWalk
+				syncPendingUntil = 0
+				lastWrittenWalk = desiredWalk
+			end
+		else
+			local justStartedSprint = (not prevWantSprint)
+			prevWantSprint = true
+
+			if justStartedSprint and not shouldForce and lumiBase ~= nil and math.abs(lumiBase - desiredWalk) <= WALK_EPSILON and math.abs(curWS - desiredWalk) <= WALK_EPSILON then
+				syncedTargetWalk = desiredWalk
+				syncPendingUntil = now + SPRINT_SYNC_HOLD
+			end
+
+			if math.abs(curWS - desiredSprint) > WALK_EPSILON then
+				local targetChanged = (syncedTargetWalk == nil) or (math.abs(desiredWalk - syncedTargetWalk) > 0.01)
+				local holdExpired = (now >= syncPendingUntil)
+				local baseMismatch = (lumiBase == nil) or (math.abs(lumiBase - desiredWalk) > WALK_EPSILON) or (math.abs(curWS - desiredSprint) > WALK_EPSILON)
+				if (shouldForce or targetChanged or holdExpired) and baseMismatch then
+					writeWalkSpeedForSprintClient(hum, desiredWalk, lumiBase)
+					syncedTargetWalk = desiredWalk
+					syncPendingUntil = now + SPRINT_SYNC_HOLD
+					lastWrittenWalk = desiredWalk
+				end
+			end
+		end
+
+		if (shouldForce or justUnfroze) and HUB.UpdateSpeedBoostLabel then
+			pcall(HUB.UpdateSpeedBoostLabel)
+		end
+	end
+
+	local function scheduleDeferredApply()
+		if deferCheckScheduled or not HUB.Alive then return end
+		deferCheckScheduled = true
+		task.defer(function()
+			deferCheckScheduled = false
+			if not HUB.Alive then return end
+			applySpeedBoost(false)
+		end)
+	end
+
+	HUB.ApplySpeedBoostNow = function(force)
+		if force == nil then force = true end
+		if HUB.RefreshSpeedBoostPctBtns then
+			pcall(HUB.RefreshSpeedBoostPctBtns)
+		end
+		applySpeedBoost(force)
+	end
+
+	HUB.RestoreSpeedOnUnload = function()
+		clearCharConns()
+		if not wasBoostOn and HUB.Config.speedBoostOn ~= true and not needOffRestore and lastWrittenWalk == nil then
+			return
+		end
+		local char = LocalPlayer.Character
+		local hum = nil
+		local hrp = nil
+		if char then
+			hum = char:FindFirstChildOfClass("Humanoid")
+			hrp = char:FindFirstChild("HumanoidRootPart")
+		end
+		if not char or not hum then return end
+		if isPlayerMovementFrozen(char, hum, hrp) then return end
+		local trueNormal = computeTrueNormalBase(char)
+		local lumiBase = readBaseSpeed()
+		if math.abs(hum.WalkSpeed - trueNormal) > 0.02 or (lumiBase ~= nil and math.abs(lumiBase - trueNormal) > 0.02) then
+			writeWalkSpeedForSprintClient(hum, trueNormal, lumiBase)
+		end
+		needOffRestore = false
+		wasBoostOn = false
+		lastWrittenWalk = nil
+	end
+
+	local function bindHumanoidWalkSpeedSignal(char, hum)
+		if not char or not hum or not HUB.Alive then return end
+		local wsConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+			if not HUB.Alive then return end
+			if LocalPlayer:GetAttribute("MountId") ~= nil and mountedNormalSpeed == nil and mountHoldUntil > 0 then
+				if tryCaptureMountSpeed(char, hum) then
+					scheduleDeferredApply()
+					return
+				end
+			end
+			if HUB.Config.speedBoostOn == true or needOffRestore then
+				if hum.WalkSpeed > 0.01 then
+					scheduleDeferredApply()
+				end
+			end
+		end)
+		table.insert(charConns, wsConn)
+		HUB:AddConnection(wsConn)
+	end
+
+	local function bindCharacterSignals(char)
+		clearCharConns()
+		syncedTargetWalk = nil
+		syncPendingUntil = 0
+		lastWrittenWalk = nil
+		prevWantSprint = false
+		if LocalPlayer:GetAttribute("MountId") == nil then
+			mountedNormalSpeed = nil
+			mountHoldUntil = 0
+		end
+		if not char or not HUB.Alive then return end
+
+		local tbConn = char:GetAttributeChangedSignal("TrickBatsSlow"):Connect(function()
+			if not HUB.Alive then return end
+			if HUB.Config.speedBoostOn == true or needOffRestore then
+				applySpeedBoost(true)
+			end
+		end)
+		table.insert(charConns, tbConn)
+		HUB:AddConnection(tbConn)
+
+		local warpConn = char:GetAttributeChangedSignal("LumiWarpIn"):Connect(function()
+			if not HUB.Alive then return end
+			scheduleDeferredApply()
+		end)
+		table.insert(charConns, warpConn)
+		HUB:AddConnection(warpConn)
+
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			bindHumanoidWalkSpeedSignal(char, hum)
+			if HUB.Config.speedBoostOn == true then
+				applySpeedBoost(true)
+			end
+		else
+			task.spawn(function()
+				local h = char:WaitForChild("Humanoid", 10)
+				if h and h:IsA("Humanoid") and HUB.Alive and LocalPlayer.Character == char then
+					bindHumanoidWalkSpeedSignal(char, h)
+					if HUB.Config.speedBoostOn == true then
+						applySpeedBoost(true)
+					end
+				end
+			end)
+		end
+	end
+
+	HUB:AddConnection(LocalPlayer.CharacterAdded:Connect(function(newChar)
+		if not HUB.Alive then return end
+		bindCharacterSignals(newChar)
+	end))
+
+	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("SpeedPct"):Connect(function()
+		if not HUB.Alive then return end
+		if HUB.Config.speedBoostOn == true or needOffRestore then
+			applySpeedBoost(true)
+		elseif HUB.UpdateSpeedBoostLabel then
+			pcall(HUB.UpdateSpeedBoostLabel)
+		end
+	end))
+
+	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("MountId"):Connect(function()
+		if not HUB.Alive then return end
+		local newMountId = LocalPlayer:GetAttribute("MountId")
+		if newMountId == nil then
+			prevMountId = nil
+			mountedNormalSpeed = nil
+			mountHoldUntil = 0
+			mountPrevAppliedWalk = nil
+			mountPrevAppliedSprint = nil
+			if HUB.Config.speedBoostOn == true or needOffRestore then
+				applySpeedBoost(true)
+			elseif HUB.UpdateSpeedBoostLabel then
+				pcall(HUB.UpdateSpeedBoostLabel)
+			end
+		elseif newMountId ~= prevMountId then
+			prevMountId = newMountId
+			mountedNormalSpeed = nil
+			mountHoldUntil = os.clock() + MOUNT_TRANSITION_HOLD
+			if lastWrittenWalk then
+				mountPrevAppliedWalk = lastWrittenWalk
+			else
+				mountPrevAppliedWalk = readBaseSpeed() or computeUnmountedBase()
+			end
+			mountPrevAppliedSprint = mountPrevAppliedWalk * SPRINT_MULT
+			local ch = LocalPlayer.Character
+			local h = nil
+			if ch then
+				h = ch:FindFirstChildOfClass("Humanoid")
+			end
+			if h and tryCaptureMountSpeed(ch, h) then
+				if HUB.Config.speedBoostOn == true or needOffRestore then
+					applySpeedBoost(true)
+				end
 			end
 		end
 	end))
+
+	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("LumiBaseSpeed"):Connect(function()
+		if not HUB.Alive then return end
+		if LocalPlayer:GetAttribute("MountId") ~= nil then
+			local ch = LocalPlayer.Character
+			local h = nil
+			if ch then
+				h = ch:FindFirstChildOfClass("Humanoid")
+			end
+			if mountedNormalSpeed == nil then
+				if tryCaptureMountSpeed(ch, h) then
+					if HUB.Config.speedBoostOn == true or needOffRestore then
+						applySpeedBoost(true)
+					end
+				end
+			elseif HUB.Config.speedBoostOn ~= true and not needOffRestore and not isPlayerMovementFrozen(ch, h, nil) then
+				local lb = readBaseSpeed()
+				if lb and lb > 0 then
+					mountedNormalSpeed = stripTrickBatsSlow(lb, ch)
+				end
+			end
+		end
+	end))
+
+	for _, freezeAttr in ipairs({ "HuntGachaFXOpen", "IntroCutscenePlaying", "IntroLoadingDone", "DungeonDowned", "Sitting" }) do
+		HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal(freezeAttr):Connect(function()
+			if not HUB.Alive then return end
+			scheduleDeferredApply()
+		end))
+	end
+
+	HUB:AddConnection(RunService.Heartbeat:Connect(function()
+		if not HUB.Alive then return end
+		applySpeedBoost(false)
+	end))
+
+	if LocalPlayer:GetAttribute("MountId") ~= nil then
+		local lb = readBaseSpeed()
+		local canTrustBase = (prev == nil) or (HUB.Config.speedBoostOn ~= true) or (type(prev) == "table" and prev.Version == VERSION)
+		if lb and lb > 0 and canTrustBase then
+			mountedNormalSpeed = stripTrickBatsSlow(lb, LocalPlayer.Character)
+		end
+	end
+
+	if LocalPlayer.Character then
+		bindCharacterSignals(LocalPlayer.Character)
+	end
+	applySpeedBoost(true)
+	if HUB.UpdateSpeedBoostLabel then
+		pcall(HUB.UpdateSpeedBoostLabel)
+	end
 end
 -- ===== 10. Anti-AFK Background Worker (Hardware-Level VIM Pulse & Triple Protection) =====
 do
@@ -15943,6 +16524,7 @@ do
 				HUB.BrazierSprintHold = false
 				if not okBz then
 					HUB.LightingCandle = false
+					setSprinting(false)
 					warn("[Hunting Together] จุดเทียนบอสผิดพลาด: " .. tostring(errBz))
 				end
 				continue
