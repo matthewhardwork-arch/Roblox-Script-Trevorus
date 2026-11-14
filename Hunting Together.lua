@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.15)
+-- Hunting Together Hub (v10.16)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.15"
+local VERSION = "10.16"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -14853,7 +14853,7 @@ do
 	end))
 end
 
--- ===== 9.9 Ground-Truth Speed Boost & SprintClient Sync Engine (v10.14) =====
+-- ===== 9.9 Ground-Truth Speed Boost & SprintClient Sync Engine (v10.16) =====
 -- คำนวณความเร็วฐานที่แท้จริงของเกมแบบ Real-time จาก GameConfig.BaseWalkSpeed * (1 + SpeedPct / 100)
 -- รองรับการขี่ Mount (จับความเร็วเซิร์ฟเวอร์ช่วงเปลี่ยนสถานะ), TrickBatsSlow (*0.6), Freeze Guard ครบทุกสถานะของเกม
 -- และซิงค์ฐานความเร็วเข้ากับ SprintClient อย่างปลอดภัย ไม่สู้เฟรมและไม่คูณ 1.4x ซ้ำซ้อน รวมถึงคืนค่าสะอาดทันทีเมื่อปิด OFF
@@ -14985,15 +14985,16 @@ do
 		if hum.WalkSpeed <= 0.01 then return true end
 		if hum.Sit or hum.PlatformStand then return true end
 		if LocalPlayer:GetAttribute("HuntGachaFXOpen") == true then return true end
-		if char:GetAttribute("LumiWarpIn") == true then return true end
 		if LocalPlayer:GetAttribute("IntroCutscenePlaying") == true then return true end
-		if LocalPlayer:GetAttribute("IntroLoadingDone") ~= true then return true end
 		if LocalPlayer:GetAttribute("DungeonDowned") == true then return true end
 		if LocalPlayer:GetAttribute("Sitting") == true then return true end
 		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
 		if pgui then
+			-- หมายเหตุ: ReturnWarpClient ไม่เคยล้าง Character.LumiWarpIn หลัง finish() จึงตรวจ ReturnWarpSkip GUI + WalkSpeed <= 0.01 แทน
 			if pgui:FindFirstChild("ReturnWarpSkip") ~= nil then return true end
+			if pgui:FindFirstChild("HuntCCLabel") ~= nil then return true end
 			if pgui:FindFirstChild("IntroCutscene") ~= nil then return true end
+			if pgui:FindFirstChild("IntroLoading") ~= nil and LocalPlayer:GetAttribute("IntroLoadingDone") ~= true then return true end
 			if isScreenGuiEnabled(pgui, "IntroLoading") then return true end
 			if isScreenGuiEnabled(pgui, "LumiCutscene") then return true end
 			if isScreenGuiEnabled(pgui, "DownedShield") then return true end
@@ -15021,10 +15022,10 @@ do
 	end
 
 	-- เขียน WalkSpeed ให้ SprintClient จับค่า u36 และ LumiBaseSpeed ใหม่ได้อย่างถูกต้อง (ปลดกับดัก u37 == targetWalk)
-	local function writeWalkSpeedForSprintClient(hum, targetWalk, curLumiBase)
+	local function writeWalkSpeedForSprintClient(hum, targetWalk, curLumiBase, forcePulse)
 		if not hum or not targetWalk or targetWalk <= 0 then return end
 		if math.abs(hum.WalkSpeed - targetWalk) <= 0.02 then
-			if curLumiBase == nil or math.abs(curLumiBase - targetWalk) > 0.02 then
+			if forcePulse or curLumiBase == nil or math.abs(curLumiBase - targetWalk) > 0.02 then
 				hum.WalkSpeed = targetWalk + 0.025
 			end
 		end
@@ -15187,9 +15188,11 @@ do
 			if prevWantSprint then
 				prevWantSprint = false
 			end
-			if shouldForce or math.abs(curWS - desiredWalk) > WALK_EPSILON then
+			local walkMismatch = math.abs(curWS - desiredWalk) > WALK_EPSILON
+			local baseSyncMismatch = (lumiBase ~= nil) and (math.abs(lumiBase - desiredWalk) > WALK_EPSILON)
+			if shouldForce or walkMismatch or baseSyncMismatch then
 				if math.abs(curWS - desiredWalk) > 0.01 or (lumiBase ~= nil and math.abs(lumiBase - desiredWalk) > 0.02) then
-					writeWalkSpeedForSprintClient(hum, desiredWalk, lumiBase)
+					writeWalkSpeedForSprintClient(hum, desiredWalk, lumiBase, shouldForce)
 				end
 				syncedTargetWalk = desiredWalk
 				syncPendingUntil = 0
@@ -15209,7 +15212,7 @@ do
 				local holdExpired = (now >= syncPendingUntil)
 				local baseMismatch = (lumiBase == nil) or (math.abs(lumiBase - desiredWalk) > WALK_EPSILON) or (math.abs(curWS - desiredSprint) > WALK_EPSILON)
 				if (shouldForce or targetChanged or holdExpired) and baseMismatch then
-					writeWalkSpeedForSprintClient(hum, desiredWalk, lumiBase)
+					writeWalkSpeedForSprintClient(hum, desiredWalk, lumiBase, shouldForce or holdExpired)
 					syncedTargetWalk = desiredWalk
 					syncPendingUntil = now + SPRINT_SYNC_HOLD
 					lastWrittenWalk = desiredWalk
@@ -15304,13 +15307,6 @@ do
 		end)
 		table.insert(charConns, tbConn)
 		HUB:AddConnection(tbConn)
-
-		local warpConn = char:GetAttributeChangedSignal("LumiWarpIn"):Connect(function()
-			if not HUB.Alive then return end
-			scheduleDeferredApply()
-		end)
-		table.insert(charConns, warpConn)
-		HUB:AddConnection(warpConn)
 
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		if hum then
