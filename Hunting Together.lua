@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.16)
+-- Hunting Together Hub (v10.18)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.16"
+local VERSION = "10.18"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -372,6 +372,22 @@ local HUB = {
 	IsHomeWarping = false,
 	LastHomeWarpTrigger = 0,
 	IsSellingRoutineActive = false,
+	IsWorldBossRoutineActive = false,
+	WorldBossState = {
+		active = false,
+		phase = "idle",
+		bossName = "Stormhorn",
+		noticedAt = 0,
+		noticeExpiresAt = 0,
+		endsAt = 0,
+		lastWarpedAt = 0,
+		bossDefeatedAt = 0,
+		sawGateInTown = false,
+		gateMissingSince = 0,
+		gatePos = nil,
+	},
+	_autoPlayOpLock = false,
+	_autoPlayOpLockAt = 0,
 	CollectingSkull = false,
 	ActiveSkullPos = nil,
 	FarmAnchor = nil,
@@ -459,6 +475,7 @@ local HUB = {
 		autoSellJunk = true,
 		autoSellGear = true,
 		autoFarmBoss = false,
+		autoWorldBoss = false,
 		farmBossList = {
 			Boss01 = false,
 			Boss02 = true,
@@ -484,6 +501,8 @@ local HUB = {
 		dungeonRoomsEntered = 0,
 		dungeonReadyChecks = 0,
 		dungeonKeysBought = 0,
+		worldBossesJoined = 0,
+		worldBossKills = 0,
 	},
 }
 
@@ -557,6 +576,9 @@ function HUB.Unload(self, isShuttingDown, isReloading)
 		end
 		if self.CancelAutoBossRoutine then
 			pcall(self.CancelAutoBossRoutine)
+		end
+		if self.CancelAutoWorldBossRoutine then
+			pcall(self.CancelAutoWorldBossRoutine, false)
 		end
 		if self.ClearStalledMobs then
 			pcall(self.ClearStalledMobs)
@@ -1137,6 +1159,71 @@ function HUB.IsInTown()
 	return root.Position.Z > -150
 end
 
+-- Ground-Truth World Boss Arena Checker (ตรวจสอบว่าตัวละครกำลังอยู่ในสนามสู้ World Boss หรือไม่)
+function HUB.IsInWorldBoss()
+	if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
+		return false
+	end
+	if LocalPlayer:GetAttribute("InWorldBoss") == true then
+		return true
+	end
+	local char = LocalPlayer.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if root and (root.Position - Vector3.new(2600, 520, -2400)).Magnitude <= 140.0 then
+		return true
+	end
+	return false
+end
+
+-- Ground-Truth World Boss Event Checker (ตรวจจับกิจกรรม World Boss จาก Attribute / State / Notice GUI)
+function HUB.IsWorldBossEventActive()
+	if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
+		return false
+	end
+	if HUB.IsInWorldBoss() then
+		return true
+	end
+	local nowSrv = workspace:GetServerTimeNow()
+	local endsAt = tonumber(workspace:GetAttribute("WorldBossEndsAt")) or 0
+	if endsAt > nowSrv then
+		return true
+	end
+	local st = HUB.WorldBossState
+	if st and st.active == true then
+		if st.bossDefeatedAt and st.bossDefeatedAt > 0 and (os.clock() - st.bossDefeatedAt) > 15.0 then
+			st.active = false
+		elseif st.endsAt and st.endsAt > 0 and nowSrv > (st.endsAt + 15.0) and endsAt == 0 then
+			st.active = false
+		else
+			return true
+		end
+	end
+	local pg = LocalPlayer:FindFirstChild("PlayerGui")
+	local noticeGui = pg and pg:FindFirstChild("HuntWorldBossNotice")
+	if noticeGui then
+		if noticeGui:IsA("ScreenGui") and noticeGui.Enabled == true then
+			return true
+		elseif noticeGui:IsA("GuiObject") and noticeGui.Visible == true then
+			return true
+		end
+	end
+	return false
+end
+
+-- Helper รวมสำหรับเช็คว่าระบบกำลังติดพันกับ World Boss หรือไม่ (ใช้แยกแยะ yield สำหรับ AutoBoss / AutoSell / Watchdog)
+function HUB.IsWorldBossBusy()
+	if HUB.IsInWorldBoss() then
+		return true
+	end
+	if HUB.IsWorldBossRoutineActive then
+		return true
+	end
+	if HUB.Config.autoWorldBoss and HUB.IsWorldBossEventActive() then
+		return true
+	end
+	return false
+end
+
 -- Ground-Truth Live Monster Radius Checker (ตรวจสอบมอนสเตอร์ที่มีชีวิตในรัศมีที่กำหนด)
 function HUB.IsMonsterWithinRadius(radius)
 	if HUB.IsInTown and HUB.IsInTown() then
@@ -1226,7 +1313,7 @@ function HUB.IsGameAutoActive()
 	return autoBtn and autoBtn:GetAttribute("C4On") == true
 end
 
--- สั่งเปิดใช้งาน Auto Play ของเกมต่อเนื่องอย่างน่าเชื่อถือ (Triple-Layer Redundant Fallback)
+-- สั่งเปิดใช้งาน Auto Play ของเกมต่อเนื่องอย่างน่าเชื่อถือ (Triple-Layer Redundant Fallback + Mutex Lock)
 function HUB.EnsureGameAutoActive(maxRetries, retryInterval, forceInMonsterZone)
 	-- ลำดับความสำคัญสูงสุด: ระหว่างจุดเทียนบอสห้ามเปิด Auto Play แย่งการเดิน
 	if HUB.BrazierPriority then return HUB.IsGameAutoActive() end
@@ -1247,10 +1334,11 @@ function HUB.EnsureGameAutoActive(maxRetries, retryInterval, forceInMonsterZone)
 	HUB.BotPausingAuto = false
 	HUB.UserDisabledAuto = false
 
-	-- Dungeon & Monster Guard:
-	-- หากไม่อยู่ในดันเจี้ยน และไม่ได้บังคับเปิดเมื่อกลับถึงจุดฟาร์มเดิม (forceInMonsterZone) ต้องมีมอนสเตอร์ในระยะ 40 studs
+	-- Dungeon, WorldBoss & Monster Guard:
+	-- หากไม่อยู่ในดันเจี้ยน/WorldBoss และไม่ได้บังคับเปิดเมื่อกลับถึงจุดฟาร์มเดิม (forceInMonsterZone) ต้องมีมอนสเตอร์ในระยะ 40 studs
 	local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
-	if not isDungeon and not forceInMonsterZone then
+	local inWorldBoss = HUB.IsInWorldBoss and HUB.IsInWorldBoss()
+	if not isDungeon and not inWorldBoss and not forceInMonsterZone then
 		local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
 		if not hasMonster then
 			return false
@@ -1259,81 +1347,116 @@ function HUB.EnsureGameAutoActive(maxRetries, retryInterval, forceInMonsterZone)
 
 	if HUB.IsGameAutoActive() then return true end
 
-	maxRetries = maxRetries or 5
-	retryInterval = retryInterval or 0.3
-
-	for attempt = 1, maxRetries do
-		if HUB.IsHomeWarpActive and HUB.IsHomeWarpActive() then return false end
-		if HUB.IsGameAutoActive() then return true end
-
-		-- Layer 1: LumiMenuToggle BindableEvent (ทำงานแบบ Synchronous ทันทีใน CombatClient บรรทัด 1910)
-		pcall(function()
-			local menuToggle = LocalPlayer:FindFirstChild("LumiMenuToggle")
-			if menuToggle and menuToggle:IsA("BindableEvent") then
-				menuToggle:Fire("autoToggle")
-			end
-		end)
-
-		task.wait(0.15)
-		if HUB.IsGameAutoActive() then return true end
-
-		-- Layer 2: LumiAfkResumeAuto Attribute (CombatClient บรรทัด 1846 ดักฟังสลับเปิดเฉพาะเมื่อปิดอยู่)
-		pcall(function()
-			LocalPlayer:SetAttribute("LumiAfkResumeAuto", tick())
-		end)
-
-		task.wait(0.2)
-		if HUB.IsGameAutoActive() then return true end
-
-		-- Layer 3: firesignal บนปุ่ม AutoButton (CombatClient บรรทัด 1900)
-		pcall(function()
-			local pg = LocalPlayer:FindFirstChild("PlayerGui")
-			local autoBtn = pg and pg:FindFirstChild("LumiAuto") and pg.LumiAuto:FindFirstChild("AutoButton")
-			if autoBtn and autoBtn:IsA("TextButton") then
-				local fs = EXEC.firesignal or rawget(EXEC.env, "firesignal")
-				if type(fs) == "function" then
-					fs(autoBtn.MouseButton1Click)
-				end
-			end
-		end)
-
-		task.wait(retryInterval)
+	-- Mutex Guard: ป้องกันหลายลูป (Monitor / Watchdog / CharacterAdded / AutoWorldBoss) ยิง "autoToggle" ซ้อนกันจนสลับปิด Auto Play เอง!
+	if HUB._autoPlayOpLock and (os.clock() - (HUB._autoPlayOpLockAt or 0) < 3.0) then
+		local waitT0 = os.clock()
+		while HUB._autoPlayOpLock and (os.clock() - waitT0 < 1.8) do
+			if HUB.IsGameAutoActive() then return true end
+			task.wait(0.08)
+		end
 		if HUB.IsGameAutoActive() then return true end
 	end
 
+	HUB._autoPlayOpLock = true
+	HUB._autoPlayOpLockAt = os.clock()
+	maxRetries = maxRetries or 5
+	retryInterval = retryInterval or 0.3
+
+	pcall(function()
+		for attempt = 1, maxRetries do
+			if HUB.IsHomeWarpActive and HUB.IsHomeWarpActive() then break end
+			if HUB.IsInTown and HUB.IsInTown() then break end
+			if HUB.IsGameAutoActive() then break end
+
+			-- Layer 1: LumiMenuToggle BindableEvent (ทำงานแบบ Synchronous ทันทีใน CombatClient)
+			pcall(function()
+				local menuToggle = LocalPlayer:FindFirstChild("LumiMenuToggle")
+				if menuToggle and menuToggle:IsA("BindableEvent") then
+					menuToggle:Fire("autoToggle")
+				end
+			end)
+
+			task.wait(0.25)
+			if HUB.IsGameAutoActive() then break end
+
+			-- Layer 2: LumiAfkResumeAuto Attribute (CombatClient ดักฟังสลับเปิดเฉพาะเมื่อปิดอยู่ — ปลอดภัยจาก Toggle Flip)
+			pcall(function()
+				LocalPlayer:SetAttribute("LumiAfkResumeAuto", tick())
+			end)
+
+			task.wait(0.25)
+			if HUB.IsGameAutoActive() then break end
+
+			-- Layer 3: firesignal บนปุ่ม AutoButton (เช็คซ้ำอีกรอบก่อนกด เพื่อกัน Toggle กลับเป็น OFF ตอนเฟรมหน่วง)
+			if not HUB.IsGameAutoActive() then
+				pcall(function()
+					local pg = LocalPlayer:FindFirstChild("PlayerGui")
+					local autoBtn = pg and pg:FindFirstChild("LumiAuto") and pg.LumiAuto:FindFirstChild("AutoButton")
+					if autoBtn and autoBtn:IsA("TextButton") then
+						local fs = EXEC.firesignal or rawget(EXEC.env, "firesignal")
+						if type(fs) == "function" then
+							fs(autoBtn.MouseButton1Click)
+						end
+					end
+				end)
+			end
+
+			task.wait(retryInterval)
+			if HUB.IsGameAutoActive() then break end
+		end
+	end)
+
+	HUB._autoPlayOpLock = false
 	return HUB.IsGameAutoActive()
 end
 
 -- สั่งปิด Auto Play ของเกมและล้างเป้าหมายชั่วคราวก่อนเดินนำทาง/วาร์ป (ป้องกัน CombatClient แย่งเดิน 100%)
-function HUB.DisableGameAutoPlay()
+function HUB.DisableGameAutoPlay(reason)
+	local inWorldBoss = HUB.IsInWorldBoss and HUB.IsInWorldBoss()
+	if inWorldBoss and reason ~= "worldboss_exit" and reason ~= "homewarp" and reason ~= "user" then
+		-- ป้องกันรูทีนอื่น (Watchdog / AutoFarmBoss / AutoSell) มาสั่งปิด Auto Play ระหว่างสู้ World Boss
+		return false
+	end
+
 	HUB.BotPausingAuto = true
 	pcall(function()
 		LocalPlayer:SetAttribute("LumiAfkResumeAuto", nil)
 	end)
 
-	local deadline = os.clock() + 1.2
-	while HUB.IsGameAutoActive() and os.clock() < deadline do
-		pcall(function()
-			local menuToggle = LocalPlayer:FindFirstChild("LumiMenuToggle")
-			if menuToggle and menuToggle:IsA("BindableEvent") then
-				menuToggle:Fire("autoToggle")
-			end
-		end)
-		task.wait(0.12)
-		if HUB.IsGameAutoActive() then
+	local waitT0 = os.clock()
+	while HUB._autoPlayOpLock and (os.clock() - waitT0 < 1.5) do
+		task.wait(0.08)
+	end
+	HUB._autoPlayOpLock = true
+	HUB._autoPlayOpLockAt = os.clock()
+
+	pcall(function()
+		local deadline = os.clock() + 1.2
+		while HUB.IsGameAutoActive() and os.clock() < deadline do
 			pcall(function()
-				local pg = LocalPlayer:FindFirstChild("PlayerGui")
-				local autoBtn = pg and pg:FindFirstChild("LumiAuto") and pg.LumiAuto:FindFirstChild("AutoButton")
-				if autoBtn and autoBtn:IsA("TextButton") then
-					local fs = EXEC.firesignal or rawget(EXEC.env, "firesignal")
-					if type(fs) == "function" then
-						fs(autoBtn.MouseButton1Click)
-					end
+				local menuToggle = LocalPlayer:FindFirstChild("LumiMenuToggle")
+				if menuToggle and menuToggle:IsA("BindableEvent") then
+					menuToggle:Fire("autoToggle")
 				end
 			end)
-			task.wait(0.12)
+			task.wait(0.2)
+			if HUB.IsGameAutoActive() then
+				pcall(function()
+					local pg = LocalPlayer:FindFirstChild("PlayerGui")
+					local autoBtn = pg and pg:FindFirstChild("LumiAuto") and pg.LumiAuto:FindFirstChild("AutoButton")
+					if autoBtn and autoBtn:IsA("TextButton") then
+						local fs = EXEC.firesignal or rawget(EXEC.env, "firesignal")
+						if type(fs) == "function" then
+							fs(autoBtn.MouseButton1Click)
+						end
+					end
+				end)
+				task.wait(0.2)
+			end
 		end
-	end
+	end)
+
+	HUB._autoPlayOpLock = false
 
 	-- ล้างเป้าหมายและคำสั่งเดินของ CombatClient ทันที
 	pcall(function()
@@ -1592,6 +1715,7 @@ local function saveConfig()
 		autoSellJunk = (HUB.Config.autoSellJunk ~= false),
 		autoSellGear = (HUB.Config.autoSellGear ~= false),
 		autoFarmBoss = HUB.Config.autoFarmBoss,
+		autoWorldBoss = (HUB.Config.autoWorldBoss == true),
 		farmBossList = HUB.Config.farmBossList,
 		autoStartGame = (HUB.Config.autoStartGame ~= false),
 		autoPlayDungeon = (HUB.Config.autoPlayDungeon == true),
@@ -1749,6 +1873,7 @@ local function loadConfig()
 				if data.autoSellJunk ~= nil then HUB.Config.autoSellJunk = data.autoSellJunk end
 				if data.autoSellGear ~= nil then HUB.Config.autoSellGear = data.autoSellGear end
 				if data.autoFarmBoss ~= nil then HUB.Config.autoFarmBoss = data.autoFarmBoss end
+				if data.autoWorldBoss ~= nil then HUB.Config.autoWorldBoss = (data.autoWorldBoss == true) end
 				if type(data.farmBossList) == "table" then
 					for k, v in pairs(data.farmBossList) do
 						HUB.Config.farmBossList[k] = v
@@ -8359,7 +8484,7 @@ do
 				if HUB.CheckAndTriggerAutoBoss then task.spawn(HUB.CheckAndTriggerAutoBoss) end
 			else
 				label.Text = "สถานะ: ปิดใช้งาน"
-				if HUB.CancelAutoBossRoutine then HUB.CancelAutoBossRoutine() end
+				if HUB.CancelAutoBossRoutine then HUB.CancelAutoBossRoutine(false) end
 			end
 			if HUB.Config.autoSave then saveConfig() end
 		end,
@@ -8438,7 +8563,7 @@ do
 				refreshAllRows()
 				if HUB.Config.autoSave then saveConfig() end
 				if HUB.CancelAutoBossRoutine then
-					HUB.CancelAutoBossRoutine(true)
+					HUB.CancelAutoBossRoutine(HUB.Config.autoFarmBoss == true and HUB.IsBossRoutineActive == true and not HUB.IsWorldBossRoutineActive)
 				end
 			end))
 
@@ -8536,7 +8661,7 @@ do
 					if not isNowEnabled then
 						if HUB.CurrentTargetBoss == bDef.key then
 							if HUB.CancelAutoBossRoutine then
-								HUB.CancelAutoBossRoutine(true)
+								HUB.CancelAutoBossRoutine(HUB.Config.autoFarmBoss == true and HUB.IsBossRoutineActive == true and not HUB.IsWorldBossRoutineActive)
 							end
 						end
 					elseif isNowEnabled and HUB.Config.autoFarmBoss and HUB.CheckAndTriggerAutoBoss then
@@ -8679,6 +8804,110 @@ do
 		end
 	)
 	HUB.UI.BossStatusLabel = bossStatus
+
+	-- ---------- 7.5.9 Card ในแท็บ Combat: Auto World Boss (ล่าบอสโลกอัตโนมัติ) ----------
+	local _, worldBossStatus = createCard(
+		scrollCombat,
+		"Auto World Boss (ล่าบอสโลกอัตโนมัติ)",
+		"เมื่อ World Boss เกิดจะทิ้งฟาร์ม/Auto Boss ไปกดวาร์ป (ไม่ทันจะวาร์ปเมืองเข้า Portal) ตายพากลับตีต่อจนบอสตายแล้วกลับจุดเดิม (พักในดันเจี้ยน)",
+		HUB.Config.autoWorldBoss,
+		function(enabled, label)
+			HUB.Config.autoWorldBoss = enabled
+			if enabled then
+				if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
+					label.Text = "สถานะ: เปิดใช้งาน · พักชั่วคราว (อยู่ในดันเจี้ยน)"
+				else
+					label.Text = "สถานะ: เปิดใช้งาน · สแตนด์บายรอ World Boss เกิด..."
+					if HUB.TriggerAutoWorldBoss then
+						task.spawn(HUB.TriggerAutoWorldBoss)
+					end
+				end
+			else
+				label.Text = "สถานะ: ปิดใช้งาน"
+				if HUB.CancelAutoWorldBossRoutine then
+					HUB.CancelAutoWorldBossRoutine(false)
+				end
+			end
+			if HUB.Config.autoSave then saveConfig() end
+		end,
+		nil,
+		function(subPanel, _, _, setExpandHeight)
+			if setExpandHeight then setExpandHeight(94, 178) end
+
+			local infoLbl = Instance.new("TextLabel")
+			infoLbl.Name = "WorldBossInfo"
+			infoLbl.Size = UDim2.new(1, -16, 0, 38)
+			infoLbl.Position = UDim2.new(0, 8, 0, 6)
+			infoLbl.BackgroundTransparency = 1
+			infoLbl.Text = "⚡ ลำดับเข้าสู้: วาร์ปป๊อปอัปฉุกเฉิน -> สำรองเสาวาร์ป/HomeWarp กลับเมืองเข้า Portal หน้าประตู -> ตายพากลับตีต่อจนจบ\n🛡️ Auto Dodge ยึดตามสวิตช์ Auto Dodge ที่ตั้งไว้ · 🏰 พักการทำงานอัตโนมัติระหว่างอยู่ในดันเจี้ยน"
+			infoLbl.TextColor3 = Color3.fromRGB(205, 220, 240)
+			infoLbl.TextSize = 11
+			infoLbl.TextWrapped = true
+			infoLbl.TextXAlignment = Enum.TextXAlignment.Left
+			infoLbl.TextYAlignment = Enum.TextYAlignment.Top
+			applyFont(infoLbl, false)
+			infoLbl.Parent = subPanel
+
+			local btnNow = Instance.new("TextButton")
+			btnNow.Name = "BtnTriggerWorldBoss"
+			btnNow.Size = UDim2.new(0, 170, 0, 26)
+			btnNow.Position = UDim2.new(0, 8, 0, 50)
+			btnNow.BackgroundColor3 = Color3.fromRGB(36, 98, 175)
+			btnNow.BorderSizePixel = 0
+			btnNow.Text = "🚀 ตรวจสอบและเข้า World Boss ทันที"
+			btnNow.TextColor3 = Color3.fromRGB(245, 250, 255)
+			btnNow.TextSize = 11
+			applyFont(btnNow, true)
+			btnNow.Parent = subPanel
+			local bCorner = Instance.new("UICorner")
+			bCorner.CornerRadius = UDim.new(0, 6)
+			bCorner.Parent = btnNow
+
+			local btnResetWb = Instance.new("TextButton")
+			btnResetWb.Name = "BtnResetWorldBoss"
+			btnResetWb.Size = UDim2.new(0, 140, 0, 26)
+			btnResetWb.Position = UDim2.new(0, 186, 0, 50)
+			btnResetWb.BackgroundColor3 = Color3.fromRGB(78, 52, 56)
+			btnResetWb.BorderSizePixel = 0
+			btnResetWb.Text = "🔄 รีเซ็ตสถานะค้าง"
+			btnResetWb.TextColor3 = Color3.fromRGB(245, 230, 230)
+			btnResetWb.TextSize = 11
+			applyFont(btnResetWb, true)
+			btnResetWb.Parent = subPanel
+			local brCorner = Instance.new("UICorner")
+			brCorner.CornerRadius = UDim.new(0, 6)
+			brCorner.Parent = btnResetWb
+
+			HUB:AddConnection(btnNow.MouseButton1Click:Connect(function()
+				if HUB.Config.autoWorldBoss and HUB.TriggerAutoWorldBoss then
+					task.spawn(HUB.TriggerAutoWorldBoss, true)
+				elseif HUB.UI.WorldBossStatusLabel then
+					HUB.UI.WorldBossStatusLabel.Text = "สถานะ: กรุณาเปิดสวิตช์ Auto World Boss ก่อน"
+				end
+			end))
+
+			HUB:AddConnection(btnResetWb.MouseButton1Click:Connect(function()
+				if HUB.CancelAutoWorldBossRoutine then
+					HUB.CancelAutoWorldBossRoutine(false)
+				end
+				if HUB.WorldBossState then
+					HUB.WorldBossState.active = false
+					HUB.WorldBossState.phase = "idle"
+					HUB.WorldBossState.bossDefeatedAt = 0
+					HUB.WorldBossState.sawGateInTown = false
+					HUB.WorldBossState.gateMissingSince = 0
+				end
+				if HUB.UI.WorldBossStatusLabel then
+					if HUB.Config.autoWorldBoss then
+						HUB.UI.WorldBossStatusLabel.Text = "สถานะ: รีเซ็ตแล้ว · สแตนด์บายรอ World Boss เกิด..."
+					else
+						HUB.UI.WorldBossStatusLabel.Text = "สถานะ: ปิดใช้งาน"
+					end
+				end
+			end))
+		end
+	)
+	HUB.UI.WorldBossStatusLabel = worldBossStatus
 
 	-- ---------- 7.6 Cards ในแท็บ Settings ----------
 	local _, afkStatusLabel = createCard(
@@ -9138,14 +9367,15 @@ end
 local _lastAnchorUpdate = 0
 local function updateFarmingAnchor(root)
 	if not root then return end
-	-- GUARD: ห้ามบันทึกพิกัดในดันเจี้ยน หรือในเมือง (Z > -300) เป็นจุดฟาร์มเด็ดขาด
+	-- GUARD: ห้ามบันทึกพิกัดในดันเจี้ยน, สนาม World Boss หรือในเมือง (Z > -300) เป็นจุดฟาร์มเด็ดขาด
 	if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return end
+	if HUB.IsInWorldBoss and HUB.IsInWorldBoss() then return end
 	if root.Position.Z > -300 then return end
 
 	local now = os.clock()
 	if isPlayerManualInput() then
 		HUB.LastManualMoveTime = now
-		if not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive then
+		if not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsWorldBossRoutineActive then
 			HUB.OriginCFrame = nil
 			HUB.OriginAutoOn = nil
 		end
@@ -9161,8 +9391,8 @@ local function updateFarmingAnchor(root)
 	if now - _lastAnchorUpdate < 0.5 then return end
 	_lastAnchorUpdate = now
 
-	-- หากผู้เล่นหยุดเดินเองเกิน 1.2 วินาที และไม่ได้อยู่ในโหมดนำทางหรือรูทีนบอส/ขายของ/เดินทางกลับของ HUB
-	if not HUB.Navigating and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and HUB.OriginCFrame == nil and (now - (HUB.LastManualMoveTime or 0) >= 1.2) then
+	-- หากผู้เล่นหยุดเดินเองเกิน 1.2 วินาที และไม่ได้อยู่ในโหมดนำทางหรือรูทีนบอส/ขายของ/World Boss/เดินทางกลับของ HUB
+	if not HUB.Navigating and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsWorldBossRoutineActive and not HUB.IsReturningToOrigin and HUB.OriginCFrame == nil and (now - (HUB.LastManualMoveTime or 0) >= 1.2) then
 		-- ห้ามบันทึกพิกัดหน้าเสาวาร์ป (<= 35 studs) หรือในลานบอส (<= 120 studs) ทับจุดฟาร์มเดิมเด็ดขาด
 		local wpf = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("WarpPillars")
 		if wpf then
@@ -9903,7 +10133,7 @@ local function executePillarWarp(nearPillar, targetPillarId, shouldAbortFn)
 end
 HUB.ExecutePillarWarp = executePillarWarp
 
-local function warpToTown(shouldAbortFn)
+local function warpToTown(shouldAbortFn, updateStatusFn)
 	local char = LocalPlayer.Character
 	local root = char and char:FindFirstChild("HumanoidRootPart")
 	if not root then return false end
@@ -9955,7 +10185,9 @@ local function warpToTown(shouldAbortFn)
 
 	-- หากติดคูลดาวน์ HomeWarp ให้รอจนกระทั่งคูลดาวน์หมด
 	if cdLeft > 0 then
-		if HUB.UI.SellStatusLabel then
+		if updateStatusFn then
+			updateStatusFn(string.format("สถานะ: รอ HomeWarp คูลดาวน์อีก %d วิ...", cdLeft))
+		elseif HUB.IsSellingRoutineActive and HUB.UI.SellStatusLabel then
 			HUB.UI.SellStatusLabel.Text = string.format("สถานะ: รอ HomeWarp คูลดาวน์อีก %d วิ...", cdLeft)
 		end
 		local tCdWait = os.clock()
@@ -10021,6 +10253,8 @@ HUB.WarpToTown = warpToTown
 -- Central Origin & Return Synchronization Engine (Auto Sell & Auto Boss Shared)
 -- =========================================================================
 local function captureOriginIfNeeded()
+	if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return HUB.OriginCFrame end
+	if HUB.IsInWorldBoss and HUB.IsInWorldBoss() then return HUB.OriginCFrame end
 	local char = LocalPlayer.Character
 	local root = char and char:FindFirstChild("HumanoidRootPart")
 	if not root then return end
@@ -10150,6 +10384,15 @@ local function resumeFarmOrFollow(targetPos)
 	end
 end
 
+HUB._returnOriginSerial = HUB._returnOriginSerial or 0
+function HUB.CancelReturnToOrigin()
+	HUB._returnOriginSerial = (HUB._returnOriginSerial or 0) + 1
+	HUB.IsReturningToOrigin = false
+	if HUB.CancelNavigation then
+		pcall(HUB.CancelNavigation)
+	end
+end
+
 local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 	if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return false end
 	if HUB.IsReturningToOrigin then return false end
@@ -10171,6 +10414,15 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 		origin = CFrame.new(origin)
 	end
 	if not originPos then return true end
+
+	HUB._returnOriginSerial = (HUB._returnOriginSerial or 0) + 1
+	local myReturnId = HUB._returnOriginSerial
+	local function abortReturn()
+		if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
+		if HUB._returnOriginSerial ~= myReturnId then return true end
+		if shouldAbortFn and shouldAbortFn() then return true end
+		return false
+	end
 
 	HUB.IsReturningToOrigin = true
 	if HUB.IsBossRoutineActive then
@@ -10195,11 +10447,11 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 				stopDistance = 8.0,
 				timeout = 45.0,
 				sprint = true,
-				shouldAbort = shouldAbortFn,
+				shouldAbort = abortReturn,
 			})
 			char = LocalPlayer.Character
 			root = char and char:FindFirstChild("HumanoidRootPart")
-			if root and not (shouldAbortFn and shouldAbortFn()) then
+			if root and not abortReturn() then
 				resumeFarmOrFollow(originPos)
 				clearOrigin()
 				return true
@@ -10295,14 +10547,14 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 					updateStatusFn(string.format("สถานะ: รอ HomeWarp คูลดาวน์อีก %d วิ...", cdLeft))
 				end
 				local cdT0 = os.clock()
-				while (os.clock() - cdT0 < (cdLeft + 0.2)) and not (shouldAbortFn and shouldAbortFn()) do
+				while (os.clock() - cdT0 < (cdLeft + 0.2)) and not abortReturn() do
 					task.wait(0.2)
 				end
 				cdLeft = 0
 			end
 
 			local reachedTown = false
-			if cdLeft == 0 and not (shouldAbortFn and shouldAbortFn()) then
+			if cdLeft == 0 and not abortReturn() then
 				if root then root.Anchored = true end
 				local homeWarp = remotes and remotes:FindFirstChild("HomeWarp")
 				if homeWarp then
@@ -10312,7 +10564,7 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 					if LumiMenuToggle then pcall(function() LumiMenuToggle:Fire("homeWarpMerchant") end) end
 				end
 				local t0 = os.clock()
-				while os.clock() - t0 < 8.0 and not (shouldAbortFn and shouldAbortFn()) do
+				while os.clock() - t0 < 8.0 and not abortReturn() do
 					task.wait(0.1)
 					char = LocalPlayer.Character
 					root = char and char:FindFirstChild("HumanoidRootPart")
@@ -10329,6 +10581,7 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 			end
 		end
 
+		if abortReturn() then return false end
 		char = LocalPlayer.Character
 		root = char and char:FindFirstChild("HumanoidRootPart")
 		if not root then return false end
@@ -10338,9 +10591,9 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 			if updateStatusFn then
 				updateStatusFn(string.format("สถานะ: วาร์ปไปยังเสา %s...", tostring(returnPillarId)))
 			end
-			local okWarp = executePillarWarp(currentNearPillar, returnPillarId, shouldAbortFn)
+			local okWarp = executePillarWarp(currentNearPillar, returnPillarId, abortReturn)
 			-- Caller-Level Smart Retry: หากวาร์ปกลับจุดฟาร์มไม่สำเร็จ ให้ค้นหาเสาใกล้ตัวใหม่และลองอีกครั้ง
-			if not okWarp and not (shouldAbortFn and shouldAbortFn()) then
+			if not okWarp and not abortReturn() then
 				task.wait(0.4)
 				char = LocalPlayer.Character
 				root = char and char:FindFirstChild("HumanoidRootPart")
@@ -10350,12 +10603,13 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 						if updateStatusFn then
 							updateStatusFn(string.format("สถานะ: วาร์ปไม่สำเร็จ — กำลังลองใหม่ไปยังเสา %s...", tostring(returnPillarId)))
 						end
-						executePillarWarp(retryPillar, returnPillarId, shouldAbortFn)
+						executePillarWarp(retryPillar, returnPillarId, abortReturn)
 					end
 				end
 			end
 		end
 
+		if abortReturn() then return false end
 		char = LocalPlayer.Character
 		root = char and char:FindFirstChild("HumanoidRootPart")
 		if not root then return false end
@@ -10373,6 +10627,7 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 			HUB.DisableGameAutoPlay()
 		end
 
+		if abortReturn() then return false end
 		-- เดินกลับสู่ originPos
 		if updateStatusFn then
 			updateStatusFn("สถานะ: ถึงโซนแล้ว กำลังเดินกลับจุดเริ่มต้น...")
@@ -10381,12 +10636,12 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 			stopDistance = 8.0,
 			timeout = 45.0,
 			sprint = true,
-			shouldAbort = shouldAbortFn,
+			shouldAbort = abortReturn,
 		})
 
 		char = LocalPlayer.Character
 		root = char and char:FindFirstChild("HumanoidRootPart")
-		if root and not (shouldAbortFn and shouldAbortFn()) and (root.Position - originPos).Magnitude <= 250.0 then
+		if root and not abortReturn() and (root.Position - originPos).Magnitude <= 250.0 then
 			-- เมื่อกลับมาถึงโซนฟาร์มมอนสเตอร์ หรือเคยเปิด Auto Play ไว้ ให้สั่งเปิด Auto Play/Follow ทันที 100%!
 			resumeFarmOrFollow(originPos)
 			clearOrigin()
@@ -10394,7 +10649,7 @@ local function returnToOrigin(shouldAbortFn, updateStatusFn, customTarget)
 		end
 
 		-- Self-Healing Fallback: ถ้าเดินไม่ถึงใน 45s หรือหลงทาง แต่ตัวละครอยู่ในโซนมอนสเตอร์แล้ว และไม่ได้ถูกยกเลิก ให้เปิด Auto Play/Follow และเคลียร์ Origin เพื่อไม่ให้ยืนแข็งทื่อ
-		if root and not (shouldAbortFn and shouldAbortFn()) and root.Position.Z <= -300 and (root.Position - originPos).Magnitude <= 500.0 then
+		if root and not abortReturn() and root.Position.Z <= -300 and (root.Position - originPos).Magnitude <= 500.0 then
 			resumeFarmOrFollow(root.Position)
 			clearOrigin()
 		end
@@ -11979,14 +12234,22 @@ do
 			setSprinting(false)
 		end)
 		warn("[Hunting Together Hub] Auto Sell: ยกเลิกลูปขายของ")
-		if not HUB.Config.autoSell and not HUB.Config.autoFarmBoss then
-			clearOrigin()
+		if not HUB.IsBossRoutineActive and not HUB.IsWorldBossRoutineActive and not (HUB.Config.autoWorldBoss and HUB.IsWorldBossEventActive and HUB.IsWorldBossEventActive()) then
+			if not HUB.Config.autoFarmBoss then
+				clearOrigin()
+			end
 		end
 	end
 	HUB.CancelAutoSellRoutine = cancelAutoSellRoutine
 
 	local function runAutoSellRoutine(forceRun)
-		if _isSellingRoutine or not HUB.Alive or HUB.IsBossRoutineActive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+		if _isSellingRoutine or not HUB.Alive or HUB.IsBossRoutineActive or HUB.IsWorldBossRoutineActive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+		if HUB.IsWorldBossBusy() then
+			if HUB.UI.SellStatusLabel and HUB.Config.autoSell then
+				HUB.UI.SellStatusLabel.Text = "สถานะ: พักการทำงาน (กำลังลุย World Boss)"
+			end
+			return
+		end
 		if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
 			if HUB.UI.SellStatusLabel and HUB.Config.autoSell then
 				HUB.UI.SellStatusLabel.Text = "สถานะ: พักการทำงาน (อยู่ในดันเจี้ยน)"
@@ -12037,6 +12300,7 @@ do
 			local function shouldAbort()
 				if not HUB.Alive or not HUB.Config.autoSell or _cancelSellRoutine or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
 				if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return true end
+				if HUB.IsWorldBossBusy() then return true end
 				return false
 			end
 
@@ -12331,6 +12595,7 @@ do
 	HUB.IsAutoSellNeeded = function(isTriggerCycle)
 		if not HUB.Config.autoSell then return false end
 		if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return false end
+		if HUB.IsWorldBossBusy() then return false end
 		if HUB.Config.autoSellJunk == false and HUB.Config.autoSellGear == false then return false end
 
 		-- ตรวจสอบก่อนว่ามีไอเทมที่ขายได้จริงหรือไม่
@@ -12367,6 +12632,8 @@ do
 		local hitSell = HUB.Config.autoSell and (stats.pct >= sellThresh or (sellThresh == 100 and stats.isFull))
 		if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
 			hitSell = false
+		elseif HUB.IsWorldBossBusy() then
+			hitSell = false
 		end
 
 		-- 1. กรณีเปิดใช้งาน Auto Salvage (ย่อยอุปกรณ์กลางสนามฟาร์มก่อนเสมอ ไม่ขัดจังหวะฟาร์ม):
@@ -12376,7 +12643,7 @@ do
 				runAutoSalvageRoutine()
 				task.wait(0.4)
 				-- หลัง Salvage เสร็จสิ้น หากเปิดใช้งาน Auto Sell อยู่ ให้ส่งไม้ต่อให้ Auto Sell เดินทางไปขายขยะ/ของที่เหลือทันที!
-				if HUB.Config.autoSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
+				if HUB.Config.autoSell and not HUB.IsWorldBossBusy() and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
 					local canSell = hasSellableItems()
 					if canSell then
 						task.spawn(function()
@@ -12395,7 +12662,7 @@ do
 
 		-- 2. กรณีไม่ได้เปิด Auto Salvage แต่เปิด Auto Sell (Standalone Auto Sell):
 		--    Auto sell ทำงานด้วยตัวเองได้ 100% เมื่อกระเป๋าถึงเกณฑ์ จะใช้ Home warp เสมอกลับไปขายของ
-		if hitSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive then
+		if hitSell and not _isSellingRoutine and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive and not HUB.IsWorldBossRoutineActive then
 			local canSell = hasSellableItems()
 			if canSell then
 				task.spawn(function()
@@ -12576,6 +12843,9 @@ do
 		if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
 			return nil, false, 0
 		end
+		if HUB.IsWorldBossBusy() then
+			return nil, false, 0
+		end
 		local myLevel = LocalPlayer:GetAttribute("Level") or 1
 		local preSpawnSec = HUB.Config.bossPreSpawnThreshold or 15
 
@@ -12626,6 +12896,12 @@ do
 			end
 			return
 		end
+		if HUB.IsWorldBossBusy() then
+			if HUB.UI.BossStatusLabel and HUB.Config.autoFarmBoss then
+				HUB.UI.BossStatusLabel.Text = "สถานะ: พักชั่วคราว (หลีกทางให้ World Boss)"
+			end
+			return
+		end
 		local char = LocalPlayer.Character
 		local root = char and char:FindFirstChild("HumanoidRootPart")
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -12651,6 +12927,7 @@ do
 			local function shouldAbort()
 				if not HUB.Alive or not HUB.Config.autoFarmBoss or _cancelBossRoutine or _bossRunSerial ~= myRunId or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
 				if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return true end
+				if HUB.IsWorldBossBusy() then return true end
 				if targetBoss and (not HUB.Config.farmBossList or HUB.Config.farmBossList[targetBoss.key] ~= true) then
 					return true
 				end
@@ -13133,6 +13410,7 @@ do
 
 			local function shouldAbortReturn()
 				if not HUB.Alive or _cancelBossRoutine or not HUB.Config.autoFarmBoss or _bossRunSerial ~= myRunId or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return true end
+				if HUB.IsWorldBossBusy() then return true end
 				local ch = LocalPlayer.Character
 				local h = ch and ch:FindFirstChildOfClass("Humanoid")
 				if not h or h.Health <= 0 then return true end
@@ -13175,6 +13453,9 @@ do
 		if HUB.CancelNavigation then
 			pcall(HUB.CancelNavigation)
 		end
+		if not shouldReturn and not HUB.IsSellingRoutineActive and not HUB.IsWorldBossRoutineActive and HUB.CancelReturnToOrigin then
+			pcall(HUB.CancelReturnToOrigin)
+		end
 		pcall(function()
 			local char = LocalPlayer.Character
 			local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -13186,13 +13467,18 @@ do
 		if HUB.UI.BossStatusLabel and not HUB.Config.autoFarmBoss then
 			HUB.UI.BossStatusLabel.Text = "สถานะ: ปิดใช้งาน"
 		end
-		if shouldReturn then
+		if shouldReturn and HUB.Config.autoFarmBoss and not HUB.IsWorldBossBusy() then
 			task.spawn(function()
 				if HUB.ReturnToOrigin then
-					HUB.ReturnToOrigin()
+					HUB.ReturnToOrigin(function()
+						if not HUB.Alive or not HUB.Config.autoFarmBoss or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then
+							return true
+						end
+						return HUB.IsWorldBossBusy()
+					end)
 				end
 			end)
-		elseif not HUB.Config.autoSell and not HUB.Config.autoFarmBoss then
+		elseif not HUB.IsSellingRoutineActive and not HUB.IsWorldBossBusy() and not HUB.Config.autoFarmBoss then
 			clearOrigin()
 		end
 	end
@@ -13200,6 +13486,7 @@ do
 	HUB.GetBossCountdown = getBossCountdown
 	HUB.CheckAndTriggerAutoBoss = function()
 		if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then return end
+		if HUB.IsWorldBossBusy() then return end
 		if not _isBossRoutine and not HUB.IsReturningToOrigin and HUB.Config.autoFarmBoss then
 			local candidate = getNextAliveSelectedBoss()
 			if candidate and not HUB.Navigating and not HUB.Dodging and not HUB.IsSellingRoutineActive then
@@ -13224,6 +13511,10 @@ do
 			if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
 				if HUB.UI.BossStatusLabel and HUB.Config.autoFarmBoss and not _isBossRoutine then
 					HUB.UI.BossStatusLabel.Text = "สถานะ: พักการทำงาน (อยู่ในดันเจี้ยน)"
+				end
+			elseif HUB.IsWorldBossBusy() then
+				if HUB.UI.BossStatusLabel and HUB.Config.autoFarmBoss and not _isBossRoutine then
+					HUB.UI.BossStatusLabel.Text = "สถานะ: พักชั่วคราว (หลีกทางให้ World Boss)"
 				end
 			elseif HUB.Config.autoFarmBoss and not _isBossRoutine and not HUB.IsReturningToOrigin and not HUB.Navigating and not HUB.Dodging then
 				local candidate = getNextAliveSelectedBoss()
@@ -13269,28 +13560,42 @@ do
 			end
 
 			-- 3. Monster Zone Idle & Stranded Origin Self-Healing
-			if not _isBossRoutine and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and not HUB.Navigating and not HUB.Dodging then
+			if not _isBossRoutine and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsWorldBossRoutineActive and not HUB.IsReturningToOrigin and not HUB.Navigating and not HUB.Dodging then
 				local ch = LocalPlayer.Character
 				local rt = ch and ch:FindFirstChild("HumanoidRootPart")
 				local hm = ch and ch:FindFirstChildOfClass("Humanoid")
 				local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
+				local inWorldBoss = HUB.IsInWorldBoss()
+				local worldBossBusy = HUB.IsWorldBossBusy()
 				if rt and hm and hm.Health > 0 and not isHomeWarpActive() then
-					-- 3.1 หากมี OriginCFrame ค้างอยู่ (เช่น รูทีนถูกขัดจังหวะตอนเพิ่งวาร์ปเสาเสร็จ) และไม่มีบอสเกิดอยู่ ให้สั่งเดินกลับจุดฟาร์มเดิมทันที
-					if not isDungeon and HUB.OriginCFrame and not (HUB.Config.autoFarmBoss and HUB.HasAliveSelectedBoss and HUB.HasAliveSelectedBoss()) then
-						task.spawn(function()
-							if HUB.ReturnToOrigin then
-								HUB.ReturnToOrigin()
-							end
-						end)
+					-- 3.1 หากมี OriginCFrame ค้างอยู่ (เฉพาะเมื่อมีรูทีนที่ควรกลับจริง และไม่อยู่ในช่วง World Boss)
+					if not isDungeon and not worldBossBusy and HUB.OriginCFrame and not (HUB.Config.autoFarmBoss and HUB.HasAliveSelectedBoss and HUB.HasAliveSelectedBoss()) then
+						if not HUB.Config.autoFarmBoss and not HUB.IsSellingRoutineActive and not HUB.IsWorldBossRoutineActive then
+							clearOrigin()
+						else
+							task.spawn(function()
+								if HUB.ReturnToOrigin then
+									HUB.ReturnToOrigin(function()
+										if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then
+											return true
+										end
+										if not HUB.Config.autoFarmBoss and not HUB.IsSellingRoutineActive then
+											return true
+										end
+										return HUB.IsWorldBossBusy()
+									end)
+								end
+							end)
+						end
 					else
 						local hasNearbyMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-						if isDungeon or hasNearbyMonster then
+						if isDungeon or inWorldBoss or hasNearbyMonster then
 							if not HUB.UserDisabledAuto and not HUB.IsGameAutoActive() then
 								_stuckBossCount = _stuckBossCount + 1
 								if _stuckBossCount >= 3 then -- ยืนนิ่งเกิน 15 วินาที
 									_stuckBossCount = 0
 									if HUB.EnsureGameAutoActive then
-										HUB.EnsureGameAutoActive(4, 0.3)
+										HUB.EnsureGameAutoActive(4, 0.3, inWorldBoss)
 									end
 								end
 							else
@@ -13304,6 +13609,808 @@ do
 					_stuckBossCount = 0
 				end
 			end
+		end
+	end)
+end
+
+-- 9.31 Auto World Boss Worker (ทิ้งฟาร์ม/Auto Boss -> วาร์ปด่วน -> สำรองกลับเมืองเข้า Portal -> ตายกลับไปตีต่อจนจบ -> กลับจุดเดิม)
+do
+	local WB_GATE_TOWN = Vector3.new(-14, 4.5, 62)
+	local WB_GATE_ROAD = Vector3.new(-18, 1.25, 76)
+	local WB_GATE_POS = Vector3.new(-27, 1.25, 89.5)
+	local WB_FIGHT_SECONDS = 1200
+	local WB_RETURN_DELAY = 10
+	local WB_WARP_COOLDOWN = 3.2
+
+	local _wbRunSerial = 0
+	local _isWbRoutine = false
+	local _cancelWbRoutine = false
+	local _lastWbWarpFire = 0
+	local _wbRemoteBound = nil
+
+	local function setWbStatus(text)
+		if HUB.UI and HUB.UI.WorldBossStatusLabel then
+			HUB.UI.WorldBossStatusLabel.Text = text
+		end
+	end
+
+	local function getWorldBossRemote()
+		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+		local wb = remotes and remotes:FindFirstChild("WorldBoss")
+		if wb and wb:IsA("RemoteEvent") then
+			return wb
+		end
+		return nil
+	end
+
+	local function isExcludedTownObj(obj)
+		if not obj then return true end
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p.Character and (obj == p.Character or obj:IsDescendantOf(p.Character)) then
+				return true
+			end
+		end
+		local cur = obj
+		while cur and cur ~= workspace do
+			local nm = string.lower(cur.Name)
+			if string.find(nm, "forge_weapon", 1, true)
+				or nm == "oon"
+				or string.find(nm, "dungeongate", 1, true)
+				or string.find(nm, "warppillar", 1, true)
+				or string.find(nm, "merchant", 1, true)
+				or string.find(nm, "blacksmith", 1, true)
+				or string.find(nm, "craft", 1, true)
+				or string.find(nm, "dummy", 1, true)
+				or string.find(nm, "lumibossfx", 1, true) then
+				return true
+			end
+			if cur:IsA("Terrain") then
+				return true
+			end
+			cur = cur.Parent
+		end
+		return false
+	end
+
+	local function findTownWorldBossPortal()
+		local parts = nil
+		pcall(function()
+			parts = workspace:GetPartBoundsInRadius(WB_GATE_POS, 24.0)
+		end)
+		if not parts or #parts == 0 then
+			return nil
+		end
+
+		local bestScore = -1
+		local bestEntry = nil
+		local seenContainers = {}
+
+		for _, part in ipairs(parts) do
+			if part and part:IsA("BasePart") and not isExcludedTownObj(part) then
+				local pName = string.lower(part.Name)
+				local sizeMax = math.max(part.Size.X, part.Size.Y, part.Size.Z)
+				local isHugeFloor = (sizeMax > 36.0)
+					or string.find(pName, "ground", 1, true)
+					or string.find(pName, "floor", 1, true)
+					or string.find(pName, "road", 1, true)
+					or string.find(pName, "grass", 1, true)
+					or string.find(pName, "terrain", 1, true)
+				if not isHugeFloor then
+					local container = part
+					if part.Parent and part.Parent:IsA("Model") and part.Parent ~= workspace then
+						container = part.Parent
+					end
+					if not seenContainers[container] then
+						seenContainers[container] = true
+						local cName = string.lower(container.Name)
+						local prompt = container:FindFirstChildWhichIsA("ProximityPrompt", true)
+						local clickDet = container:FindFirstChildWhichIsA("ClickDetector", true)
+						local touchTx = container:FindFirstChildWhichIsA("TouchTransmitter", true)
+						local isNamedPortal = string.find(cName, "worldboss", 1, true)
+							or string.find(cName, "world_boss", 1, true)
+							or string.find(cName, "bossgate", 1, true)
+							or string.find(cName, "boss_gate", 1, true)
+							or string.find(cName, "portal", 1, true)
+							or (string.find(cName, "gate", 1, true) and not string.find(cName, "dungeongate", 1, true))
+						local distToGate = (part.Position - WB_GATE_POS).Magnitude
+
+						if isNamedPortal or prompt or clickDet or (touchTx and distToGate <= 18.0) then
+							local score = 0
+							if isNamedPortal then score = score + 50 end
+							if prompt then score = score + 30 end
+							if clickDet then score = score + 25 end
+							if touchTx then score = score + 20 end
+							score = score - distToGate
+							if score > bestScore then
+								bestScore = score
+								local touchPart = part
+								if touchTx and touchTx.Parent and touchTx.Parent:IsA("BasePart") then
+									touchPart = touchTx.Parent
+								end
+								bestEntry = {
+									container = container,
+									part = touchPart,
+									pos = touchPart.Position,
+									prompt = prompt,
+									clickDetector = clickDet,
+									touchInterest = touchTx,
+								}
+							end
+						end
+					end
+				end
+			end
+		end
+
+		return bestEntry
+	end
+
+	local function clickNoticeWarpButton()
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		if not pg then return false end
+		local fs = EXEC.firesignal or rawget(EXEC.env, "firesignal")
+		local clickedAny = false
+
+		local function scanGui(rootGui)
+			if not rootGui then return end
+			if rootGui:IsA("ScreenGui") and rootGui.Enabled == false then return end
+			for _, desc in ipairs(rootGui:GetDescendants()) do
+				if (desc:IsA("TextButton") or desc:IsA("ImageButton")) and desc.Visible == true then
+					local nm = string.lower(desc.Name)
+					local txt = ""
+					if desc:IsA("TextButton") then
+						txt = string.lower(desc.Text or "")
+					end
+					local matchesWarp = string.find(nm, "warp", 1, true)
+						or string.find(txt, "warp", 1, true)
+						or string.find(txt, "วาร์ป", 1, true)
+					if matchesWarp then
+						if type(fs) == "function" then
+							pcall(fs, desc.MouseButton1Click)
+							pcall(fs, desc.Activated)
+							clickedAny = true
+						end
+					end
+				end
+			end
+		end
+
+		scanGui(pg:FindFirstChild("HuntWorldBossNotice"))
+		local lumiUi = pg:FindFirstChild("LumiUI")
+		if lumiUi then
+			local confirm = lumiUi:FindFirstChild("Confirm", true)
+			if confirm and (not confirm:IsA("GuiObject") or confirm.Visible == true) then
+				local confirmTxt = ""
+				for _, d in ipairs(confirm:GetDescendants()) do
+					if d:IsA("TextLabel") then
+						local lt = string.lower(d.Text or "")
+						if string.find(lt, "world boss", 1, true) or string.find(lt, "stormhorn", 1, true) then
+							confirmTxt = lt
+							break
+						end
+					end
+				end
+				if #confirmTxt > 0 then
+					scanGui(confirm)
+				end
+			end
+		end
+		return clickedAny
+	end
+
+	local function isNoticeWarpAvailable()
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		local noticeGui = pg and pg:FindFirstChild("HuntWorldBossNotice")
+		if noticeGui then
+			if noticeGui:IsA("ScreenGui") and noticeGui.Enabled == true then
+				return true
+			elseif noticeGui:IsA("GuiObject") and noticeGui.Visible == true then
+				return true
+			end
+		end
+		local st = HUB.WorldBossState
+		if st and st.noticeExpiresAt and os.clock() <= st.noticeExpiresAt then
+			return true
+		end
+		return false
+	end
+
+	local function tryNoticeWarp(shouldAbort)
+		if HUB.IsInWorldBoss() then return true end
+		if not isNoticeWarpAvailable() then return false end
+
+		local wbRemote = getWorldBossRemote()
+		if (os.clock() - _lastWbWarpFire) < WB_WARP_COOLDOWN then
+			task.wait(0.25)
+		end
+		if shouldAbort() then return false end
+
+		setWbStatus("สถานะ: พบ World Boss! กำลังกดวาร์ปด่วนเข้าสู่สนาม...")
+		if HUB.CancelNavigation then
+			pcall(HUB.CancelNavigation)
+		end
+
+		_lastWbWarpFire = os.clock()
+		clickNoticeWarpButton()
+		if wbRemote then
+			pcall(function()
+				wbRemote:FireServer("warp")
+			end)
+		end
+
+		local waitStart = os.clock()
+		while (os.clock() - waitStart < 4.5) and not shouldAbort() do
+			if HUB.IsInWorldBoss() then
+				return true
+			end
+			task.wait(0.15)
+		end
+		return HUB.IsInWorldBoss()
+	end
+
+	local function triggerPortalMechanisms(portal)
+		local fs = EXEC.firesignal or rawget(EXEC.env, "firesignal")
+		local fcd = rawget(EXEC.env, "fireclickdetector")
+		local fti = rawget(EXEC.env, "firetouchinterest")
+		local fpp = EXEC.fireproximityprompt or rawget(EXEC.env, "fireproximityprompt")
+
+		local char = LocalPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+		if portal then
+			if portal.prompt and portal.prompt.Parent and portal.prompt.Enabled then
+				if type(fpp) == "function" then
+					pcall(fpp, portal.prompt, 0)
+				end
+				pcall(function()
+					portal.prompt:InputHoldBegin()
+					task.wait(math.clamp(tonumber(portal.prompt.HoldDuration) or 0.15, 0.08, 1.5))
+					portal.prompt:InputHoldEnd()
+				end)
+			end
+			if portal.clickDetector and portal.clickDetector.Parent and type(fcd) == "function" then
+				pcall(fcd, portal.clickDetector)
+			end
+			if root and portal.part and portal.part.Parent then
+				if type(fti) == "function" then
+					pcall(function()
+						fti(root, portal.part, 0)
+						task.wait(0.05)
+						fti(root, portal.part, 1)
+					end)
+				end
+				if hum then
+					pcall(function()
+						local tPos = portal.part.Position
+						hum:MoveTo(tPos)
+					end)
+				end
+			end
+		else
+			-- แม้ยังไม่พบโมเดลเฉพาะ ให้เดินเหยียบพิกัด Gate.Position และลองยิง warp ที่หน้าประตูด้วย
+			if hum and root then
+				local stepOffset = Vector3.new(math.random(-2, 2), 0, math.random(-2, 2))
+				pcall(function()
+					hum:MoveTo(snapToGround(WB_GATE_POS + stepOffset, WB_GATE_POS.Y))
+				end)
+			end
+		end
+
+		if type(fs) == "function" then
+			clickNoticeWarpButton()
+		end
+		local wbRemote = getWorldBossRemote()
+		if wbRemote and (os.clock() - _lastWbWarpFire) >= WB_WARP_COOLDOWN then
+			_lastWbWarpFire = os.clock()
+			pcall(function()
+				wbRemote:FireServer("warp")
+			end)
+		end
+	end
+
+	-- รอให้ตัวละครหลังเกิดใหม่ในเมืองหลุดจากสถานะ Anchored ของ SafeLandClient และมีพื้นรองรับก่อนเริ่มเดิน
+	-- เพื่อไม่ให้ navigatePath วัดความเร็วเป็น 0 แล้วติด stuck ค้างอยู่ที่จุดเกิด (Spawn)
+	local function waitTownCharacterReady(shouldAbort)
+		local char = LocalPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not root or not hum or hum.Health <= 0 then
+			return false
+		end
+		if root.Anchored then
+			setWbStatus("สถานะ: เกิดในเมืองแล้ว — รอพื้นโหลดพร้อมก่อนวิ่งเข้า Portal...")
+		end
+		local t0 = os.clock()
+		while (os.clock() - t0 < 2.2) and not shouldAbort() do
+			char = LocalPlayer.Character
+			root = char and char:FindFirstChild("HumanoidRootPart")
+			hum = char and char:FindFirstChildOfClass("Humanoid")
+			if not root or not hum or hum.Health <= 0 then
+				return false
+			end
+			if HUB.IsInWorldBoss() then
+				return true
+			end
+			if not root.Anchored then
+				if HUB.WaitGroundReady then
+					if HUB.WaitGroundReady(root, 0.25) or not root.Anchored then
+						return true
+					end
+				else
+					return true
+				end
+			end
+			task.wait(0.05)
+		end
+		char = LocalPlayer.Character
+		root = char and char:FindFirstChild("HumanoidRootPart")
+		hum = char and char:FindFirstChildOfClass("Humanoid")
+		return root ~= nil and hum ~= nil and hum.Health > 0
+	end
+
+	local function enterViaTownPortal(shouldAbort)
+		local st = HUB.WorldBossState
+		local char = LocalPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not root or not hum or hum.Health <= 0 then
+			return "dead"
+		end
+
+		if HUB.IsInWorldBoss() then
+			return "entered"
+		end
+
+		-- 1. หากยังอยู่นอกเมือง ให้วาร์ปกลับเมืองก่อน (เสาวาร์ปใกล้ตัวก่อน -> สำรอง HomeWarp)
+		if not HUB.IsInTown() then
+			if HUB.CancelNavigation then
+				pcall(HUB.CancelNavigation)
+			end
+			if HUB.DisableGameAutoPlay then
+				HUB.DisableGameAutoPlay("worldboss_exit")
+			end
+			local nearPillar, nearDist = getNearestUnlockedPillar(root.Position)
+			if nearPillar and nearDist and nearDist <= 220.0 then
+				local pWarpId = nearPillar:GetAttribute("WarpId") or string.gsub(nearPillar.Name, "^WarpPillar_", "")
+				if pWarpId ~= "Town" then
+					setWbStatus("สถานะ: กดวาร์ปไม่ทัน — กำลังใช้เสาวาร์ปกลับเมือง...")
+					executePillarWarp(nearPillar, "Town", shouldAbort)
+				end
+			end
+			if shouldAbort() then return "aborted" end
+			if not HUB.IsInTown() and not HUB.IsInWorldBoss() then
+				setWbStatus("สถานะ: กดวาร์ปไม่ทัน — กำลังร่าย HomeWarp กลับเมือง...")
+				warpToTown(shouldAbort, setWbStatus)
+			end
+			if shouldAbort() then return "aborted" end
+			if HUB.IsInWorldBoss() then return "entered" end
+			if not HUB.IsInTown() then
+				return "retry"
+			end
+		end
+
+		-- 2. อยู่ในเมืองแล้ว -> รอ SafeLandClient ปลดล็อคหลังเกิด แล้ววิ่งตรงสู่ World Boss Gate ทันที
+		if not waitTownCharacterReady(shouldAbort) then
+			return "dead"
+		end
+		if shouldAbort() then return "aborted" end
+		if HUB.IsInWorldBoss() then return "entered" end
+
+		char = LocalPlayer.Character
+		root = char and char:FindFirstChild("HumanoidRootPart")
+		hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not root or not hum or hum.Health <= 0 then
+			return "dead"
+		end
+
+		local portal = findTownWorldBossPortal()
+		if portal then
+			st.sawGateInTown = true
+			st.gateMissingSince = 0
+		end
+		local rawTarget = (portal and portal.pos) or WB_GATE_POS
+		local gateTarget = snapToGround(rawTarget, WB_GATE_POS.Y)
+
+		if (root.Position - gateTarget).Magnitude > 14.0 then
+			setWbStatus("สถานะ: กำลังวิ่งไปหน้า Portal World Boss ในเมือง...")
+			navigatePath(gateTarget, {
+				stopDistance = 4.5,
+				timeout = 20.0,
+				sprint = true,
+				shouldAbort = shouldAbort,
+				customReached = function()
+					return HUB.IsInWorldBoss()
+				end,
+			})
+		end
+		if shouldAbort() then return "aborted" end
+		if HUB.IsInWorldBoss() then return "entered" end
+
+		-- ตรวจระยะจริงก่อนเข้า Trigger เสมอ (หากการเดินถูกขัดจังหวะกลางคัน ห้ามหยุดรอ 2.2 วินาที ให้วิ่งซ้ำทันที)
+		char = LocalPlayer.Character
+		root = char and char:FindFirstChild("HumanoidRootPart")
+		hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not root or not hum or hum.Health <= 0 then
+			return "dead"
+		end
+		if (root.Position - gateTarget).Magnitude > 16.0 then
+			return "retry_fast"
+		end
+
+		portal = findTownWorldBossPortal()
+		if portal then
+			st.sawGateInTown = true
+			st.gateMissingSince = 0
+		end
+
+		setWbStatus("สถานะ: ถึงหน้าประตูเมืองแล้ว — กำลังเข้า Portal World Boss...")
+		triggerPortalMechanisms(portal)
+
+		local waitT0 = os.clock()
+		while (os.clock() - waitT0 < 1.5) and not shouldAbort() do
+			if HUB.IsInWorldBoss() then
+				return "entered"
+			end
+			task.wait(0.1)
+		end
+
+		if not portal then
+			local nowSrv = workspace:GetServerTimeNow()
+			local endsAt = tonumber(workspace:GetAttribute("WorldBossEndsAt")) or 0
+			if st.sawGateInTown then
+				if st.gateMissingSince == 0 then
+					st.gateMissingSince = os.clock()
+				elseif (os.clock() - st.gateMissingSince) >= 6.0 and endsAt <= nowSrv then
+					return "ended"
+				end
+			elseif endsAt == 0 and (os.clock() - (st.noticedAt or 0) > 60.0) and not isNoticeWarpAvailable() then
+				return "ended"
+			end
+		end
+
+		return "retry"
+	end
+
+	local function findStormhornModel()
+		for _, m in ipairs(CollectionService:GetTagged("Monster")) do
+			if m and m:IsA("Model") and m.Parent then
+				local mId = tostring(m:GetAttribute("MonsterId") or "")
+				if string.find(string.lower(mId), "worldboss", 1, true) or string.find(string.lower(m.Name), "stormhorn", 1, true) then
+					return m
+				end
+			end
+		end
+		return nil
+	end
+
+	HUB.FindTownWorldBossPortal = findTownWorldBossPortal
+
+	local function runAutoWorldBossRoutine(forceCheck)
+		if _isWbRoutine or not HUB.Alive or not HUB.Config.autoWorldBoss or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then
+			return
+		end
+		if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
+			setWbStatus("สถานะ: พักการทำงาน (อยู่ในดันเจี้ยน)")
+			return
+		end
+		local eventActive = HUB.IsWorldBossEventActive and HUB.IsWorldBossEventActive()
+		if not eventActive and HUB.IsInTown() and findTownWorldBossPortal() ~= nil then
+			HUB.WorldBossState.active = true
+			eventActive = true
+		end
+		if not eventActive then
+			if forceCheck then
+				setWbStatus("สถานะ: ยังไม่พบกิจกรรม World Boss ที่กำลังเกิดอยู่")
+			end
+			return
+		end
+
+		_wbRunSerial = _wbRunSerial + 1
+		local myRunId = _wbRunSerial
+		_isWbRoutine = true
+		_cancelWbRoutine = false
+
+		local function shouldAbort()
+			if not HUB.Alive or not HUB.Config.autoWorldBoss or _cancelWbRoutine or _wbRunSerial ~= myRunId or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then
+				return true
+			end
+			if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
+				return true
+			end
+			return false
+		end
+
+		-- 1. บันทึกจุดฟาร์มเดิมก่อนละทิ้งการฟาร์มและ Auto Farm Boss
+		if HUB.OriginCFrame == nil and not HUB.IsInTown() and not HUB.IsInWorldBoss() then
+			captureOriginIfNeeded()
+		end
+		if HUB.OriginCFrame == nil and HUB.FarmAnchor and HUB.FarmAnchor.Z <= -300 then
+			HUB.OriginCFrame = CFrame.new(HUB.FarmAnchor)
+		end
+
+		HUB.IsWorldBossRoutineActive = true
+		HUB.UserDisabledAuto = false
+		HUB.BotPausingAuto = false
+
+		-- หยุด Auto Farm Boss / Auto Sell / ReturnToOrigin ที่กำลังทำงานอยู่ทันที โดยไม่ล้าง OriginCFrame!
+		if HUB.CancelAutoBossRoutine then
+			pcall(HUB.CancelAutoBossRoutine, false)
+		end
+		if HUB.IsSellingRoutineActive and HUB.CancelAutoSellRoutine then
+			pcall(HUB.CancelAutoSellRoutine)
+		end
+		if HUB.CancelReturnToOrigin then
+			pcall(HUB.CancelReturnToOrigin)
+		end
+
+		local st = HUB.WorldBossState
+		local attemptedNoticeThisLife = false
+
+		local okRun, errRun = pcall(function()
+			while not shouldAbort() and (HUB.IsWorldBossEventActive and HUB.IsWorldBossEventActive()) do
+				local char = LocalPlayer.Character
+				local root = char and char:FindFirstChild("HumanoidRootPart")
+				local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+				-- ระหว่างตัวละครตาย รอระบบ Auto Respawn พาไปเกิดใหม่ในเมือง (โพลถี่ 0.1s เพื่อวิ่งเข้า Portal ทันทีที่เกิด)
+				if not root or not hum or hum.Health <= 0 then
+					attemptedNoticeThisLife = true
+					setWbStatus("สถานะ: ตัวละครตาย — รอเกิดใหม่ในเมืองเพื่อกลับไปตี World Boss ต่อ...")
+					task.wait(0.1)
+				elseif HUB.IsInWorldBoss() then
+					st.active = true
+					attemptedNoticeThisLife = true
+
+					if st.bossDefeatedAt and st.bossDefeatedAt > 0 then
+						setWbStatus("สถานะ: ปราบ World Boss สำเร็จ! รอออกจากสนามกลับจุดฟาร์มเดิม...")
+						local leaveWait = os.clock()
+						while HUB.IsInWorldBoss() and (os.clock() - leaveWait < WB_RETURN_DELAY + 5.0) and not shouldAbort() do
+							task.wait(0.3)
+						end
+						if HUB.IsInWorldBoss() and not shouldAbort() then
+							local wbRemote = getWorldBossRemote()
+							if wbRemote then
+								pcall(function()
+									wbRemote:FireServer("leave")
+								end)
+							end
+							task.wait(1.0)
+						end
+						if not HUB.IsInWorldBoss() then
+							st.active = false
+							break
+						end
+					else
+						local stormModel = findStormhornModel()
+						local stormDead = false
+						if stormModel then
+							local hp = tonumber(stormModel:GetAttribute("HP"))
+							if (hp and hp <= 0) or stormModel:GetAttribute("AnimDead") == true then
+								stormDead = true
+							end
+						end
+
+						if stormDead then
+							setWbStatus("สถานะ: World Boss ตายแล้ว — รอสรุปผลและออกจากสนาม...")
+							task.wait(0.4)
+						else
+							setWbStatus(string.format("สถานะ: กำลังสู้ %s (Auto Play ทำงานต่อเนื่อง)...", st.bossName or "World Boss"))
+							HUB.UserDisabledAuto = false
+							HUB.BotPausingAuto = false
+							if not isHomeWarpActive() and not HUB.IsGameAutoActive() and HUB.EnsureGameAutoActive then
+								HUB.EnsureGameAutoActive(4, 0.25, true)
+							end
+							task.wait(0.4)
+						end
+					end
+				else
+					-- นอกสนาม World Boss
+					if st.bossDefeatedAt and st.bossDefeatedAt > 0 and (os.clock() - st.bossDefeatedAt >= 1.5) then
+						st.active = false
+						break
+					end
+
+					local entered = false
+					if not attemptedNoticeThisLife and isNoticeWarpAvailable() then
+						attemptedNoticeThisLife = true
+						entered = tryNoticeWarp(shouldAbort)
+					end
+
+					if not entered and not shouldAbort() and not HUB.IsInWorldBoss() then
+						local portalRes = enterViaTownPortal(shouldAbort)
+						if portalRes == "ended" then
+							st.active = false
+							break
+						elseif portalRes == "aborted" then
+							break
+						elseif portalRes == "retry_fast" then
+							task.wait(0.05)
+						elseif portalRes == "retry" then
+							task.wait(0.25)
+						end
+					end
+				end
+			end
+		end)
+
+		if not okRun and errRun then
+			warn("[Hunting Together Hub] Auto World Boss Error: " .. tostring(errRun))
+		end
+
+		if _wbRunSerial == myRunId then
+			_isWbRoutine = false
+			HUB.IsWorldBossRoutineActive = false
+			st.active = false
+			st.phase = "idle"
+			st.bossDefeatedAt = 0
+			st.sawGateInTown = false
+			st.gateMissingSince = 0
+
+			if HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN and not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then
+				if HUB.Config.autoWorldBoss and not _cancelWbRoutine then
+					local targetOrigin = HUB.OriginCFrame or (HUB.FarmAnchor and HUB.FarmAnchor.Z <= -300 and CFrame.new(HUB.FarmAnchor))
+					if targetOrigin and not HUB.IsInWorldBoss() then
+						setWbStatus("สถานะ: จบ World Boss แล้ว — กำลังพากลับจุดฟาร์มเดิม...")
+						if HUB.ReturnToOrigin then
+							HUB.ReturnToOrigin(function()
+								return not HUB.Alive or not HUB.Config.autoWorldBoss or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN
+							end, setWbStatus, targetOrigin)
+						end
+					end
+					if HUB.Config.autoWorldBoss then
+						setWbStatus("สถานะ: พร้อมทำงาน · สแตนด์บายรอ World Boss เกิด...")
+					else
+						setWbStatus("สถานะ: ปิดใช้งาน")
+					end
+				elseif not HUB.Config.autoWorldBoss then
+					setWbStatus("สถานะ: ปิดใช้งาน")
+				end
+			end
+		end
+	end
+
+	HUB.TriggerAutoWorldBoss = function(forceCheck)
+		if _isWbRoutine or not HUB.Alive or not HUB.Config.autoWorldBoss or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then
+			return
+		end
+		if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
+			return
+		end
+		if forceCheck or (HUB.IsWorldBossEventActive and HUB.IsWorldBossEventActive()) then
+			task.spawn(runAutoWorldBossRoutine, forceCheck)
+		end
+	end
+
+	HUB.CancelAutoWorldBossRoutine = function(shouldReturn)
+		_wbRunSerial = _wbRunSerial + 1
+		_cancelWbRoutine = true
+		_isWbRoutine = false
+		HUB.IsWorldBossRoutineActive = false
+		if HUB.CancelNavigation then
+			pcall(HUB.CancelNavigation)
+		end
+		if not shouldReturn and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and HUB.CancelReturnToOrigin then
+			pcall(HUB.CancelReturnToOrigin)
+		end
+		pcall(function()
+			local char = LocalPlayer.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if root then root.Anchored = false end
+			if hum and root then hum:MoveTo(root.Position) end
+			setSprinting(false)
+		end)
+		if not HUB.Config.autoWorldBoss then
+			setWbStatus("สถานะ: ปิดใช้งาน")
+		end
+		if not shouldReturn and not HUB.IsSellingRoutineActive and not HUB.IsBossRoutineActive and not HUB.Config.autoFarmBoss and not HUB.Config.autoWorldBoss then
+			clearOrigin()
+		end
+	end
+
+	-- ผูก WorldBoss Remote & Attribute Listeners (Dynamic Retry รองรับ Auto-Execute ก่อน Remotes replicate)
+	local function bindWorldBossRemote()
+		local wb = getWorldBossRemote()
+		if not wb or wb == _wbRemoteBound then return end
+		_wbRemoteBound = wb
+		HUB:AddConnection(wb.OnClientEvent:Connect(function(ev, a1, a2)
+			if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+			local st = HUB.WorldBossState
+			if ev == "notice" then
+				local dur = tonumber(a2) or 45
+				st.active = true
+				st.phase = "notice"
+				if type(a1) == "string" and #a1 > 0 then
+					st.bossName = a1
+				else
+					st.bossName = "Stormhorn"
+				end
+				st.noticedAt = os.clock()
+				st.noticeExpiresAt = os.clock() + dur
+				st.endsAt = workspace:GetServerTimeNow() + dur + WB_FIGHT_SECONDS
+				st.bossDefeatedAt = 0
+				st.sawGateInTown = false
+				st.gateMissingSince = 0
+				if HUB.Config.autoWorldBoss then
+					task.spawn(HUB.TriggerAutoWorldBoss)
+				end
+			elseif ev == "warped" then
+				st.active = true
+				st.phase = "fighting"
+				st.lastWarpedAt = os.clock()
+				HUB.Stats.worldBossesJoined = (HUB.Stats.worldBossesJoined or 0) + 1
+				HUB.UserDisabledAuto = false
+				HUB.BotPausingAuto = false
+			elseif ev == "result" or ev == "mvp" then
+				st.bossDefeatedAt = os.clock()
+				st.phase = "result"
+				if ev == "result" then
+					HUB.Stats.worldBossKills = (HUB.Stats.worldBossKills or 0) + 1
+				end
+			elseif ev == "back" then
+				local endsAt = tonumber(workspace:GetAttribute("WorldBossEndsAt")) or 0
+				if (st.bossDefeatedAt and st.bossDefeatedAt > 0) or endsAt <= workspace:GetServerTimeNow() then
+					st.active = false
+					st.phase = "returning"
+				end
+			end
+		end))
+	end
+
+	bindWorldBossRemote()
+
+	HUB:AddConnection(workspace:GetAttributeChangedSignal("WorldBossEndsAt"):Connect(function()
+		if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+		local st = HUB.WorldBossState
+		local endsAt = tonumber(workspace:GetAttribute("WorldBossEndsAt")) or 0
+		if endsAt > workspace:GetServerTimeNow() then
+			st.active = true
+			st.endsAt = endsAt
+			st.bossDefeatedAt = 0
+			if HUB.Config.autoWorldBoss then
+				task.spawn(HUB.TriggerAutoWorldBoss)
+			end
+		elseif st.active and not HUB.IsInWorldBoss() and (os.clock() - (st.noticedAt or 0) > 60.0) then
+			st.active = false
+		end
+	end))
+
+	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("InWorldBoss"):Connect(function()
+		if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+		if LocalPlayer:GetAttribute("InWorldBoss") == true then
+			local st = HUB.WorldBossState
+			st.active = true
+			st.phase = "fighting"
+			st.lastWarpedAt = os.clock()
+			HUB.UserDisabledAuto = false
+			HUB.BotPausingAuto = false
+			if HUB.Config.autoWorldBoss and not _isWbRoutine then
+				task.spawn(HUB.TriggerAutoWorldBoss)
+			end
+		end
+	end))
+
+	-- Background Watcher (Retry ผูก Remote + ตรวจจับ World Boss กรณีสคริปต์โหลดกลางคันหรือกลับออกจากดันเจี้ยน)
+	task.spawn(function()
+		task.wait(2.5)
+		while HUB.Alive and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN do
+			bindWorldBossRemote()
+			if HUB.Config.autoWorldBoss then
+				if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
+					setWbStatus("สถานะ: พักการทำงาน (อยู่ในดันเจี้ยน)")
+				elseif not _isWbRoutine then
+					local activeNow = HUB.IsWorldBossEventActive and HUB.IsWorldBossEventActive()
+					if not activeNow and HUB.IsInTown() and findTownWorldBossPortal() ~= nil then
+						HUB.WorldBossState.active = true
+						activeNow = true
+					end
+					if activeNow then
+						task.spawn(runAutoWorldBossRoutine)
+					end
+				end
+			end
+			task.wait(1.5)
 		end
 	end)
 end
@@ -14550,12 +15657,65 @@ do
 		LocalPlayer:SetAttribute("RespawnKeepBot", nil)
 	end)
 
+	local function isRespawnGuiOpen(guiObj)
+		if not guiObj then return false end
+		if guiObj:IsA("ScreenGui") then
+			return guiObj.Enabled == true
+		end
+		if guiObj:IsA("GuiObject") then
+			return guiObj.Visible == true
+		end
+		return false
+	end
+
+	local function clickRespawnTownFallback()
+		pcall(function()
+			local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+			if not pgui then return end
+			local ui = pgui:FindFirstChild("LumiRespawn")
+			if not ui then ui = pgui:FindFirstChild("HuntRespawn") end
+			if not ui then return end
+			for _, desc in ipairs(ui:GetDescendants()) do
+				if desc:IsA("TextButton") and desc.Visible and string.find(string.lower(desc.Text), "respawn in town", 1, true) then
+					if type(EXEC.firesignal) == "function" then
+						pcall(EXEC.firesignal, desc.MouseButton1Click)
+					end
+					break
+				end
+			end
+		end)
+	end
+
+	local function isWorldBossPriorityActive()
+		if HUB.IsWorldBossRoutineActive == true then
+			return true
+		end
+		if HUB.Config.autoWorldBoss == true and HUB.IsWorldBossEventActive and HUB.IsWorldBossEventActive() then
+			if not (HUB.IsDungeonPlace and HUB.IsDungeonPlace()) then
+				return true
+			end
+		end
+		return false
+	end
+
 	local function triggerAutoRespawn()
 		task.spawn(function()
-			-- รอ Grace Period 1.2 วินาที เพื่อให้ Server บันทึกการตายและส่ง DeathPrompt
-			task.wait(1.2)
+			-- รอ Grace Period ขั้นต่ำ 0.45s หรือจนกว่าหน้าต่าง Respawn (HuntRespawn / LumiRespawn) จะเปิด (สูงสุด 1.0s)
+			local tWait0 = os.clock()
+			while HUB.CharacterDying and (os.clock() - tWait0 < 1.0) do
+				if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
+				if (os.clock() - tWait0) >= 0.45 then
+					local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+					if pgui then
+						if isRespawnGuiOpen(pgui:FindFirstChild("HuntRespawn")) or isRespawnGuiOpen(pgui:FindFirstChild("LumiRespawn")) then
+							break
+						end
+					end
+				end
+				task.wait(0.1)
+			end
 			local tries = 0
-			while HUB.CharacterDying and tries < 6 do
+			while HUB.CharacterDying and tries < 8 do
 				if not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then break end
 				tries = tries + 1
 
@@ -14568,23 +15728,10 @@ do
 					end)
 				end
 
-				-- Transport 2 (UI Fallback): ค้นหาปุ่ม Respawn in Town บน PlayerGui.LumiRespawn
-				pcall(function()
-					local pgui = LocalPlayer:FindFirstChild("PlayerGui")
-					local lumiRespawn = pgui and pgui:FindFirstChild("LumiRespawn")
-					if lumiRespawn then
-						for _, desc in ipairs(lumiRespawn:GetDescendants()) do
-							if desc:IsA("TextButton") and string.find(string.lower(desc.Text), "respawn in town") then
-								if type(EXEC.firesignal) == "function" then
-									pcall(EXEC.firesignal, desc.MouseButton1Click)
-								end
-								break
-							end
-						end
-					end
-				end)
+				-- Transport 2 (UI Fallback): ค้นหาปุ่ม Respawn in Town บน PlayerGui.LumiRespawn / HuntRespawn
+				clickRespawnTownFallback()
 
-				task.wait(1.5)
+				task.wait(0.85)
 			end
 		end)
 	end
@@ -14592,7 +15739,12 @@ do
 	local function onCharacterDied()
 		HUB.CharacterDying = true
 		-- ยกเลิกลูปรูทีนที่กำลังทำงานอยู่ทันที ป้องกันไม่ให้เธรดค้างบนร่างที่ตาย
-		if HUB.CancelAutoBossRoutine then pcall(HUB.CancelAutoBossRoutine) end
+		local wbRunning = isWorldBossPriorityActive()
+		if HUB.CancelAutoBossRoutine then
+			if HUB.IsBossRoutineActive or not wbRunning then
+				pcall(HUB.CancelAutoBossRoutine)
+			end
+		end
 		if HUB.CancelAutoSellRoutine then pcall(HUB.CancelAutoSellRoutine) end
 		HUB.IsSalvagingRoutineActive = false
 		HUB.Navigating = false
@@ -14690,13 +15842,15 @@ do
 					end
 				end
 
-				-- 3. มอนสเตอร์อยู่รอบตัวแต่ Auto Play ดับเอง (Continuous Auto Play Health Monitor — เฉพาะในดันเจี้ยน หรือมีมอนสเตอร์ในระยะ 40 studs)
-				if not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and not HUB.Navigating and not isHomeWarpActive() then
+				-- 3. มอนสเตอร์อยู่รอบตัวหรืออยู่ในสนาม World Boss แต่ Auto Play ดับเอง (Continuous Auto Play Health Monitor)
+				local inWorldBoss = HUB.IsInWorldBoss and HUB.IsInWorldBoss()
+				local worldBossNavigating = HUB.IsWorldBossRoutineActive and not inWorldBoss
+				if not HUB.UserDisabledAuto and not HUB.BotPausingAuto and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not worldBossNavigating and not HUB.IsReturningToOrigin and not HUB.Navigating and not isHomeWarpActive() then
 					if not HUB.IsGameAutoActive() then
 						local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
 						local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-						if isDungeon or hasMonster then
-							HUB.EnsureGameAutoActive(2, 0.25)
+						if isDungeon or inWorldBoss or hasMonster then
+							HUB.EnsureGameAutoActive(2, 0.25, inWorldBoss)
 						end
 					end
 				end
@@ -14705,10 +15859,11 @@ do
 	end)
 
 	-- User Shutoff Guard: หาก Hub เคยเปิด Auto Play ให้ แล้วผู้ใช้กดปิดด้วยตนเอง จะไม่เปิดอัตโนมัติซ้ำอีก
-	-- แต่ถ้าปิดเพราะตัวละครตาย เลือดหมด หรือกำลังร่าย HomeWarp จะไม่นับว่าผู้ใช้สั่งปิดเองเด็ดขาด 100%
+	-- แต่ถ้าปิดเพราะตัวละครตาย เลือดหมด กำลังร่าย HomeWarp หรืออยู่ในลูป World Boss จะไม่นับว่าผู้ใช้สั่งปิดเองเด็ดขาด 100%
 	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("AutoOn"):Connect(function()
 		if LocalPlayer:GetAttribute("AutoOn") ~= true then
-			if HUB.CharacterDying or isHomeWarpActive() then return end
+			if HUB.CharacterDying or isHomeWarpActive() or HUB._autoPlayOpLock then return end
+			if HUB.IsWorldBossRoutineActive then return end
 			local ch = LocalPlayer.Character
 			local h = ch and ch:FindFirstChildOfClass("Humanoid")
 			if not h or h.Health <= 0 then return end
@@ -14795,16 +15950,24 @@ do
 		HUB.BrazierSprintHold = false
 		setSprinting(false)
 		HUB.UserManuallyStoppedFollow = false -- ปลดล็อคสถานะ เพื่อให้ Guardian กู้คืน Follow หลังเกิดใหม่
-		if HUB.CancelAutoBossRoutine then pcall(HUB.CancelAutoBossRoutine) end
+		local wbRunning = isWorldBossPriorityActive()
+		if HUB.CancelAutoBossRoutine then
+			if HUB.IsBossRoutineActive or not wbRunning then
+				pcall(HUB.CancelAutoBossRoutine)
+			end
+		end
 		if HUB.CancelAutoSellRoutine then pcall(HUB.CancelAutoSellRoutine) end
 
 		pcall(function()
 			local root = newChar:WaitForChild("HumanoidRootPart", 5)
-			if root then root.Anchored = false end
+			if root and not wbRunning then root.Anchored = false end
 		end)
 		task.spawn(function()
 			hookHumanoid(newChar)
 		end)
+		if wbRunning and HUB.TriggerAutoWorldBoss and not HUB.IsWorldBossRoutineActive then
+			task.spawn(HUB.TriggerAutoWorldBoss)
+		end
 
 		if not HUB.Alive then return end
 
@@ -14815,14 +15978,23 @@ do
 			if not root then return end
 
 			-- กรณีเกิดในเมือง (Z > -200) แต่มีจุดฟาร์มมอนสเตอร์เดิมนอกเมือง (HUB.OriginCFrame หรือ HUB.FarmAnchor ที่ Z <= -300)
-			-- จะเดินทางกลับเฉพาะเมื่อไม่ได้ติดรูทีนล่าบอส/ขายของ และไม่มีบอสเป้าหมายกำลังเกิดรออยู่ (ให้ Auto Boss ล่าก่อนแล้วค่อยกลับ)
+			-- จะเดินทางกลับเฉพาะเมื่อไม่ได้ติดรูทีน World Boss/บอส/ขายของ และไม่มีบอสเป้าหมายกำลังเกิดรออยู่
+			local worldBossActive = false
+			if HUB.IsWorldBossRoutineActive then
+				worldBossActive = true
+			elseif HUB.Config.autoWorldBoss and HUB.IsWorldBossEventActive() then
+				worldBossActive = true
+			end
 			local targetFarm = HUB.OriginCFrame or (HUB.FarmAnchor and HUB.FarmAnchor.Z <= -300 and CFrame.new(HUB.FarmAnchor))
 			if root.Position.Z > -200 and targetFarm and targetFarm.Position.Z <= -300 then
-				if not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and not (HUB.Config.autoFarmBoss and HUB.HasAliveSelectedBoss and HUB.HasAliveSelectedBoss()) then
+				if not worldBossActive and not HUB.IsBossRoutineActive and not HUB.IsSellingRoutineActive and not HUB.IsReturningToOrigin and not (HUB.Config.autoFarmBoss and HUB.HasAliveSelectedBoss and HUB.HasAliveSelectedBoss()) then
 					task.spawn(function()
 						if HUB.ReturnToOrigin then
 							HUB.ReturnToOrigin(function()
-								return not HUB.Alive or HUB.IsBossRoutineActive or HUB.IsSellingRoutineActive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN
+								if not HUB.Alive or HUB.IsBossRoutineActive or HUB.IsSellingRoutineActive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then
+									return true
+								end
+								return HUB.IsWorldBossBusy()
 							end, nil, targetFarm)
 						end
 					end)
@@ -14830,19 +16002,22 @@ do
 				return
 			end
 
-			-- ถ้ามีมอนสเตอร์ใกล้ตัว (40 studs) หรืออยู่ในดันเจี้ยน ให้เปิด Auto Play ทันที (ยกเว้นกำลังร่าย HomeWarp)
+			-- ถ้ามีมอนสเตอร์ใกล้ตัว (40 studs), อยู่ในดันเจี้ยน หรืออยู่ในสนาม World Boss ให้เปิด Auto Play ทันที (ยกเว้นกำลังร่าย HomeWarp)
 			local isDungeon = HUB.IsDungeonPlace and HUB.IsDungeonPlace()
+			local inWorldBoss = HUB.IsInWorldBoss()
 			local hasMonster = HUB.IsMonsterWithinRadius and HUB.IsMonsterWithinRadius(40)
-			if not isHomeWarpActive() and (isDungeon or hasMonster) then
-				local ok = HUB.EnsureGameAutoActive(5, 0.3)
-				if ok then
-					HUB.BotTurnedOnAuto = true
-					print("[Hunting Together Hub] ตัวละครเกิดใหม่ — สั่งเปิดใช้งาน Auto Play ต่อเนื่องเรียบร้อย")
+			if not isHomeWarpActive() then
+				if isDungeon or inWorldBoss or hasMonster then
+					local ok = HUB.EnsureGameAutoActive(5, 0.3, inWorldBoss)
+					if ok then
+						HUB.BotTurnedOnAuto = true
+						print("[Hunting Together Hub] ตัวละครเกิดใหม่ — สั่งเปิดใช้งาน Auto Play ต่อเนื่องเรียบร้อย")
+					end
 				end
 			end
 
-			-- กู้คืนสถานะ Party Follow ไปยังเพื่อนในปาร์ตี้อัตโนมัติ (ถ้าก่อนตายเคย Follow อยู่และเพื่อนยังอยู่ในปาร์ตี้)
-			if HUB.FollowTargetUserId and HUB.IsUserInMyParty(HUB.FollowTargetUserId) and not HUB.UserManuallyStoppedFollow then
+			-- กู้คืนสถานะ Party Follow ไปยังเพื่อนในปาร์ตี้อัตโนมัติ (ข้ามระหว่างลุย World Boss เพื่อไม่ให้เดินตามเพื่อนคนอื่นในเมือง)
+			if not worldBossActive and HUB.FollowTargetUserId and HUB.IsUserInMyParty(HUB.FollowTargetUserId) and not HUB.UserManuallyStoppedFollow then
 				local followEv = LocalPlayer:FindFirstChild("LumiPartyFollow")
 				if followEv and followEv:IsA("BindableEvent") then
 					followEv:Fire(HUB.FollowTargetUserId)
