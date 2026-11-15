@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.19)
+-- Hunting Together Hub (v10.20)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.19"
+local VERSION = "10.20"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -1970,12 +1970,12 @@ do
 
 	-- ตารางกฎสเตตัสต้องห้าม (Forbidden Stats) ตามชนิดของอุปกรณ์
 	local FORBIDDEN_RULES = {
-		melee_phys   = { INT = true, DEX = true }, -- อาวุธตีใกล้: ห้ามมี INT, DEX
-		ranged_phys  = { INT = true, STR = true }, -- อาวุธตีไกล/ธนู: ห้ามมี INT, STR
-		magic_weapon = { STR = true, AGI = true }, -- อาวุธเวททั่วไป (คทา/ไม้เท้า): ห้ามมี STR, AGI
-		flask_magic  = { STR = true },             -- อาวุธขวดน้ำยา Alchemist: ห้ามมี STR (ปลดล็อก AGI โดยเฉพาะสำหรับขวด)
-		ring_phys    = { INT = true, SP = true },  -- แหวนกายภาพ: ห้ามมี INT, SP
-		ring_magic   = { STR = true },             -- แหวนเวทย์: ห้ามมี STR (AGI ปลดล็อกแล้ว ไม่ถูกหักคะแนน)
+		melee_phys   = { INT = true, MATK = true, RangedDmg = true },                 -- อาวุธตีใกล้ (รวม Hand Wraps / MuayThai): ห้ามมี INT, MATK, RangedDmg (DEX ให้ HIT/ATK/ASPD)
+		ranged_phys  = { INT = true, MATK = true, MeleeDmg = true },                  -- อาวุธตีไกล/ธนู: ห้ามมี INT, MATK, MeleeDmg (STR ให้ ATK/Weight)
+		magic_weapon = { STR = true, ATK = true, MeleeDmg = true, RangedDmg = true }, -- อาวุธเวททั่วไป (คทา/ไม้เท้า/Skull Staff): ห้ามมีสายกายภาพ
+		flask_magic  = { STR = true, MeleeDmg = true },                               -- อาวุธขวดน้ำยา Alchemist: ห้ามมี STR, MeleeDmg (ปลดล็อก AGI สำหรับขวด)
+		ring_phys    = { INT = true, MATK = true },                                   -- แหวนกายภาพ: ห้ามมี INT, MATK
+		ring_magic   = { STR = true, ATK = true, MeleeDmg = true, RangedDmg = true }, -- แหวนเวทย์: ห้ามมีสายกายภาพ (ปลดล็อก AGI)
 	}
 
 	local function classifyArchetype(resolved, rawGear)
@@ -1983,11 +1983,14 @@ do
 		local slot = resolved.Slot
 		local id = string.lower(resolved.Id or rawGear.Id or "")
 		local isFlask = id:find("flask") or resolved.IsFlask == true or (rawGear and rawGear.IsFlask == true)
+		local isWraps = id:find("wraps") or resolved.IsWraps == true or (rawGear and rawGear.IsWraps == true)
 		if kind == "weapon" then
 			if id:find("bow") then
 				return "ranged_phys"
 			elseif isFlask then
 				return "flask_magic"
+			elseif isWraps then
+				return "melee_phys"
 			elseif id:find("rod") or id:find("staff") or id:find("skullstaff") or resolved.MATK ~= nil then
 				return "magic_weapon"
 			else
@@ -2191,19 +2194,21 @@ do
 				else
 					sSet = 10
 				end
-				if setId == "warrior" and (options.STR or options.ATK or options.CRIT or options.VIT or options.DEF or options.HpPercent or options.DefPercent) then
+				if setId == "warrior" and (options.STR or options.ATK or options.CRIT or options.VIT or options.DEF or options.HpPercent or options.DefPercent or options.AtkPercent or options.AtkMatkPercent or options.MeleeDmg or options.CritDmg or options.SkillSingle or options.SkillAoe) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "archmage" and (options.INT or options.MATK or options.SP or options.CastSpeed or options.MDEF or options.SpPercent or options.SpCost or options.SpRegenPercent) then
+				elseif setId == "archmage" and (options.INT or options.MATK or options.SP or options.CastSpeed or options.MDEF or options.SpPercent or options.SpCost or options.SpRegenPercent or options.MatkPercent or options.AtkMatkPercent or options.Cooldown or options.SkillSingle or options.SkillAoe) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "guardian" and (options.DEF or options.VIT or options.HP or options.DefPercent or options.HpPercent or options.DmgReduce) then
+				elseif setId == "guardian" and (options.DEF or options.VIT or options.HP or options.DefPercent or options.HpPercent or options.DmgReduce or options.SkillTaken or options.HitTaken or options.HpRegenMax or options.HpRegenPercent) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "gale" and (options.AGI or options.ASPD or options.Speed or options.FLEE or options.SpeedR) then
+				elseif setId == "gale" and (options.AGI or options.ASPD or options.Speed or options.FLEE or options.SpeedR or options.RangedDmg or options.MeleeDmg or options.CRIT or options.CritDmg) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "luckystar" and (options.LUK or options.CRIT or options.FLEE or options.HP or options.VIT) then
+				elseif setId == "luckystar" and (options.LUK or options.CRIT or options.FLEE or options.HP or options.VIT or options.CritDmg or options.DropPct or options.ExpPct or options.AtkPercent or options.MatkPercent) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "azurestar" and (options.INT or options.MATK or options.CastSpeed or options.SP or options.MDEF or options.SpPercent or options.SpCost or options.SpRegenPercent) then
+				elseif setId == "azurestar" and (options.INT or options.MATK or options.CastSpeed or options.SP or options.MDEF or options.SpPercent or options.SpCost or options.SpRegenPercent or options.MatkPercent or options.AtkMatkPercent or options.Cooldown or options.MPierce or options.SkillSingle or options.SkillAoe) then
 					sSet = math.min(15, sSet + 2)
-				elseif setId == "blackstar" and (options.Pierce or options.MPierce or options.CRIT or options.ATK or options.MATK or options.DmgReduce or options.HP or options.VIT or options.DEF) then
+				elseif setId == "blackstar" and (options.Pierce or options.MPierce or options.CRIT or options.ATK or options.MATK or options.DmgReduce or options.HP or options.VIT or options.DEF or options.AtkPercent or options.MatkPercent or options.AtkMatkPercent or options.CritDmg or options.SkillSingle or options.SkillAoe) then
+					sSet = math.min(15, sSet + 2)
+				elseif setId == "bloodlord" and (options.STR or options.INT or options.ATK or options.MATK or options.AtkPercent or options.MatkPercent or options.AtkMatkPercent or options.CRIT or options.CritDmg or options.SkillSingle or options.SkillAoe) then
 					sSet = math.min(15, sSet + 2)
 				end
 			end
@@ -6152,7 +6157,7 @@ do
 				FallbackIcon = "rbxassetid://105824855649695",
 				Specials = { "CRIT", "Cooldown", "MatkPercent", "CastSpeed", "ASPD", "SkillSingle", "SkillAoe" },
 				Pool = { "INT", "AGI", "DEX", "LUK", "SP", "MATK", "DropPct", "ExpPct" },
-				ForbiddenCandidates = { "STR", "VIT", "DEF", "HP", "FLEE", "MDEF", "MeleeDmg", "RangedDmg" }
+				ForbiddenCandidates = { "STR", "ATK", "MeleeDmg", "RangedDmg", "VIT", "DEF", "HP", "FLEE", "MDEF" }
 			},
 			{
 				Id = "RingAtk",
@@ -6162,17 +6167,17 @@ do
 				FallbackIcon = "rbxassetid://139585878328077",
 				Specials = { "ASPD", "CRIT", "Cooldown", "CastSpeed", "SkillSingle", "SkillAoe" },
 				Pool = { "STR", "AGI", "DEX", "LUK", "SP", "ATK", "MeleeDmg", "RangedDmg", "DropPct", "ExpPct" },
-				ForbiddenCandidates = { "INT", "VIT", "DEF", "HP", "FLEE", "MDEF" }
+				ForbiddenCandidates = { "INT", "MATK", "SP", "VIT", "DEF", "HP", "FLEE", "MDEF" }
 			},
 			{
 				Id = "WeaponPhysMelee",
 				Name = "⚔️ อาวุธกายประชิด (Melee Phys)",
-				Sub = "กลุ่ม: ดาบ / ขวาน / มีด / คาตานะ",
+				Sub = "กลุ่ม: ดาบ / ขวาน / มีด / คาตานะ / สนับมือ (Hand Wraps)",
 				SampleKey = "Items/sword_t5",
 				FallbackIcon = "rbxassetid://88552333464833",
 				Specials = { "CRIT", "AtkPercent", "AtkMatkPercent", "Pierce", "ASPD", "CritDmg", "SkillSingle", "SkillAoe" },
-				Pool = { "STR", "AGI", "DEX", "LUK", "MeleeDmg", "ATK", "DropPct", "ExpPct" },
-				ForbiddenCandidates = { "INT", "SP", "VIT", "DEF", "HP", "MATK", "RangedDmg", "MPierce" }
+				Pool = { "STR", "AGI", "DEX", "LUK", "SP", "MeleeDmg", "ATK", "DropPct", "ExpPct" },
+				ForbiddenCandidates = { "INT", "SP", "MATK", "RangedDmg", "VIT", "DEF", "HP", "MPierce" }
 			},
 			{
 				Id = "WeaponPhysRanged",
@@ -6181,8 +6186,8 @@ do
 				SampleKey = "Items/bow_t5",
 				FallbackIcon = "rbxassetid://95385333161493",
 				Specials = { "CRIT", "AtkPercent", "AtkMatkPercent", "Pierce", "ASPD", "CritDmg", "SkillSingle", "SkillAoe" },
-				Pool = { "DEX", "AGI", "STR", "LUK", "RangedDmg", "ATK", "DropPct", "ExpPct" },
-				ForbiddenCandidates = { "INT", "SP", "VIT", "DEF", "HP", "MATK", "MeleeDmg", "MPierce" }
+				Pool = { "DEX", "AGI", "STR", "LUK", "SP", "RangedDmg", "ATK", "DropPct", "ExpPct" },
+				ForbiddenCandidates = { "INT", "SP", "MATK", "MeleeDmg", "VIT", "DEF", "HP", "MPierce" }
 			},
 			{
 				Id = "WeaponMagic",
@@ -6191,8 +6196,8 @@ do
 				SampleKey = "Items/rod_t5",
 				FallbackIcon = "rbxassetid://97000273852760",
 				Specials = { "CRIT", "MatkPercent", "AtkMatkPercent", "MPierce", "Cooldown", "CastSpeed", "CritDmg", "SkillSingle", "SkillAoe" },
-				Pool = { "INT", "DEX", "LUK", "SP", "MATK", "DropPct", "ExpPct" },
-				ForbiddenCandidates = { "STR", "AGI", "VIT", "DEF", "HP", "MeleeDmg", "RangedDmg", "Pierce" }
+				Pool = { "INT", "DEX", "AGI", "LUK", "SP", "MATK", "DropPct", "ExpPct" },
+				ForbiddenCandidates = { "STR", "AGI", "ATK", "MeleeDmg", "RangedDmg", "VIT", "DEF", "HP", "Pierce" }
 			},
 			{
 				Id = "WeaponFlask",
@@ -6201,8 +6206,8 @@ do
 				SampleKey = "Items/flask_t5",
 				FallbackIcon = "rbxassetid://135145414807744",
 				Specials = { "CRIT", "MatkPercent", "AtkMatkPercent", "MPierce", "Cooldown", "ASPD", "CritDmg", "SkillSingle", "SkillAoe" },
-				Pool = { "INT", "AGI", "DEX", "LUK", "SP", "ATK", "MATK", "DropPct", "ExpPct" },
-				ForbiddenCandidates = { "STR", "VIT", "DEF", "HP", "MeleeDmg", "RangedDmg" }
+				Pool = { "INT", "AGI", "DEX", "LUK", "SP", "ATK", "MATK", "RangedDmg", "MeleeDmg", "DropPct", "ExpPct" },
+				ForbiddenCandidates = { "STR", "ATK", "MeleeDmg", "RangedDmg", "VIT", "DEF", "HP" }
 			},
 			{
 				Id = "HeadTop",
@@ -6302,6 +6307,7 @@ do
 			DefPercent = "DEF% (ป้องกัน)",
 			DmgReduce = "Dmg Red (ลดดาเมจ)",
 			HpRegenMax = "HP Regen (ฟื้นเลือด)",
+			HpRegenPercent = "HP Regen% (ฟื้นเลือด%)",
 			SpRegenPercent = "SP Regen (ฟื้นมานา)",
 			Speed = "Speed (วิ่งไว)",
 			-- New T6 / Endgame Options
@@ -6345,6 +6351,7 @@ do
 			CritDmg = Color3.fromRGB(220, 140, 20),
 			SkillSingle = Color3.fromRGB(180, 50, 220),
 			SkillAoe = Color3.fromRGB(220, 50, 180),
+			HpRegenPercent = Color3.fromRGB(50, 200, 100),
 		}
 
 		local modalHolder = Instance.new("Frame")
@@ -14914,7 +14921,7 @@ do
 			local myJob = LocalPlayer:GetAttribute("Job") or "Archer"
 			if myJob == "Archer" then
 				atkRange = 34
-			elseif myJob == "Mage" then
+			elseif myJob == "Mage" or myJob == "Alchemist" or myJob == "Necromancer" then
 				atkRange = 30
 			elseif myJob == "Cleric" then
 				atkRange = 24
