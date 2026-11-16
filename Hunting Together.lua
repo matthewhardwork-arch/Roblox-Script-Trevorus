@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.23)
+-- Hunting Together Hub (v10.24)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.23"
+local VERSION = "10.24"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -12892,7 +12892,7 @@ do
 		return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude
 	end
 
-	local function getDesiredBossDrops(rootPos, arenaPos, maxRadius, deathPos)
+	local function getDesiredBossDrops(rootPos, arenaPos, maxRadius, deathPos, ignoredDrops)
 		local botCfg = nil
 		local rawBotJson = LocalPlayer:GetAttribute("BotJson")
 		if type(rawBotJson) == "string" and #rawBotJson > 0 then
@@ -12910,30 +12910,36 @@ do
 		local isBagFull = stats.isFull
 
 		local CS = game:GetService("CollectionService")
-		local serverNow = workspace:GetServerTimeNow()
 		local myUserId = LocalPlayer.UserId
-		local radius = maxRadius or 160.0
+		local bossDropRadius = maxRadius or 65.0
 		local results = {}
 
 		for _, drop in ipairs(CS:GetTagged("Drop")) do
-			if drop and drop.Parent and drop:IsA("BasePart") then
-				local owner = tonumber(drop:GetAttribute("OwnerUserId")) or 0
-				local freeAt = tonumber(drop:GetAttribute("FreeAt")) or 0
-				if owner == 0 or owner == myUserId or freeAt <= serverNow then
-					local kind = drop:GetAttribute("DropKind") or "gear"
-					local rarity = tonumber(drop:GetAttribute("DropRarity")) or 0
-					if (not isBagFull) or kind == "coin" then
-						if isLootAllowedByBotCfg(lootSkip, kind, rarity) then
-							local dRoot = flatDistXZ(drop.Position, rootPos)
-							local dArena = flatDistXZ(drop.Position, arenaPos)
-							local dDeath = flatDistXZ(drop.Position, deathPos)
-							if dRoot <= radius or dArena <= radius or dDeath <= radius then
-								table.insert(results, {
-									part = drop,
-									dist = dRoot,
-									kind = kind,
-									rarity = rarity,
-								})
+			if drop and drop.Parent and drop:IsA("BasePart") and drop:IsDescendantOf(workspace) then
+				if drop:GetAttribute("Expired") ~= true and not (ignoredDrops and ignoredDrops[drop]) then
+					local owner = tonumber(drop:GetAttribute("OwnerUserId")) or 0
+					if owner == 0 or owner == myUserId then
+						local kind = drop:GetAttribute("DropKind") or "gear"
+						local rarity = tonumber(drop:GetAttribute("DropRarity")) or 0
+						if (not isBagFull) or kind == "coin" then
+							if isLootAllowedByBotCfg(lootSkip, kind, rarity) then
+								local dRoot = flatDistXZ(drop.Position, rootPos)
+								local dArena = flatDistXZ(drop.Position, arenaPos)
+								local dDeath = flatDistXZ(drop.Position, deathPos)
+								local inBossZone = false
+								if dDeath <= bossDropRadius or dArena <= (bossDropRadius + 15.0) then
+									inBossZone = true
+								elseif not deathPos and not arenaPos and dRoot <= bossDropRadius then
+									inBossZone = true
+								end
+								if inBossZone then
+									table.insert(results, {
+										part = drop,
+										dist = dRoot,
+										kind = kind,
+										rarity = rarity,
+									})
+								end
 							end
 						end
 					end
@@ -13072,10 +13078,8 @@ do
 				return false
 			end
 
-			-- 6.1 รอบอสตัวถัดไปในโซนนี้ แทนการวาร์ปกลับจุดฟาร์มคั่น (v10.03)
-			-- ใช้เมื่อ: กลับจุดฟาร์มต้องวาร์ป (ห่าง > 500) · บอสตัวถัดไปไม่ได้อยู่โซนจุดฟาร์ม
-			-- · และจะเข้าช่วง pre-spawn ภายใน BOSS_LINGER_SEC (กลับไปแล้วต้องออกมาอีกเกือบทันที = เสียค่าวาร์ปฟรี)
-			-- คืนบอสที่พร้อมล่า (เกิดแล้ว/เข้าช่วง pre-spawn) หรือ nil = กลับจุดฟาร์มตามปกติ
+			-- 6.1 เตรียมสลับไปบอสถัดไปทันที (v10.24): ไม่ยืนรอบอสตัวถัดไปค้างในห้องบอสเก่า
+			-- คืน upcoming เพื่อเดินทางไปรอที่ห้องบอสถัดไปทันที (เฉพาะเมื่อไกลจุดฟาร์ม > 500 และบอสถัดไปไม่ได้อยู่โซนจุดฟาร์ม)
 			local BOSS_LINGER_SEC = 30
 			local function lingerForUpcomingBoss(excludeKey, preSpawnSec)
 				local ch = LocalPlayer.Character
@@ -13095,20 +13099,9 @@ do
 						end
 					end
 				end
-				-- ไม่มีบอสที่ใกล้เกิด หรือบอสตัวนั้นอยู่โซนจุดฟาร์ม (กลับไปฟาร์มรอแล้วเดินไปเองได้) ⇒ กลับตามปกติ
 				if not upcoming or (upcoming.arenaPos - originPos).Magnitude <= 500.0 then return nil end
 
-				local tWait = os.clock()
-				while not shouldAbort() and os.clock() - tWait < BOSS_LINGER_SEC + 5 do
-					HUB.BossRoutineStartTime = os.clock()
-					local cand = getNextAliveSelectedBoss(excludeKey)
-					if cand then return cand end
-					if HUB.UI.BossStatusLabel then
-						HUB.UI.BossStatusLabel.Text = string.format("สถานะ: รอ %s เกิดในอีก %d วิ (ไม่วาร์ปกลับจุดฟาร์มคั่น)...", upcoming.name, getBossCountdown(upcoming))
-					end
-					task.wait(0.5)
-				end
-				return nil
+				return upcoming
 			end
 
 			-- 1. บันทึกจุดฟาร์มเดิมผ่าน Central Origin Engine (ถ้ายังไม่มี)
@@ -13160,12 +13153,13 @@ do
 				local inTown = (root.Position.Z > -200)
 				local distToTargetArena = (root.Position - targetBoss.arenaPos).Magnitude
 				local preSpawnSec = HUB.Config.bossPreSpawnThreshold or 15
+				local maxWaitCd = preSpawnSec + BOSS_LINGER_SEC
 				local bossKilledBeforeWarp = false
 
 				local function shouldAbortWarpToBoss()
 					if shouldAbort() then return true end
 					local cdNow = getBossCountdown(targetBoss)
-					if not isBossAlive(targetBoss) and not findLiveBossModel(targetBoss) and cdNow > preSpawnSec then
+					if not isBossAlive(targetBoss) and not findLiveBossModel(targetBoss) and cdNow > maxWaitCd then
 						bossKilledBeforeWarp = true
 						return true
 					end
@@ -13257,9 +13251,9 @@ do
 					sprint = true,
 					shouldAbort = shouldAbort,
 					customReached = function(rPos)
-						-- ตรวจจับว่าบอสถูกคนอื่นฆ่าตายไประหว่างกำลังเดินหรือไม่ (cd > preSpawnSec)
+						-- ตรวจจับว่าบอสถูกคนอื่นฆ่าตายไประหว่างกำลังเดินหรือไม่ (cd > maxWaitCd)
 						local cd = getBossCountdown(targetBoss)
-						if not isBossAlive(targetBoss) and not findLiveBossModel(targetBoss) and cd > preSpawnSec then
+						if not isBossAlive(targetBoss) and not findLiveBossModel(targetBoss) and cd > maxWaitCd then
 							bossDiedOnWay = true
 							return true -- ตัดจบการเดินทันที ไม่ต้องเดินเข้าไปยังห้องว่างเปล่า
 						end
@@ -13288,18 +13282,19 @@ do
 				if shouldAbort() then break end
 
 				local cdOnArrival = getBossCountdown(targetBoss)
-				local isDeadOnArrival = bossDiedOnWay or (not isBossAlive(targetBoss) and not findLiveBossModel(targetBoss) and cdOnArrival > preSpawnSec)
+				local isDeadOnArrival = bossDiedOnWay or (not isBossAlive(targetBoss) and not findLiveBossModel(targetBoss) and cdOnArrival > maxWaitCd)
 
-				-- 4.5 Pre-Spawn Standby: หากบอสยังไม่เกิด ให้นั่ง/ยืนรอที่ห้องบอส จนกว่าบอสจะเกิดจริง
+				-- 4.5 Pre-Spawn Standby: หากบอสยังไม่เกิด ให้นั่ง/ยืนรอที่ห้องบอสเป้าหมาย จนกว่าบอสจะเกิดจริง
 				if not isDeadOnArrival and not isBossAlive(targetBoss) and not findLiveBossModel(targetBoss) then
 					local waitSpawnStart = os.clock()
-					local maxWait = math.min(cdOnArrival + 2.5, preSpawnSec + 5.0)
+					local maxWait = math.min(cdOnArrival + 2.5, maxWaitCd + 5.0)
 					while not shouldAbort() and (os.clock() - waitSpawnStart < maxWait) do
+						HUB.BossRoutineStartTime = os.clock()
 						if isBossAlive(targetBoss) or findLiveBossModel(targetBoss) then
 							break
 						end
 						local cd = getBossCountdown(targetBoss)
-						if cd > preSpawnSec then
+						if cd > maxWaitCd then
 							isDeadOnArrival = true
 							break
 						end
@@ -13420,42 +13415,20 @@ do
 					end
 					HUB.Dodging = false
 
-					-- 5.1 รอแอนิเมชันบอสตาย (BossSlow 0.85s) + วิ่งกลับเข้าใกล้จุดที่บอสตายระหว่างรอของดรอปตกพื้น
+					-- 5.1+5.2 วิ่งเข้าจุดบอสตาย + เก็บของดรอปด้วยสัตว์เลี้ยง/PickupDrop (ตัดจบไวเมื่อเก็บหมดหรือของเต็ม)
 					if HUB.UI.BossStatusLabel then
-						HUB.UI.BossStatusLabel.Text = string.format("สถานะ: ปราบ %s สำเร็จ! กำลังกลับจุดดรอปของ...", targetBoss.name)
+						HUB.UI.BossStatusLabel.Text = string.format("สถานะ: ปราบ %s สำเร็จ! กำลังเก็บของดรอป...", targetBoss.name)
 					end
 
+					local lootPhaseStart = os.clock()
 					local hadDropsSeen = false
-					local spawnWaitStart = os.clock()
-					while os.clock() - spawnWaitStart < 2.2 and not shouldAbort() do
-						task.wait(0.2)
-						char = LocalPlayer.Character
-						root = char and char:FindFirstChild("HumanoidRootPart")
-						hum = char and char:FindFirstChildOfClass("Humanoid")
-						if not root or not hum or hum.Health <= 0 then break end
-
-						local distToDropCenter = flatDistXZ(root.Position, dropCenterPos)
-						if distToDropCenter > 12.0 then
-							setSprinting(true)
-							hum:MoveTo(dropCenterPos)
-						end
-
-						local initialDrops = getDesiredBossDrops(root.Position, targetBoss.arenaPos, 160.0, dropCenterPos)
-						if #initialDrops > 0 then
-							hadDropsSeen = true
-							if (os.clock() - spawnWaitStart) >= 1.2 then
-								break
-							end
-						end
-					end
-
-					-- 5.2 เดินเข้าไปใกล้ของดรอป (<= 6 studs) เพื่อให้อยู่ในระยะสัตว์เลี้ยงเก็บของ (DropMagnetRange 25) และยิง PickupDrop จนครบ (สูงสุด 14 วินาที)
-					local lootStart = os.clock()
-					local lastPickupFire = 0
 					local emptyStreak = 0
-					local lastSeenDropPos = dropCenterPos
+					local lastPickupFire = 0
+					local ignoredDrops = {}
+					local hoverDrop = nil
+					local hoverStartAt = 0
 
-					while os.clock() - lootStart < 14.0 and not shouldAbort() do
+					while os.clock() - lootPhaseStart < 10.0 and not shouldAbort() do
 						char = LocalPlayer.Character
 						root = char and char:FindFirstChild("HumanoidRootPart")
 						hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -13471,68 +13444,80 @@ do
 							currentTargetObj.Value = nil
 						end
 
-						local desiredDrops = getDesiredBossDrops(root.Position, targetBoss.arenaPos, 160.0, dropCenterPos)
-						if #desiredDrops == 0 then
-							local distToDropCenter = flatDistXZ(root.Position, dropCenterPos)
-							if not hadDropsSeen and distToDropCenter > 10.0 then
-								-- หากเพิ่งหลบสกิลบอสออกไปไกล ให้เดินกลับมาใกล้จุดบอสตายก่อนนับ emptyStreak
+						local now = os.clock()
+						local elapsed = now - lootPhaseStart
+						local desiredDrops = getDesiredBossDrops(root.Position, targetBoss.arenaPos, 65.0, dropCenterPos, ignoredDrops)
+
+						if #desiredDrops > 0 then
+							hadDropsSeen = true
+							emptyStreak = 0
+							if HUB.UI.BossStatusLabel then
+								HUB.UI.BossStatusLabel.Text = string.format("สถานะ: ปราบ %s สำเร็จ! กำลังเก็บของดรอป (เหลือ %d ชิ้น)...", targetBoss.name, #desiredDrops)
+							end
+
+							local nearestDrop = desiredDrops[1]
+							if nearestDrop and nearestDrop.part and nearestDrop.part.Parent then
+								local dropPart = nearestDrop.part
+								local dropPos = dropPart.Position
+								local flatOffset = Vector3.new(dropPos.X - root.Position.X, 0, dropPos.Z - root.Position.Z)
+								local flatDist = flatOffset.Magnitude
+
 								setSprinting(true)
-								hum:MoveTo(dropCenterPos)
-								emptyStreak = 0
-							else
+								if flatDist > 5.0 then
+									hum:MoveTo(dropPos)
+									hum:Move(flatOffset.Unit, false)
+								elseif flatDist > 1.8 then
+									hum:Move(flatOffset.Unit, false)
+								else
+									hum:Move(Vector3.zero, false)
+								end
+
+								if flatDist <= 14.0 and pickupDropRemote and (now - lastPickupFire >= 0.22) then
+									lastPickupFire = now
+									pcall(function()
+										pickupDropRemote:FireServer(true)
+									end)
+								end
+
+								-- Uncollectible Drop Guard: หากยืนทับระยะดูดแล้ว >= 1.15s แต่ของยังไม่หาย (เช่น สแต็กเต็ม) ให้ข้ามชิ้นนั้นทันที
+								if flatDist <= 7.5 then
+									if hoverDrop ~= dropPart then
+										hoverDrop = dropPart
+										hoverStartAt = now
+									elseif (now - hoverStartAt) >= 1.15 then
+										ignoredDrops[dropPart] = true
+										hoverDrop = nil
+									end
+								elseif hoverDrop == dropPart then
+									hoverDrop = nil
+								end
+							end
+						else
+							hoverDrop = nil
+							local distToDropCenter = flatDistXZ(root.Position, dropCenterPos)
+							if hadDropsSeen then
 								emptyStreak = emptyStreak + 1
-								if emptyStreak >= 5 then
-									if hadDropsSeen and pickupDropRemote then
-										-- เว้นจังหวะสั้นๆ ให้สัตว์เลี้ยงดึงของชิ้นสุดท้ายเข้ากระเป๋าให้ครบก่อนออกเดินทางต่อ
-										local graceMove = lastSeenDropPos or dropCenterPos
-										if flatDistXZ(root.Position, graceMove) > 6.0 then
-											setSprinting(true)
-											hum:MoveTo(graceMove)
-										end
-										task.wait(0.45)
+								if emptyStreak >= 2 then
+									if pickupDropRemote then
 										pcall(function()
 											pickupDropRemote:FireServer(true)
 										end)
 									end
 									break
 								end
-							end
-							task.wait(0.15)
-						else
-							hadDropsSeen = true
-							emptyStreak = 0
-							if HUB.UI.BossStatusLabel then
-								HUB.UI.BossStatusLabel.Text = string.format("สถานะ: ปราบ %s สำเร็จ! กำลังเดินไปเก็บของดรอป (เหลือ %d ชิ้น)...", targetBoss.name, #desiredDrops)
-							end
-
-							local nearestDrop = desiredDrops[1]
-							if nearestDrop and nearestDrop.part and nearestDrop.part.Parent then
-								local dropPos = nearestDrop.part.Position
-								lastSeenDropPos = dropPos
-								local flatOffset = Vector3.new(dropPos.X - root.Position.X, 0, dropPos.Z - root.Position.Z)
-								local flatDist = flatOffset.Magnitude
-
+							elseif distToDropCenter > 10.0 and elapsed < 3.0 then
 								setSprinting(true)
-								if flatDist > 6.0 then
-									hum:MoveTo(dropPos)
-									hum:Move(flatOffset.Unit, false)
-								elseif flatDist > 2.0 then
-									hum:Move(flatOffset.Unit, false)
-								else
-									hum:Move(Vector3.zero, false)
-								end
-
-								-- ยิง PickupDrop:FireServer(true) เมื่อเข้าใกล้ระยะดูด/เก็บของ (<= 14.0 studs)
-								if flatDist <= 14.0 and pickupDropRemote and (os.clock() - lastPickupFire >= 0.25) then
-									lastPickupFire = os.clock()
-									pcall(function()
-										pickupDropRemote:FireServer(true)
-									end)
+								hum:MoveTo(dropCenterPos)
+								emptyStreak = 0
+							elseif elapsed >= 1.35 then
+								emptyStreak = emptyStreak + 1
+								if emptyStreak >= 2 then
+									break
 								end
 							end
-
-							task.wait(0.15)
 						end
+
+						task.wait(0.12)
 					end
 
 					HUB.IsCollectingBossDrops = false
