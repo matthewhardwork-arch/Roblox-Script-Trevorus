@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.22)
+-- Hunting Together Hub (v10.23)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.22"
+local VERSION = "10.23"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -14152,8 +14152,207 @@ do
 		end
 	end
 
-	-- เดินตรงตามเส้นทางถนนโล่งของเมืองสู่ประตู World Boss (WB_GATE_TOWN -> WB_GATE_ROAD -> gateTarget)
-	-- ออกตัววิ่งทันที (0ms) โดยไม่เรียก PathfindingService:ComputeAsync ในเมือง และไม่นับเวลาตอนเกมล็อค Anchored ชั่วคราว
+	-- สร้างชุด Waypoint อ้อมสิ่งกีดขวางกลางเมือง (EventBooth X=[-11.7..11.7], Z=[23.8..50.5], เสาวาร์ป, บอร์ด)
+	local function buildTownPortalWaypoints(startPos, gateTarget)
+		local targetGate = snapToGround(gateTarget or WB_GATE_POS, WB_GATE_POS.Y)
+		local wps = {}
+
+		if math.abs(startPos.X) <= 13.5 and startPos.Z >= 22.0 and startPos.Z < 48.0 then
+			-- เกิดหรือยืนอยู่ด้านหน้าภายในบูธ EventBooth -> ถอยออกด้านหน้าแล้วอ้อมฝั่งซ้าย
+			table.insert(wps, snapToGround(Vector3.new(0, 2.5, 16), 2.5))
+			table.insert(wps, snapToGround(Vector3.new(-20, 2.5, 18), 2.5))
+			table.insert(wps, snapToGround(Vector3.new(-20, 2.5, 56), 2.5))
+		elseif startPos.Z < 24.0 then
+			-- อยู่ฝั่งใต้ของ EventBooth (เช่น SpawnLocation (0, 0.6, 12)) -> อ้อมทางเดินโล่งฝั่งซ้ายหรือขวา
+			if startPos.X <= 8.0 then
+				table.insert(wps, snapToGround(Vector3.new(-20, 2.5, 18), 2.5))
+				table.insert(wps, snapToGround(Vector3.new(-20, 2.5, 56), 2.5))
+			else
+				table.insert(wps, snapToGround(Vector3.new(18, 2.5, 22), 2.5))
+				table.insert(wps, snapToGround(Vector3.new(18, 2.5, 58), 2.5))
+			end
+		elseif startPos.Z < 54.0 then
+			-- อยู่ข้างบูธฝั่งตะวันตก (เช่น Merchant) หรือฝั่งตะวันออก -> เดินตัดผ่านมุมขอบบูธก่อนขึ้นถนน
+			if startPos.X < 0 then
+				table.insert(wps, snapToGround(Vector3.new(-20, 2.5, 56), 2.5))
+			else
+				table.insert(wps, snapToGround(Vector3.new(18, 2.5, 58), 2.5))
+			end
+		end
+
+		if startPos.Z < 64.0 then
+			table.insert(wps, snapToGround(WB_GATE_TOWN, WB_GATE_TOWN.Y))
+		end
+		if startPos.Z < 78.0 then
+			table.insert(wps, snapToGround(WB_GATE_ROAD, WB_GATE_ROAD.Y))
+		end
+		table.insert(wps, targetGate)
+		return wps
+	end
+	HUB._buildTownPortalWaypoints = buildTownPortalWaypoints
+
+	local function townSpherecastCheck(origin, radius, dirVec, distance, char)
+		if dirVec.Magnitude < 0.05 or distance <= 0.1 then
+			return nil
+		end
+		local unitDir = dirVec.Unit
+		local excluded = {}
+		if char then
+			table.insert(excluded, char)
+		end
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		rp.RespectCanCollide = true
+
+		for _ = 1, 3 do
+			rp.FilterDescendantsInstances = excluded
+			local hit = workspace:Spherecast(origin, radius, unitDir * distance, rp)
+			if not hit then
+				return nil
+			end
+			-- ข้ามพื้นทางเดินราบ/ทางลาดที่เดินเหยียบขึ้นได้ (Normal.Y > 0.75 และต่ำกว่าตัวละคร)
+			if hit.Normal.Y > 0.75 and hit.Position.Y < (origin.Y - 0.6) then
+				table.insert(excluded, hit.Instance)
+			else
+				return hit
+			end
+		end
+		return nil
+	end
+
+	local function getTownAvoidanceTarget(curPos, targetWp, char, state)
+		local flatDelta = Vector3.new(targetWp.X - curPos.X, 0, targetWp.Z - curPos.Z)
+		local flatDist = flatDelta.Magnitude
+		if flatDist <= 0.3 then
+			return targetWp
+		end
+		local moveDir = flatDelta.Unit
+		local origin = curPos + Vector3.new(0, 0.35, 0)
+		local probeDist = math.min(flatDist, 9.5)
+
+		local directHit = townSpherecastCheck(origin, 1.75, moveDir, probeDist, char)
+		if not directHit then
+			if state then
+				state.lastAvoidSign = 0
+			end
+			return targetWp
+		end
+
+		local now = os.clock()
+		local prefSign = 1
+		if state and state.lastAvoidSign ~= 0 and (now - (state.lastAvoidAt or 0)) < 0.8 then
+			prefSign = state.lastAvoidSign
+		elseif directHit.Normal then
+			-- เลือกด้านที่สอดคล้องกับระนาบสิ่งกีดขวางหรือทิศสู่เป้าหมาย
+			local crossY = moveDir:Cross(Vector3.new(directHit.Normal.X, 0, directHit.Normal.Z)).Y
+			if crossY < 0 then
+				prefSign = -1
+			else
+				prefSign = 1
+			end
+		end
+
+		local baseMagnitudes = { 28, 50, 72, 95, 125, 180 }
+		local bestDir = nil
+		local bestScore = -1e9
+		local bestSign = prefSign
+
+		for _, mag in ipairs(baseMagnitudes) do
+			local signs
+			if mag == 180 then
+				signs = { 1 }
+			else
+				signs = { prefSign, -prefSign }
+			end
+			for _, sgn in ipairs(signs) do
+				local ang = mag * sgn
+				local candDir = CFrame.Angles(0, math.rad(ang), 0):VectorToWorldSpace(moveDir)
+				candDir = Vector3.new(candDir.X, 0, candDir.Z).Unit
+				local candHit = townSpherecastCheck(origin, 1.6, candDir, 8.5, char)
+				local clearDist = 8.5
+				if candHit then
+					clearDist = candHit.Distance
+				end
+				if clearDist >= 4.5 or not candHit then
+					local testPos = curPos + candDir * clearDist
+					local remDist = Vector3.new(targetWp.X - testPos.X, 0, targetWp.Z - testPos.Z).Magnitude
+					local alignScore = -remDist
+					if not candHit then
+						alignScore = alignScore + 12.0
+					end
+					if state and state.lastAvoidSign ~= 0 and sgn == state.lastAvoidSign then
+						alignScore = alignScore + 1.5
+					end
+					if alignScore > bestScore then
+						bestScore = alignScore
+						bestDir = candDir
+						bestSign = sgn
+					end
+				end
+			end
+		end
+
+		if bestDir then
+			if state then
+				state.lastAvoidSign = bestSign
+				state.lastAvoidAt = now
+			end
+			return snapToGround(curPos + bestDir * 8.5, targetWp.Y)
+		end
+
+		return targetWp
+	end
+	HUB._getTownAvoidanceTarget = getTownAvoidanceTarget
+
+	local function findTownEscapePos(curPos, forwardDir, char, avoidState)
+		local baseDir = Vector3.new(forwardDir.X, 0, forwardDir.Z)
+		if baseDir.Magnitude < 0.05 then
+			baseDir = Vector3.new(0, 0, 1)
+		else
+			baseDir = baseDir.Unit
+		end
+		local origin = curPos + Vector3.new(0, 0.35, 0)
+		local angles = { 90, -90, 120, -120, 60, -60, 150, -150, 180 }
+		local bestDir = -baseDir
+		local bestDist = -1
+		local bestSign = 1
+
+		for _, ang in ipairs(angles) do
+			local candDir = CFrame.Angles(0, math.rad(ang), 0):VectorToWorldSpace(baseDir)
+			candDir = Vector3.new(candDir.X, 0, candDir.Z).Unit
+			local hit = townSpherecastCheck(origin, 1.6, candDir, 10.0, char)
+			local d = 10.0
+			if hit then
+				d = hit.Distance
+			end
+			if not hit then
+				bestDir = candDir
+				bestDist = 10.0
+				if ang < 0 then
+					bestSign = -1
+				else
+					bestSign = 1
+				end
+				break
+			elseif d > bestDist then
+				bestDist = d
+				bestDir = candDir
+				if ang < 0 then
+					bestSign = -1
+				else
+					bestSign = 1
+				end
+			end
+		end
+
+		if avoidState then
+			avoidState.lastAvoidSign = bestSign
+			avoidState.lastAvoidAt = os.clock()
+		end
+		return snapToGround(curPos + bestDir * 8.0, curPos.Y)
+	end
+
+	-- เดินอ้อมสิ่งกีดขวางในเมือง (EventBooth / NPCs / Board / Pillar) สู่ประตู World Boss พร้อม Spherecast Avoidance & Stuck Recovery
 	local function walkTownToWorldBossGate(initialGateTarget, shouldAbort)
 		local st = HUB.WorldBossState
 		local char = LocalPlayer.Character
@@ -14163,26 +14362,10 @@ do
 		if HUB.IsInWorldBoss() then return "entered" end
 
 		local gateTarget = snapToGround(initialGateTarget or WB_GATE_POS, WB_GATE_POS.Y)
-		local wps = {
-			snapToGround(WB_GATE_TOWN, WB_GATE_TOWN.Y),
-			snapToGround(WB_GATE_ROAD, WB_GATE_ROAD.Y),
-			gateTarget,
-		}
-
-		local startFlatGateDist = Vector3.new(gateTarget.X - root.Position.X, 0, gateTarget.Z - root.Position.Z).Magnitude
+		local wps = buildTownPortalWaypoints(root.Position, gateTarget)
 		local wpIdx = 1
-		for i = 1, 2 do
-			if wpIdx == i then
-				local wp = wps[i]
-				local distToWp = Vector3.new(wp.X - root.Position.X, 0, wp.Z - root.Position.Z).Magnitude
-				local distWpToGate = Vector3.new(gateTarget.X - wp.X, 0, gateTarget.Z - wp.Z).Magnitude
-				if distToWp <= 6.0 or startFlatGateDist <= distWpToGate + 4.0 then
-					wpIdx = i + 1
-				end
-			end
-		end
 
-		setWbStatus("สถานะ: กำลังวิ่งตรงไปหน้า Portal World Boss ในเมือง...")
+		setWbStatus("สถานะ: กำลังวิ่งหลบสิ่งกีดขวางไปหน้า Portal World Boss...")
 		HUB.Navigating = true
 		setSprinting(true)
 		local myCancelSerial = HUB.NavCancelSerial or 0
@@ -14193,7 +14376,14 @@ do
 		local movedClearedAttr = false
 		local reached = false
 
-		while moveElapsed < 14.0 do
+		local avoidState = { lastAvoidSign = 0, lastAvoidAt = 0 }
+		local lastSamplePos = root.Position
+		local lastSampleAt = os.clock()
+		local stuckTime = 0
+		local detourPos = nil
+		local detourUntil = 0
+
+		while moveElapsed < 18.0 do
 			if shouldAbort() then break end
 			if (HUB.NavCancelSerial or 0) ~= myCancelSerial then break end
 			if isPlayerManualInput() then break end
@@ -14215,6 +14405,9 @@ do
 
 			if root.Anchored or hum.WalkSpeed <= 0.01 then
 				lockWait = lockWait + dt
+				lastSamplePos = root.Position
+				lastSampleAt = now
+				stuckTime = 0
 				if lockWait >= 6.5 then
 					break
 				end
@@ -14237,7 +14430,7 @@ do
 						st.sawGateInTown = true
 						st.gateMissingSince = 0
 						gateTarget = snapToGround(portal.pos, WB_GATE_POS.Y)
-						wps[3] = gateTarget
+						wps[#wps] = gateTarget
 					end
 				end
 
@@ -14248,11 +14441,11 @@ do
 					break
 				end
 
-				while wpIdx < 3 do
+				while wpIdx < #wps do
 					local curWp = wps[wpIdx]
 					local distWp = Vector3.new(curWp.X - curPos.X, 0, curWp.Z - curPos.Z).Magnitude
 					local distWpGate = Vector3.new(gateTarget.X - curWp.X, 0, gateTarget.Z - curWp.Z).Magnitude
-					if distWp <= 5.0 or flatDistToGate <= distWpGate + 2.0 then
+					if distWp <= 4.5 or (curWp.Z >= 58.0 and flatDistToGate <= distWpGate + 2.0) then
 						wpIdx = wpIdx + 1
 					else
 						break
@@ -14260,20 +14453,48 @@ do
 				end
 
 				local targetWp = wps[wpIdx]
-				local flatDelta = Vector3.new(targetWp.X - curPos.X, 0, targetWp.Z - curPos.Z)
-				if flatDelta.Magnitude > 0.3 then
-					local moveDir = flatDelta.Unit
-					local whisker = getWhiskerAvoidance(curPos, moveDir)
-					local steerPos = targetWp
-					if whisker.Magnitude > 0.1 then
-						local combined = (moveDir + whisker * 1.35).Unit
-						local stepDist = math.min(flatDelta.Magnitude, 12.0)
-						steerPos = snapToGround(curPos + combined * stepDist, targetWp.Y)
+				local sampleDt = now - lastSampleAt
+				if sampleDt >= 0.25 then
+					local movedXZ = Vector3.new(curPos.X - lastSamplePos.X, 0, curPos.Z - lastSamplePos.Z).Magnitude
+					local expected = math.max(14.0, hum.WalkSpeed) * sampleDt
+					if movedXZ < expected * 0.22 then
+						stuckTime = stuckTime + sampleDt
+						if stuckTime >= 0.50 then
+							stuckTime = 0
+							if avoidState.lastAvoidSign ~= 0 then
+								avoidState.lastAvoidSign = -avoidState.lastAvoidSign
+							else
+								avoidState.lastAvoidSign = 1
+							end
+							avoidState.lastAvoidAt = now
+							local fwd = Vector3.new(targetWp.X - curPos.X, 0, targetWp.Z - curPos.Z)
+							detourPos = findTownEscapePos(curPos, fwd, char, avoidState)
+							detourUntil = now + 0.55
+						end
+					else
+						stuckTime = 0
 					end
-					pcall(function()
-						hum:MoveTo(steerPos)
-					end)
+					lastSamplePos = curPos
+					lastSampleAt = now
 				end
+
+				local steerTarget = nil
+				if detourPos and now < detourUntil then
+					local dDetour = Vector3.new(detourPos.X - curPos.X, 0, detourPos.Z - curPos.Z).Magnitude
+					if dDetour > 2.0 then
+						steerTarget = detourPos
+					else
+						detourPos = nil
+					end
+				end
+				if not steerTarget then
+					detourPos = nil
+					steerTarget = getTownAvoidanceTarget(curPos, targetWp, char, avoidState)
+				end
+
+				pcall(function()
+					hum:MoveTo(steerTarget)
+				end)
 				task.wait(0.05)
 			end
 		end
