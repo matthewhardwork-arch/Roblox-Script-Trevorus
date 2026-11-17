@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.24)
+-- Hunting Together Hub (v10.26)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.24"
+local VERSION = "10.26"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -1883,16 +1883,30 @@ local function loadConfig()
 					for s, v in pairs(data.autoLockSets) do
 						HUB.Config.autoLockSets[s] = (v == true)
 					end
+					if data.autoLockSets.all == nil then
+						local allActive = true
+						for k, v in pairs(HUB.Config.autoLockSets) do
+							if k ~= "all" and v ~= true then
+								allActive = false
+								break
+							end
+						end
+						HUB.Config.autoLockSets.all = allActive
+					end
 				end
 				if type(data.autoLockEquipRules) == "table" then
 					HUB.Config.autoLockEquipRules = data.autoLockEquipRules
-					-- Migration for WeaponPhys -> WeaponPhysMelee / WeaponPhysRanged
-					if HUB.Config.autoLockEquipRules["WeaponPhys"] then
+					-- Migration for WeaponPhys -> WeaponPhysMelee / WeaponPhysRanged (แยกสำเนาคนละตาราง)
+					local legacyPhys = HUB.Config.autoLockEquipRules["WeaponPhys"]
+					if type(legacyPhys) == "table" then
+						local okCopy, encoded = pcall(HttpService.JSONEncode, HttpService, legacyPhys)
 						if not HUB.Config.autoLockEquipRules["WeaponPhysMelee"] then
-							HUB.Config.autoLockEquipRules["WeaponPhysMelee"] = HUB.Config.autoLockEquipRules["WeaponPhys"]
+							local okDec, copyTbl = okCopy and pcall(HttpService.JSONDecode, HttpService, encoded)
+							HUB.Config.autoLockEquipRules["WeaponPhysMelee"] = (okDec and type(copyTbl) == "table") and copyTbl or legacyPhys
 						end
 						if not HUB.Config.autoLockEquipRules["WeaponPhysRanged"] then
-							HUB.Config.autoLockEquipRules["WeaponPhysRanged"] = HUB.Config.autoLockEquipRules["WeaponPhys"]
+							local okDec, copyTbl = okCopy and pcall(HttpService.JSONDecode, HttpService, encoded)
+							HUB.Config.autoLockEquipRules["WeaponPhysRanged"] = (okDec and type(copyTbl) == "table") and copyTbl or legacyPhys
 						end
 					end
 					for _, r in pairs(HUB.Config.autoLockEquipRules) do
@@ -1905,6 +1919,7 @@ local function loadConfig()
 									end
 								end
 							end
+							r.special = nil
 							if type(r.specialStats) ~= "table" then
 								r.specialStats = {}
 							end
@@ -1984,6 +1999,19 @@ loadConfig()
 -- ค่า nearest/farthest จาก session ก่อนหน้าอาจค้างใน prevConfig จึงแปลงให้เป็น ltr/rtl เสมอหลังโหลด
 HUB.Config.dungeonCandleOrder = (HUB.Config.dungeonCandleOrder == "farthest") and "farthest" or "nearest"
 HUB.Config.dungeonAfterClear = (HUB.Config.dungeonAfterClear == "replay" or HUB.Config.dungeonAfterClear == "leave") and HUB.Config.dungeonAfterClear or "wait"
+
+local function getPrivateAttr(attrName)
+	local pgui = PlayerGui or LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	local lpd = pgui and pgui:FindFirstChild("LumiPrivateData")
+	if lpd then
+		local v = lpd:GetAttribute(attrName)
+		if v ~= nil then
+			return v
+		end
+	end
+	return LocalPlayer:GetAttribute(attrName)
+end
+HUB.GetPrivateAttr = getPrivateAttr
 
 -- ===== 6.5 ระบบ Item Tier Ranking Engine, Central Registry & Zero-Flicker Reactive Overlay (v5.3) =====
 do
@@ -2377,13 +2405,13 @@ do
 	end
 
 	function ItemTier.RefreshCache(forceFull)
-		local gearJsonStr = LocalPlayer:GetAttribute("GearJson") or "{}"
+		local gearJsonStr = getPrivateAttr("GearJson") or "{}"
 		local okDecode, gearJson = pcall(HttpService.JSONDecode, HttpService, gearJsonStr)
 		if not okDecode or type(gearJson) ~= "table" then
 			gearJson = {}
 		end
 
-		local storageJsonStr = LocalPlayer:GetAttribute("StorageGearJson") or "{}"
+		local storageJsonStr = getPrivateAttr("StorageGearJson") or "{}"
 		local okStorage, storageJson = pcall(HttpService.JSONDecode, HttpService, storageJsonStr)
 		local storageG = (okStorage and type(storageJson) == "table" and type(storageJson.G) == "table") and storageJson.G or nil
 
@@ -3400,9 +3428,27 @@ do
 	-- โหลดข้อมูล Registry ทันทีก่อนเริ่มผูก UI Watchers เพื่อให้ bindCell มีข้อมูลพร้อม 100% ตั้งแต่ไมโครวินาทีแรก (ตัดปัญหาป้ายหายแล้วเด้งใหม่ตอน Execute ทับ)
 	ItemTier.RefreshCache()
 
-	-- Event Watchers: ดักฟังเฉพาะสัญญาณที่เกี่ยวกับอุปกรณ์โดยตรง
-	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("GearJson"):Connect(triggerFullUpdate))
-	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("StorageGearJson"):Connect(triggerFullUpdate))
+	-- Event Watchers: ดักฟังเฉพาะสัญญาณที่เกี่ยวกับอุปกรณ์โดยตรง (ทั้ง LocalPlayer และ LumiPrivateData)
+	local function bindTierAttrSignals(inst)
+		if not inst then return end
+		HUB:AddConnection(inst:GetAttributeChangedSignal("GearJson"):Connect(triggerFullUpdate))
+		HUB:AddConnection(inst:GetAttributeChangedSignal("StorageGearJson"):Connect(triggerFullUpdate))
+	end
+	bindTierAttrSignals(LocalPlayer)
+	do
+		local pguiTier = PlayerGui or LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		local lpdTier = pguiTier and pguiTier:FindFirstChild("LumiPrivateData")
+		if lpdTier then
+			bindTierAttrSignals(lpdTier)
+		elseif pguiTier then
+			HUB:AddConnection(pguiTier.ChildAdded:Connect(function(ch)
+				if ch.Name == "LumiPrivateData" then
+					bindTierAttrSignals(ch)
+					triggerFullUpdate()
+				end
+			end))
+		end
+	end
 	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("EquipJson"):Connect(function()
 		scheduleUpdate(0.02)
 	end))
@@ -3725,8 +3771,8 @@ do
 	end
 
 	getJunkStats = function()
-		local rawItems = LocalPlayer:GetAttribute("ItemsJson") or "{}"
-		local rawLocks = LocalPlayer:GetAttribute("LocksJson") or "{}"
+		local rawItems = getPrivateAttr("ItemsJson") or "{}"
+		local rawLocks = getPrivateAttr("LocksJson") or "{}"
 		local ok1, itemsJson = pcall(HttpService.JSONDecode, HttpService, rawItems)
 		local ok2, locksJson = pcall(HttpService.JSONDecode, HttpService, rawLocks)
 		if not ok1 or type(itemsJson) ~= "table" then return { count = 0, silver = 0, types = 0 } end
@@ -3751,9 +3797,9 @@ do
 	end
 
 	getSellableGearStats = function()
-		local rawGear = LocalPlayer:GetAttribute("GearJson") or "{}"
-		local rawLocks = LocalPlayer:GetAttribute("LocksJson") or "{}"
-		local rawEquip = LocalPlayer:GetAttribute("EquipJson") or "{}"
+		local rawGear = getPrivateAttr("GearJson") or "{}"
+		local rawLocks = getPrivateAttr("LocksJson") or "{}"
+		local rawEquip = getPrivateAttr("EquipJson") or "{}"
 		local ok1, gearJson = pcall(HttpService.JSONDecode, HttpService, rawGear)
 		local ok2, locksJson = pcall(HttpService.JSONDecode, HttpService, rawLocks)
 		local ok3, equipJson = pcall(HttpService.JSONDecode, HttpService, rawEquip)
@@ -6728,7 +6774,7 @@ do
 				ghSub.Size = UDim2.new(1, -54, 0, 16)
 				ghSub.Position = UDim2.new(0, 48, 0, 26)
 				ghSub.BackgroundTransparency = 1
-				ghSub.Text = "คัดกรองไอเทมตามเกรด, ดาว, Tier และเซ็ต (ต้องผ่านครบทุกมิติที่เลือก)"
+				ghSub.Text = "ไล่ตรวจตามลำดับ: 1.เกรด → 2.ดาว → 3.Tier → 4.เซ็ต ก่อนส่งต่อไปกรองในแท็บย่อยตามประเภท"
 				ghSub.TextColor3 = THEME.TextAmber
 				ghSub.TextSize = 11
 				ghSub.TextXAlignment = Enum.TextXAlignment.Left
@@ -7053,6 +7099,7 @@ do
 						if not HUB.Config.autoLockGameTiers then HUB.Config.autoLockGameTiers = {} end
 						local cur = (HUB.Config.autoLockGameTiers[gtDef.Tier] == true or HUB.Config.autoLockGameTiers[tostring(gtDef.Tier)] == true)
 						HUB.Config.autoLockGameTiers[gtDef.Tier] = not cur
+						HUB.Config.autoLockGameTiers[tostring(gtDef.Tier)] = nil
 						refreshGameTierBtn()
 						if HUB.Config.autoSave then saveConfig() end
 						if HUB.Config.autoLock and HUB.RunAutoLockCheck then task.spawn(HUB.RunAutoLockCheck) end
@@ -7107,7 +7154,7 @@ do
 					{ Key = "gale",       Label = "💨 Gale (ASPD)",           Color = Color3.fromRGB(30, 140, 125) },
 					{ Key = "luckystar",  Label = "🍀 Lucky Star (CRIT)",     Color = Color3.fromRGB(40, 150, 60) },
 					{ Key = "azurestar",  Label = "✨ Azure Star (Cast)",     Color = Color3.fromRGB(35, 125, 200) },
-					{ Key = "blackstar",  Label = "🎯 Black Star (Pierce)",   Color = Color3.fromRGB(50, 60, 75) },
+					{ Key = "blackstar",  Label = "🎯 Black Star (Pierce)",   Color = Color3.fromRGB(70, 88, 118), StrokeColor = Color3.fromRGB(165, 195, 235) },
 					{ Key = "bloodlord",  Label = "🩸 Blood Lord (Life)",     Color = Color3.fromRGB(150, 25, 45) },
 					{ Key = "none",       Label = "💍 อาวุธ/แหวน (ไม่มีเซ็ต)", Color = Color3.fromRGB(95, 85, 115) },
 				}
@@ -7146,7 +7193,7 @@ do
 						b.TextStrokeTransparency = 1
 						if active then
 							b.BackgroundColor3 = sDef.Color
-							bs.Color = sDef.Color
+							bs.Color = sDef.StrokeColor or sDef.Color
 							b.TextColor3 = Color3.fromRGB(255, 255, 255)
 						else
 							b.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
@@ -7203,6 +7250,7 @@ do
 						end
 					end
 				end
+				rule.special = nil
 				if type(rule.specialStats) ~= "table" then rule.specialStats = {} end
 				if type(rule.forbidden) ~= "table" then rule.forbidden = {} end
 
@@ -11920,28 +11968,31 @@ end
 -- 9.30 Auto Lock & Auto Sell Workers (Event-Driven, Zero Heavy Scan)
 -- =========================================================================
 do
-	local _lastLockScan = 0
 	local _lockScanThread = nil
+	local _lastAutoLockSig = nil
+	local _lastAutoLockRawLocks = nil
+	local _lastAutoLockFireAt = 0
 
 	local function shouldItemBeLocked(id, data, wantTiers, wantStars, equipRules, specKeys, GearData, GearUtil)
-		if type(data) ~= "table" then return false end
+		if type(data) ~= "table" then return false, "invalid_data" end
 		local eval = HUB.ItemTier and HUB.ItemTier.EvaluateGear and HUB.ItemTier.EvaluateGear(id, data)
-		if not eval then return false end
+		if not eval then return false, "eval_nil" end
 
-		-- ด่านที่ 1: ตรวจสอบเงื่อนไขหลัก (Global Multi-Dimensional Pre-requisite Gate จากแท็บ ⭐ เกรด & ระดับดาว)
-		-- ทั้ง 4 มิติ (Grade, Star, GameTier, Set) ทำงานร่วมกันแบบ AND Logic
+		GearData = GearData or HUB.GearData
+		GearUtil = GearUtil or HUB.GearUtil
+		if type(specKeys) ~= "table" or next(specKeys) == nil then
+			specKeys = (GearData and GearData.SpecialKeys) or {}
+		end
+
+		-- ด่านที่ 1 (Main Tab): ไล่ตรวจสอบตามลำดับบนลงล่างของแท็บ Main (1. Grade → 2. Star → 3. GameTier → 4. Set)
+		-- ทุกมิติที่ผู้ใช้เลือกต้องผ่านครบ (AND Logic) ก่อนส่งต่อไปกรองในแท็บย่อยตามประเภทอุปกรณ์
 		local wantGameTiers = HUB.Config.autoLockGameTiers or {}
 		local wantSets = HUB.Config.autoLockSets or {}
 		local resolved = eval.Resolved or (GearUtil and GearUtil.Resolve and GearUtil.Resolve(id, { [id] = data }))
 		local itemTier = tonumber(data.T) or (eval and tonumber(eval.Tier)) or (resolved and tonumber(resolved.Tier))
 		local itemSetId = data.S or (eval and eval.SetId) or (resolved and resolved.SetId)
 
-		-- 1.1 ตรวจสอบว่ามีการเลือกตัวกรองในแต่ละมิติหรือไม่
-		local hasGameTierFilter = false
-		for _, v in pairs(wantGameTiers) do
-			if v == true then hasGameTierFilter = true break end
-		end
-
+		-- ตรวจสอบว่ามีการเลือกตัวกรองในแต่ละมิติหรือไม่
 		local hasGradeFilter = false
 		for _, v in pairs(wantTiers or {}) do
 			if v == true then hasGradeFilter = true break end
@@ -11952,44 +12003,49 @@ do
 			if v == true then hasStarFilter = true break end
 		end
 
+		local hasGameTierFilter = false
+		for _, v in pairs(wantGameTiers) do
+			if v == true then hasGameTierFilter = true break end
+		end
+
 		local hasSetFilter = false
 		for _, v in pairs(wantSets) do
 			if v == true then hasSetFilter = true break end
 		end
 
-		-- ถ้าไม่ได้เลือกเงื่อนไขใดๆ ในแท็บนี้เลย = ไม่ล็อค
+		-- ถ้าไม่ได้เลือกเงื่อนไขใดๆ ในแท็บ Main เลย = ไม่ล็อค
 		if not hasGradeFilter and not hasStarFilter and not hasGameTierFilter and not hasSetFilter then
-			return false
+			return false, "main_empty"
 		end
 
-		-- 1.2 ตรวจสอบระดับ Tier ในเกม (I - VI)
+		-- ลำดับที่ 1: ตรวจสอบเกรด Tierlist (F..SS)
+		if hasGradeFilter then
+			local matchGrade = (eval.Grade and wantTiers[eval.Grade] == true)
+			if not matchGrade then
+				return false, "main_grade"
+			end
+		end
+
+		-- ลำดับที่ 2: ตรวจสอบระดับดาว (Silver, Gold, Rainbow)
+		if hasStarFilter then
+			local matchStar = (eval.Star and wantStars[eval.Star] == true)
+			if not matchStar then
+				return false, "main_star"
+			end
+		end
+
+		-- ลำดับที่ 3: ตรวจสอบระดับ Tier ในเกม (I - VI)
 		if hasGameTierFilter then
 			local matchGameTier = false
 			if itemTier and (wantGameTiers[itemTier] == true or wantGameTiers[tostring(itemTier)] == true) then
 				matchGameTier = true
 			end
 			if not matchGameTier then
-				return false -- ตกเกณฑ์ระดับ Tier ในเกม
+				return false, "main_gametier"
 			end
 		end
 
-		-- 1.3 ตรวจสอบเกรด Tierlist (F..SS)
-		if hasGradeFilter then
-			local matchGrade = (eval.Grade and wantTiers[eval.Grade] == true)
-			if not matchGrade then
-				return false -- ตกเกณฑ์เกรด
-			end
-		end
-
-		-- 1.4 ตรวจสอบระดับดาว (Silver, Gold, Rainbow)
-		if hasStarFilter then
-			local matchStar = (eval.Star and wantStars[eval.Star] == true)
-			if not matchStar then
-				return false -- ตกเกณฑ์ระดับดาว
-			end
-		end
-
-		-- 1.5 ตรวจสอบเซ็ตอุปกรณ์ (Equipment Sets)
+		-- ลำดับที่ 4: ตรวจสอบเซ็ตอุปกรณ์ (Equipment Sets)
 		if hasSetFilter then
 			local matchSet = false
 			if wantSets.all == true then
@@ -12001,11 +12057,11 @@ do
 				matchSet = true
 			end
 			if not matchSet then
-				return false -- ตกเกณฑ์เซ็ตอุปกรณ์
+				return false, "main_set"
 			end
 		end
 
-		-- ตรวจสอบเงื่อนไขเฉพาะหมวดหมู่อุปกรณ์
+		-- ด่านที่ 2 (Category Sub-Tab): กรองเงื่อนไขเฉพาะประเภทอุปกรณ์
 		local grp = (resolved and GearData and type(GearData.GroupOf) == "function" and GearData.GroupOf(resolved))
 		if grp == "WeaponPhys" then
 			local idLower = string.lower(tostring(data.Id or (resolved and resolved.Id) or id or ""))
@@ -12017,9 +12073,9 @@ do
 		end
 		local rule = grp and equipRules and equipRules[grp]
 
-		-- ถ้าไม่ได้เปิดใช้งานเงื่อนไขเฉพาะหมวดหมู่นี้ = ไม่กรองออปชันพิเศษ (ล็อคตามเกณฑ์เกรด/ดาวหลักทันที)
+		-- ถ้าไม่ได้เปิดใช้งานเงื่อนไขเฉพาะหมวดหมู่นี้ ([OFF]) = ผ่านทันทีตามเกณฑ์ Main Tab
 		if not rule or rule.enabled ~= true then
-			return true
+			return true, "subtab_off_pass"
 		end
 
 		local options = data.O or {}
@@ -12028,20 +12084,17 @@ do
 		if type(rule.forbidden) == "table" then
 			for optK, isForb in pairs(rule.forbidden) do
 				if isForb == true and options[optK] ~= nil then
-					return false -- มีสเตตัสต้องห้าม = ไม่ล็อคเด็ดขาด
+					return false, "subtab_forbidden"
 				end
 			end
 		end
 
 		-- ด่านย่อย 2: ตรวจหา Special Option ของไอเทม
+		local hasWantedTable = (type(rule.wantedSpecials) == "table")
+		local specialSource = hasWantedTable and rule.wantedSpecials or (type(rule.special) == "table" and rule.special or nil)
 		local hasWantedSpecialSelection = false
-		if type(rule.wantedSpecials) == "table" then
-			for _, v in pairs(rule.wantedSpecials) do
-				if v == true then hasWantedSpecialSelection = true break end
-			end
-		end
-		if not hasWantedSpecialSelection and type(rule.special) == "table" then
-			for _, v in pairs(rule.special) do
+		if specialSource then
+			for _, v in pairs(specialSource) do
 				if v == true then hasWantedSpecialSelection = true break end
 			end
 		end
@@ -12057,16 +12110,13 @@ do
 		if itemSpecialKey then
 			-- กรณีไม่ได้ติ๊กเลือก Special Option ใดๆ เลยในหัวข้อที่ 1 (เช่น เปิดหมวดเพื่อกรองเฉพาะ Forbidden Stats) -> ผ่านทันที
 			if not hasWantedSpecialSelection then
-				return true
+				return true, "subtab_pass"
 			end
 
 			-- ไอเทมมี Special Option: ตรวจสอบว่าผู้ใช้ติ๊กเลือกเก็บออปชันนี้ไว้ที่ด้านบนหรือไม่
-			local isWanted = (rule.wantedSpecials and rule.wantedSpecials[itemSpecialKey] == true)
-			if not isWanted and rule.special and rule.special[itemSpecialKey] == true then
-				isWanted = true
-			end
+			local isWanted = (specialSource ~= nil and specialSource[itemSpecialKey] == true)
 			if not isWanted then
-				return false
+				return false, "subtab_special"
 			end
 
 			-- ตรวจสอบสเตตัสสุ่มของการ์ดออปชันนี้
@@ -12081,7 +12131,7 @@ do
 
 			-- "ถ้าไม่เลือกก็จะไม่กรอง": หากไม่ได้เลือกสเตตัสสุ่มใดๆ หรือ minMatch <= 0 -> ล็อคทันที
 			if not hasStatSelection or minMatch <= 0 then
-				return true
+				return true, "subtab_pass"
 			end
 
 			local matchCount = 0
@@ -12090,21 +12140,24 @@ do
 					matchCount = matchCount + 1
 				end
 			end
-			return matchCount >= minMatch
+			if matchCount >= minMatch then
+				return true, "subtab_pass"
+			end
+			return false, "subtab_stats"
 		else
 			-- ไอเทมไม่มี Special Option เลย: หากผู้ใช้ระบุ Special Option ที่ต้องการไว้ จะไม่ผ่านเกณฑ์
 			if hasWantedSpecialSelection then
-				return false
+				return false, "subtab_special"
 			end
-			return true
+			return true, "subtab_pass"
 		end
 	end
 	HUB.ShouldItemBeLocked = shouldItemBeLocked
 
 	local function runAutoLockCheck()
 		if not HUB.Alive or not HUB.Config.autoLock or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return false, 0 end
-		local rawGear = LocalPlayer:GetAttribute("GearJson") or "{}"
-		local rawLocks = LocalPlayer:GetAttribute("LocksJson") or "{}"
+		local rawGear = (HUB.GetPrivateAttr and HUB.GetPrivateAttr("GearJson")) or LocalPlayer:GetAttribute("GearJson") or "{}"
+		local rawLocks = (HUB.GetPrivateAttr and HUB.GetPrivateAttr("LocksJson")) or LocalPlayer:GetAttribute("LocksJson") or "{}"
 		local ok1, gearJson = pcall(HttpService.JSONDecode, HttpService, rawGear)
 		local ok2, locksJson = pcall(HttpService.JSONDecode, HttpService, rawLocks)
 		if not ok1 or not ok2 or type(gearJson) ~= "table" or type(locksJson) ~= "table" then return false, 0 end
@@ -12128,10 +12181,22 @@ do
 
 		if #toLock > 0 then
 			if not HUB.Config.autoLock or not HUB.Alive or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return false, 0 end
+			table.sort(toLock)
+			local sig = table.concat(toLock, ",")
+			local nowClk = os.clock()
+			if sig == _lastAutoLockSig and rawLocks == _lastAutoLockRawLocks and (nowClk - _lastAutoLockFireAt) < 1.2 then
+				return false, 0
+			end
 			local rem = ReplicatedStorage:FindFirstChild("Remotes")
 			local bagLock = rem and rem:FindFirstChild("BagLock")
 			if bagLock then
+				_lastAutoLockSig = sig
+				_lastAutoLockRawLocks = rawLocks
+				_lastAutoLockFireAt = nowClk
 				bagLock:FireServer(toLock, true)
+				if HUB.UI and HUB.UI.LockStatusLabel then
+					HUB.UI.LockStatusLabel.Text = string.format("สถานะ: เปิดใช้งาน (ล็อคล่าสุด %d ชิ้น)", #toLock)
+				end
 				warn(string.format("[Hunting Together Hub] Auto Lock: ล็อคอุปกรณ์ %d ชิ้น สำเร็จ!", #toLock))
 				return true, #toLock
 			end
@@ -12140,20 +12205,47 @@ do
 	end
 	HUB.RunAutoLockCheck = runAutoLockCheck
 
-	-- Event-driven watcher: ทำงานเฉพาะเมื่อ GearJson มีการเปลี่ยนแปลง + Trailing Debounce 0.5s (Zero Heavy Scan)
-	HUB:AddConnection(LocalPlayer:GetAttributeChangedSignal("GearJson"):Connect(function()
+	-- Event-driven watcher: ดักทั้ง GearJson (ได้ของใหม่) และ LocksJson (ปลดล็อคเองในกระเป๋า) ทั้งบน LocalPlayer และ LumiPrivateData
+	local function scheduleAutoLockScan(delaySec)
 		if not HUB.Alive or not HUB.Config.autoLock or EXEC.env.HuntingTogetherHub_Token ~= MY_TOKEN then return end
 		if _lockScanThread then
 			pcall(task.cancel, _lockScanThread)
 			_lockScanThread = nil
 		end
-		_lockScanThread = task.delay(0.5, function()
+		_lockScanThread = task.delay(delaySec or 0.35, function()
 			_lockScanThread = nil
 			if HUB.Alive and HUB.Config.autoLock and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN then
 				runAutoLockCheck()
 			end
 		end)
-	end))
+	end
+
+	local _boundLockContainers = setmetatable({}, { __mode = "k" })
+	local function bindAutoLockSignalsOn(inst)
+		if not inst or _boundLockContainers[inst] then return end
+		_boundLockContainers[inst] = true
+		HUB:AddConnection(inst:GetAttributeChangedSignal("GearJson"):Connect(function()
+			scheduleAutoLockScan(0.35)
+		end))
+		HUB:AddConnection(inst:GetAttributeChangedSignal("LocksJson"):Connect(function()
+			scheduleAutoLockScan(0.35)
+		end))
+	end
+
+	bindAutoLockSignalsOn(LocalPlayer)
+	local pguiLock = PlayerGui or LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pguiLock then
+		local lpdLock = pguiLock:FindFirstChild("LumiPrivateData")
+		if lpdLock then
+			bindAutoLockSignalsOn(lpdLock)
+		end
+		HUB:AddConnection(pguiLock.ChildAdded:Connect(function(ch)
+			if ch.Name == "LumiPrivateData" then
+				bindAutoLockSignalsOn(ch)
+				scheduleAutoLockScan(0.35)
+			end
+		end))
+	end
 
 	-- Initial Startup Scan: สแกนล็อคของในกระเป๋าทันทีที่โหลดสคริปต์หากเปิด Auto Lock ไว้
 	task.defer(function()
@@ -12244,9 +12336,9 @@ do
 			end
 
 			-- 2. ดึงข้อมูลกระเป๋าและไอเทมปัจจุบัน
-			local rawGear = LocalPlayer:GetAttribute("GearJson") or "{}"
-			local rawLocks = LocalPlayer:GetAttribute("LocksJson") or "{}"
-			local rawEquip = LocalPlayer:GetAttribute("EquipJson") or "{}"
+			local rawGear = getPrivateAttr("GearJson") or "{}"
+			local rawLocks = getPrivateAttr("LocksJson") or "{}"
+			local rawEquip = getPrivateAttr("EquipJson") or "{}"
 			local ok1, gearJson = pcall(HttpService.JSONDecode, HttpService, rawGear)
 			local ok2, locksJson = pcall(HttpService.JSONDecode, HttpService, rawLocks)
 			local ok3, equipJson = pcall(HttpService.JSONDecode, HttpService, rawEquip)
@@ -12590,9 +12682,9 @@ do
 				end
 
 				-- ขายอุปกรณ์ทั้งหมดที่ไม่ได้ล็อคและไม่ได้สวมใส่ (ข้ามหน้าต่างกดค้าง ValuableConfirm ของ Client ได้โดยตรง 100%)
-				local rawGear = LocalPlayer:GetAttribute("GearJson") or "{}"
-				local rawLocks = LocalPlayer:GetAttribute("LocksJson") or "{}"
-				local rawEquip = LocalPlayer:GetAttribute("EquipJson") or "{}"
+				local rawGear = getPrivateAttr("GearJson") or "{}"
+				local rawLocks = getPrivateAttr("LocksJson") or "{}"
+				local rawEquip = getPrivateAttr("EquipJson") or "{}"
 				local ok1, gearJson = pcall(HttpService.JSONDecode, HttpService, rawGear)
 				local ok2, locksJson = pcall(HttpService.JSONDecode, HttpService, rawLocks)
 				local ok3, equipJson = pcall(HttpService.JSONDecode, HttpService, rawEquip)
@@ -12820,15 +12912,6 @@ do
 			end
 		end
 	end)
-
-	-- Startup Grace Check (ตรวจเช็คหลังจากสคริปต์โหลด 3-4 วินาที)
-	if HUB.Config.autoLock then
-		task.delay(3.0, function()
-			if HUB.Alive and HUB.Config.autoLock and EXEC.env.HuntingTogetherHub_Token == MY_TOKEN then
-				runAutoLockCheck()
-			end
-		end)
-	end
 
 	if HUB.Config.autoSalvage or HUB.Config.autoSell then
 		task.delay(4.0, function()
