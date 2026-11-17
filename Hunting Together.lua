@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.26)
+-- Hunting Together Hub (v10.27)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.26"
+local VERSION = "10.27"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -478,6 +478,7 @@ local HUB = {
 		autoSellGear = true,
 		autoFarmBoss = false,
 		autoWorldBoss = false,
+		autoWorldBossElementCoat = true,
 		farmBossList = {
 			Boss01 = false,
 			Boss02 = true,
@@ -1161,28 +1162,86 @@ function HUB.IsInTown()
 	return root.Position.Z > -150
 end
 
--- Ground-Truth World Boss Arena Checker (ตรวจสอบว่าตัวละครกำลังอยู่ในสนามสู้ World Boss หรือไม่)
-function HUB.IsInWorldBoss()
+-- ดึงรายการสนามและข้อมูล World Boss แบบไดนามิกจาก WorldBossData + MonsterData (Never Permanently Cache Failure)
+do
+	local _cachedWbArenas = nil
+	local _lastWbArenaRetry = 0
+	local FALLBACK_WB_ARENAS = {
+		{ id = "worldboss_stormhorn", name = "Stormhorn", element = "wind", center = Vector3.new(2600, 520, -2400), radius = 72 },
+		{ id = "worldboss_vesperbloom", name = "Vesperbloom", element = "earth", center = Vector3.new(3400, 520, -2400), radius = 72 },
+	}
+
+	function HUB.GetWorldBossArenas()
+		if _cachedWbArenas then
+			return _cachedWbArenas
+		end
+		local nowClk = os.clock()
+		if nowClk - _lastWbArenaRetry >= 2.5 then
+			_lastWbArenaRetry = nowClk
+			local shared = ReplicatedStorage:FindFirstChild("Shared")
+			local wbMod = shared and shared:FindFirstChild("WorldBossData")
+			local mdMod = shared and shared:FindFirstChild("MonsterData")
+			if wbMod then
+				local okWb, wbData = pcall(require, wbMod)
+				local okMd, mdData = false, nil
+				if mdMod then
+					okMd, mdData = pcall(require, mdMod)
+				end
+				if okWb and type(wbData) == "table" and type(wbData.Bosses) == "table" and #wbData.Bosses > 0 then
+					local list = {}
+					local defRadius = tonumber(wbData.ArenaRadius) or 72
+					for _, entry in ipairs(wbData.Bosses) do
+						if type(entry) == "table" and typeof(entry.Center) == "Vector3" then
+							local bId = tostring(entry.Id or "")
+							local mInfo = (okMd and type(mdData) == "table") and mdData[bId] or nil
+							table.insert(list, {
+								id = bId,
+								name = (mInfo and mInfo.Name) or bId,
+								element = string.lower(tostring((mInfo and mInfo.Element) or "")),
+								center = entry.Center,
+								radius = defRadius,
+							})
+						end
+					end
+					if #list > 0 then
+						_cachedWbArenas = list
+						return _cachedWbArenas
+					end
+				end
+			end
+		end
+		return FALLBACK_WB_ARENAS
+	end
+end
+
+-- Ground-Truth World Boss Arena Checker (ตรวจสอบว่าตัวละครกำลังอยู่ในสนามสู้ World Boss ใด ๆ หรือไม่)
+function HUB.IsInWorldBoss(probePos)
 	if HUB.IsDungeonPlace and HUB.IsDungeonPlace() then
 		return false
 	end
-	if LocalPlayer:GetAttribute("InTown") == true then
+	if probePos == nil and LocalPlayer:GetAttribute("InTown") == true then
 		return false
 	end
-	local char = LocalPlayer.Character
-	local root = char and char:FindFirstChild("HumanoidRootPart")
-	if root then
-		if root.Position.Z > -150 then
+	local checkPos = probePos
+	if checkPos == nil then
+		local char = LocalPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		checkPos = root and root.Position
+	end
+	if checkPos then
+		if checkPos.Z > -150 then
 			return false
 		end
-		if (root.Position - Vector3.new(2600, 520, -2400)).Magnitude <= 200.0 then
-			return true
+		for _, arena in ipairs(HUB.GetWorldBossArenas()) do
+			if (checkPos - arena.center).Magnitude <= 200.0 then
+				return true, arena
+			end
 		end
-		if LocalPlayer:GetAttribute("InWorldBoss") == true then
+		if probePos == nil and LocalPlayer:GetAttribute("InWorldBoss") == true then
 			return false
 		end
-	elseif LocalPlayer:GetAttribute("InWorldBoss") == true then
-		return true
+	elseif probePos == nil and LocalPlayer:GetAttribute("InWorldBoss") == true then
+		return true, nil
 	end
 	return false
 end
@@ -1764,6 +1823,7 @@ local function saveConfig()
 		autoSellGear = (HUB.Config.autoSellGear ~= false),
 		autoFarmBoss = HUB.Config.autoFarmBoss,
 		autoWorldBoss = (HUB.Config.autoWorldBoss == true),
+		autoWorldBossElementCoat = (HUB.Config.autoWorldBossElementCoat ~= false),
 		farmBossList = HUB.Config.farmBossList,
 		autoStartGame = (HUB.Config.autoStartGame ~= false),
 		autoPlayDungeon = (HUB.Config.autoPlayDungeon == true),
@@ -1937,6 +1997,7 @@ local function loadConfig()
 				if data.autoSellGear ~= nil then HUB.Config.autoSellGear = data.autoSellGear end
 				if data.autoFarmBoss ~= nil then HUB.Config.autoFarmBoss = data.autoFarmBoss end
 				if data.autoWorldBoss ~= nil then HUB.Config.autoWorldBoss = (data.autoWorldBoss == true) end
+				if data.autoWorldBossElementCoat ~= nil then HUB.Config.autoWorldBossElementCoat = (data.autoWorldBossElementCoat ~= false) end
 				if type(data.farmBossList) == "table" then
 					for k, v in pairs(data.farmBossList) do
 						HUB.Config.farmBossList[k] = v
@@ -8939,10 +9000,10 @@ do
 
 			local infoLbl = Instance.new("TextLabel")
 			infoLbl.Name = "WorldBossInfo"
-			infoLbl.Size = UDim2.new(1, -16, 0, 38)
+			infoLbl.Size = UDim2.new(1, -16, 0, 34)
 			infoLbl.Position = UDim2.new(0, 8, 0, 6)
 			infoLbl.BackgroundTransparency = 1
-			infoLbl.Text = "⚡ ลำดับเข้าสู้: วาร์ปป๊อปอัปฉุกเฉิน -> สำรองเสาวาร์ป/HomeWarp กลับเมืองเข้า Portal หน้าประตู -> ตายพากลับตีต่อจนจบ\n🛡️ Auto Dodge ยึดตามสวิตช์ Auto Dodge ที่ตั้งไว้ · 🏰 พักการทำงานอัตโนมัติระหว่างอยู่ในดันเจี้ยน"
+			infoLbl.Text = "⚡ วาร์ปป๊อปอัป/เข้า Portal หน้าประตู -> ตายพากลับตีต่อจนจบ · 🏰 พักการทำงานอัตโนมัติเมื่ออยู่ในดันเจี้ยน\n🛡️ Auto Dodge ยึดตามสวิตช์หลัก · รองรับ Stormhorn (ธาตุลม) และ Vesperbloom (ธาตุดิน)"
 			infoLbl.TextColor3 = Color3.fromRGB(205, 220, 240)
 			infoLbl.TextSize = 11
 			infoLbl.TextWrapped = true
@@ -8951,62 +9012,82 @@ do
 			applyFont(infoLbl, false)
 			infoLbl.Parent = subPanel
 
-			local btnNow = Instance.new("TextButton")
-			btnNow.Name = "BtnTriggerWorldBoss"
-			btnNow.Size = UDim2.new(0, 170, 0, 26)
-			btnNow.Position = UDim2.new(0, 8, 0, 50)
-			btnNow.BackgroundColor3 = Color3.fromRGB(36, 98, 175)
-			btnNow.BorderSizePixel = 0
-			btnNow.Text = "🚀 ตรวจสอบและเข้า World Boss ทันที"
-			btnNow.TextColor3 = Color3.fromRGB(245, 250, 255)
-			btnNow.TextSize = 11
-			applyFont(btnNow, true)
-			btnNow.Parent = subPanel
-			local bCorner = Instance.new("UICorner")
-			bCorner.CornerRadius = UDim.new(0, 6)
-			bCorner.Parent = btnNow
+			local coatRow = Instance.new("Frame")
+			coatRow.Name = "AutoElementCoatRow"
+			coatRow.Size = UDim2.new(1, -16, 0, 42)
+			coatRow.Position = UDim2.new(0, 8, 0, 44)
+			coatRow.BackgroundColor3 = Color3.fromRGB(16, 26, 54)
+			coatRow.BorderSizePixel = 0
+			coatRow.Parent = subPanel
+			local crCorner = Instance.new("UICorner")
+			crCorner.CornerRadius = UDim.new(0, 6)
+			crCorner.Parent = coatRow
+			local crStroke = Instance.new("UIStroke")
+			crStroke.Color = Color3.fromRGB(58, 92, 160)
+			crStroke.Thickness = 1
+			crStroke.Parent = coatRow
 
-			local btnResetWb = Instance.new("TextButton")
-			btnResetWb.Name = "BtnResetWorldBoss"
-			btnResetWb.Size = UDim2.new(0, 140, 0, 26)
-			btnResetWb.Position = UDim2.new(0, 186, 0, 50)
-			btnResetWb.BackgroundColor3 = Color3.fromRGB(78, 52, 56)
-			btnResetWb.BorderSizePixel = 0
-			btnResetWb.Text = "🔄 รีเซ็ตสถานะค้าง"
-			btnResetWb.TextColor3 = Color3.fromRGB(245, 230, 230)
-			btnResetWb.TextSize = 11
-			applyFont(btnResetWb, true)
-			btnResetWb.Parent = subPanel
-			local brCorner = Instance.new("UICorner")
-			brCorner.CornerRadius = UDim.new(0, 6)
-			brCorner.Parent = btnResetWb
+			local coatTitle = Instance.new("TextLabel")
+			coatTitle.Name = "Title"
+			coatTitle.Size = UDim2.new(1, -86, 0, 18)
+			coatTitle.Position = UDim2.new(0, 10, 0, 4)
+			coatTitle.BackgroundTransparency = 1
+			coatTitle.Text = "🧪 ใช้คัมภีร์ธาตุชนะทางอัตโนมัติ (ตอนต่อสู้)"
+			coatTitle.TextColor3 = Color3.fromRGB(245, 250, 255)
+			coatTitle.TextSize = 12
+			coatTitle.TextXAlignment = Enum.TextXAlignment.Left
+			coatTitle.TextTruncate = Enum.TextTruncate.AtEnd
+			applyFont(coatTitle, true)
+			coatTitle.Parent = coatRow
 
-			HUB:AddConnection(btnNow.MouseButton1Click:Connect(function()
-				if HUB.Config.autoWorldBoss and HUB.TriggerAutoWorldBoss then
-					task.spawn(HUB.TriggerAutoWorldBoss, true)
-				elseif HUB.UI.WorldBossStatusLabel then
-					HUB.UI.WorldBossStatusLabel.Text = "สถานะ: กรุณาเปิดสวิตช์ Auto World Boss ก่อน"
-				end
-			end))
+			local coatSub = Instance.new("TextLabel")
+			coatSub.Name = "Sub"
+			coatSub.Size = UDim2.new(1, -86, 0, 14)
+			coatSub.Position = UDim2.new(0, 10, 0, 23)
+			coatSub.BackgroundTransparency = 1
+			coatSub.Text = "กดใช้คัมภีร์เคลือบอาวุธชนะทางบอสอัตโนมัติ (Stormhorn→ดิน · Vesperbloom→ไฟ)"
+			coatSub.TextColor3 = Color3.fromRGB(168, 198, 235)
+			coatSub.TextSize = 10
+			coatSub.TextXAlignment = Enum.TextXAlignment.Left
+			coatSub.TextTruncate = Enum.TextTruncate.AtEnd
+			applyFont(coatSub, false)
+			coatSub.Parent = coatRow
 
-			HUB:AddConnection(btnResetWb.MouseButton1Click:Connect(function()
-				if HUB.CancelAutoWorldBossRoutine then
-					HUB.CancelAutoWorldBossRoutine(false)
+			local coatToggleBtn = Instance.new("TextButton")
+			coatToggleBtn.Name = "BtnToggleWbElementCoat"
+			coatToggleBtn.Size = UDim2.new(0, 66, 0, 26)
+			coatToggleBtn.Position = UDim2.new(1, -74, 0.5, -13)
+			coatToggleBtn.BorderSizePixel = 0
+			coatToggleBtn.TextSize = 12
+			applyFont(coatToggleBtn, true)
+			coatToggleBtn.Parent = coatRow
+			local ctCorner = Instance.new("UICorner")
+			ctCorner.CornerRadius = UDim.new(0, 5)
+			ctCorner.Parent = coatToggleBtn
+			local ctStroke = Instance.new("UIStroke")
+			ctStroke.Thickness = 1.2
+			ctStroke.Parent = coatToggleBtn
+
+			local function refreshCoatBtn()
+				local active = (HUB.Config.autoWorldBossElementCoat ~= false)
+				if active then
+					coatToggleBtn.BackgroundColor3 = THEME.BtnGreen
+					coatToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+					coatToggleBtn.Text = "ON"
+					ctStroke.Color = THEME.BtnGreenStroke
+				else
+					coatToggleBtn.BackgroundColor3 = THEME.BtnOff
+					coatToggleBtn.TextColor3 = THEME.TextDark
+					coatToggleBtn.Text = "OFF"
+					ctStroke.Color = THEME.BtnOffStroke
 				end
-				if HUB.WorldBossState then
-					HUB.WorldBossState.active = false
-					HUB.WorldBossState.phase = "idle"
-					HUB.WorldBossState.bossDefeatedAt = 0
-					HUB.WorldBossState.sawGateInTown = false
-					HUB.WorldBossState.gateMissingSince = 0
-				end
-				if HUB.UI.WorldBossStatusLabel then
-					if HUB.Config.autoWorldBoss then
-						HUB.UI.WorldBossStatusLabel.Text = "สถานะ: รีเซ็ตแล้ว · สแตนด์บายรอ World Boss เกิด..."
-					else
-						HUB.UI.WorldBossStatusLabel.Text = "สถานะ: ปิดใช้งาน"
-					end
-				end
+			end
+			refreshCoatBtn()
+
+			HUB:AddConnection(coatToggleBtn.MouseButton1Click:Connect(function()
+				HUB.Config.autoWorldBossElementCoat = not (HUB.Config.autoWorldBossElementCoat ~= false)
+				refreshCoatBtn()
+				if HUB.Config.autoSave then saveConfig() end
 			end))
 		end
 	)
@@ -13902,6 +13983,83 @@ do
 	local _lastWbWarpFire = 0
 	local _wbRemoteBound = nil
 	local _boundResultGui = nil
+	local _lastWbCoatUse = 0
+	local _cachedMonsterData = nil
+	local _lastMonsterDataRetry = 0
+	local _cachedElementData = nil
+	local _lastElementDataRetry = 0
+
+	local FALLBACK_WINNING_ELEMENT = {
+		wind = "earth",
+		earth = "fire",
+		fire = "water",
+		water = "wind",
+	}
+
+	local function getMonsterDataTable()
+		if _cachedMonsterData then
+			return _cachedMonsterData
+		end
+		local nowClk = os.clock()
+		if nowClk - _lastMonsterDataRetry < 2.5 then
+			return nil
+		end
+		_lastMonsterDataRetry = nowClk
+		local shared = ReplicatedStorage:FindFirstChild("Shared")
+		local mdMod = shared and shared:FindFirstChild("MonsterData")
+		if mdMod then
+			local ok, md = pcall(require, mdMod)
+			if ok and type(md) == "table" then
+				_cachedMonsterData = md
+				return md
+			end
+		end
+		return nil
+	end
+
+	local function getElementDataTable()
+		if _cachedElementData then
+			return _cachedElementData
+		end
+		local nowClk = os.clock()
+		if nowClk - _lastElementDataRetry < 2.5 then
+			return nil
+		end
+		_lastElementDataRetry = nowClk
+		local shared = ReplicatedStorage:FindFirstChild("Shared")
+		local edMod = shared and shared:FindFirstChild("ElementData")
+		if edMod then
+			local ok, ed = pcall(require, edMod)
+			if ok and type(ed) == "table" then
+				_cachedElementData = ed
+				return ed
+			end
+		end
+		return nil
+	end
+
+	local function matchesWorldBossText(lowerText)
+		if type(lowerText) ~= "string" or #lowerText == 0 then
+			return false
+		end
+		if string.find(lowerText, "world boss", 1, true)
+			or string.find(lowerText, "worldboss", 1, true)
+			or string.find(lowerText, "stormhorn", 1, true)
+			or string.find(lowerText, "vesperbloom", 1, true) then
+			return true
+		end
+		if HUB.GetWorldBossArenas then
+			for _, arena in ipairs(HUB.GetWorldBossArenas()) do
+				local aName = string.lower(tostring(arena.name or ""))
+				local aId = string.lower(tostring(arena.id or ""))
+				if (aName ~= "" and string.find(lowerText, aName, 1, true))
+					or (aId ~= "" and string.find(lowerText, aId, 1, true)) then
+					return true
+				end
+			end
+		end
+		return false
+	end
 
 	local function setWbStatus(text)
 		if HUB.UI and HUB.UI.WorldBossStatusLabel then
@@ -14059,7 +14217,7 @@ do
 				for _, d in ipairs(confirm:GetDescendants()) do
 					if d:IsA("TextLabel") then
 						local lt = string.lower(d.Text or "")
-						if string.find(lt, "world boss", 1, true) or string.find(lt, "stormhorn", 1, true) then
+						if matchesWorldBossText(lt) then
 							confirmTxt = lt
 							break
 						end
@@ -14090,7 +14248,7 @@ do
 			for _, d in ipairs(confirm:GetDescendants()) do
 				if d:IsA("TextLabel") then
 					local lt = string.lower(d.Text or "")
-					if string.find(lt, "world boss", 1, true) or string.find(lt, "stormhorn", 1, true) then
+					if matchesWorldBossText(lt) then
 						return true
 					end
 				end
@@ -14602,7 +14760,7 @@ do
 
 		-- 1. หากยังอยู่นอกเมือง (และอยู่นอกสนาม World Boss จริง ๆ) ให้วาร์ปกลับเมืองก่อน (เสาวาร์ปใกล้ตัวก่อน -> สำรอง HomeWarp)
 		if not HUB.IsInTown() then
-			if (root.Position - Vector3.new(2600, 520, -2400)).Magnitude <= 200.0 then
+			if HUB.IsInWorldBoss(root.Position) then
 				return "entered"
 			end
 			if HUB.CancelNavigation then
@@ -14696,17 +14854,177 @@ do
 		return "retry"
 	end
 
-	local function findStormhornModel()
+	local function findWorldBossModel()
+		local md = getMonsterDataTable()
+		local arenas = HUB.GetWorldBossArenas and HUB.GetWorldBossArenas() or {}
 		for _, m in ipairs(CollectionService:GetTagged("Monster")) do
 			if m and m:IsA("Model") and m.Parent then
 				local mId = tostring(m:GetAttribute("MonsterId") or "")
-				if string.find(string.lower(mId), "worldboss", 1, true) or string.find(string.lower(m.Name), "stormhorn", 1, true) then
-					return m
+				local mIdLower = string.lower(mId)
+				local info = (type(md) == "table" and mId ~= "") and md[mId] or nil
+				local isMinion = (m:GetAttribute("WorldBossMinion") == true)
+					or (info and info.WorldBossMinion == true)
+					or (string.find(mIdLower, "minion", 1, true) ~= nil)
+				if not isMinion then
+					if info and info.WorldBoss == true then
+						return m
+					end
+					local mNameLower = string.lower(m.Name or "")
+					for _, arena in ipairs(arenas) do
+						local aId = string.lower(tostring(arena.id or ""))
+						local aName = string.lower(tostring(arena.name or ""))
+						if (aId ~= "" and mIdLower == aId) or (aName ~= "" and string.find(mNameLower, aName, 1, true)) then
+							return m
+						end
+					end
+					if string.find(mIdLower, "worldboss_", 1, true) and not info then
+						return m
+					end
 				end
 			end
 		end
 		return nil
 	end
+
+	function HUB.GetWorldBossWinningCoat(bossElement)
+		local defElem = string.lower(tostring(bossElement or ""))
+		if defElem == "" then
+			return nil, nil, nil
+		end
+		local winElem = nil
+		local bestMult = 1.0
+		local ed = getElementDataTable()
+		local chart = (type(ed) == "table") and ed.Chart or nil
+		if type(chart) == "table" then
+			for atkElem, row in pairs(chart) do
+				if type(row) == "table" then
+					local mult = tonumber(row[defElem])
+					if mult and mult > bestMult then
+						bestMult = mult
+						winElem = string.lower(tostring(atkElem))
+					end
+				end
+			end
+		end
+		if not winElem then
+			winElem = FALLBACK_WINNING_ELEMENT[defElem]
+		end
+		if not winElem then
+			return nil, nil, nil
+		end
+		return winElem, "weapon_coat_" .. winElem, "coat_w_" .. winElem
+	end
+
+	function HUB.ResolveWorldBossElement(bossModel)
+		if bossModel and bossModel.Parent then
+			local attrElem = string.lower(tostring(bossModel:GetAttribute("Element") or ""))
+			if attrElem ~= "" then
+				return attrElem
+			end
+			local mId = tostring(bossModel:GetAttribute("MonsterId") or "")
+			local md = getMonsterDataTable()
+			local info = (type(md) == "table" and mId ~= "") and md[mId] or nil
+			if info and type(info.Element) == "string" and #info.Element > 0 then
+				return string.lower(info.Element)
+			end
+		end
+		if HUB.IsInWorldBoss then
+			local inWb, arena = HUB.IsInWorldBoss()
+			if inWb and arena and type(arena.element) == "string" and #arena.element > 0 then
+				return string.lower(arena.element)
+			end
+		end
+		local st = HUB.WorldBossState
+		local bName = string.lower(tostring((st and st.bossName) or ""))
+		if bName ~= "" and HUB.GetWorldBossArenas then
+			for _, arena in ipairs(HUB.GetWorldBossArenas()) do
+				local aName = string.lower(tostring(arena.name or ""))
+				if aName ~= "" and (bName == aName or string.find(bName, aName, 1, true) or string.find(aName, bName, 1, true)) then
+					if type(arena.element) == "string" and #arena.element > 0 then
+						return string.lower(arena.element)
+					end
+				end
+			end
+		end
+		return nil
+	end
+
+	local function tryApplyWorldBossElementCoat(bossModel, dryRun)
+		if HUB.Config.autoWorldBossElementCoat == false then
+			return false, "disabled"
+		end
+		local bossElem = HUB.ResolveWorldBossElement(bossModel)
+		if not bossElem or bossElem == "" then
+			return false, "unknown_boss_element"
+		end
+		local winElem, coatItemId, buffId = HUB.GetWorldBossWinningCoat(bossElem)
+		if not winElem or not coatItemId then
+			return false, "no_counter"
+		end
+
+		local curElem = string.lower(tostring(LocalPlayer:GetAttribute("WeaponElement") or ""))
+		local nowSrv = workspace:GetServerTimeNow()
+		local winRemaining = 0
+		local hasBuffEntry = false
+		local rawBuffs = (HUB.GetPrivateAttr and HUB.GetPrivateAttr("BuffsJson")) or LocalPlayer:GetAttribute("BuffsJson")
+		if type(rawBuffs) == "string" and #rawBuffs > 0 then
+			local okJ, buffs = pcall(HttpService.JSONDecode, HttpService, rawBuffs)
+			if okJ and type(buffs) == "table" then
+				for _, b in ipairs(buffs) do
+					if type(b) == "table" and tostring(b.Id or "") == buffId then
+						hasBuffEntry = true
+						local endsAt = tonumber(b.EndsAt) or 0
+						winRemaining = math.max(winRemaining, endsAt - nowSrv)
+					end
+				end
+			end
+		end
+		if curElem == winElem and ((not hasBuffEntry) or winRemaining > 10.0) then
+			return false, "already_active", coatItemId, winElem, curElem
+		end
+
+		local holdUntil = tonumber(LocalPlayer:GetAttribute("BuffHoldUntil")) or 0
+		if holdUntil > nowSrv then
+			return false, "buff_hold", coatItemId, winElem, curElem
+		end
+
+		local count = 0
+		local rawItems = (HUB.GetPrivateAttr and HUB.GetPrivateAttr("ItemsJson")) or LocalPlayer:GetAttribute("ItemsJson")
+		if type(rawItems) == "string" and #rawItems > 0 then
+			local okI, items = pcall(HttpService.JSONDecode, HttpService, rawItems)
+			if okI and type(items) == "table" then
+				count = tonumber(items[coatItemId]) or 0
+			end
+		end
+		if count <= 0 then
+			return false, "out_of_stock", coatItemId, winElem, curElem
+		end
+
+		if dryRun == true then
+			return true, "dry_run_ready", coatItemId, winElem, curElem
+		end
+
+		if os.clock() - _lastWbCoatUse < 4.0 then
+			return false, "cooldown", coatItemId, winElem, curElem
+		end
+
+		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+		local useItem = remotes and remotes:FindFirstChild("UseItem")
+		if not useItem or not useItem:IsA("RemoteEvent") then
+			return false, "no_remote", coatItemId, winElem, curElem
+		end
+
+		local okFire = pcall(function()
+			useItem:FireServer(coatItemId)
+		end)
+		if okFire then
+			_lastWbCoatUse = os.clock()
+			return true, "used", coatItemId, winElem, curElem
+		end
+		return false, "fire_error", coatItemId, winElem, curElem
+	end
+
+	HUB.TryApplyWorldBossElementCoat = tryApplyWorldBossElementCoat
 
 	HUB.FindTownWorldBossPortal = findTownWorldBossPortal
 
@@ -14888,21 +15206,39 @@ do
 							break
 						end
 					else
-						local stormModel = findStormhornModel()
-						local stormDead = false
-						if stormModel then
-							local hp = tonumber(stormModel:GetAttribute("HP"))
-							if (hp and hp <= 0) or stormModel:GetAttribute("AnimDead") == true then
-								stormDead = true
+						local wbModel = findWorldBossModel()
+						local wbDead = false
+						if wbModel then
+							local mId = tostring(wbModel:GetAttribute("MonsterId") or "")
+							local md = getMonsterDataTable()
+							local mInfo = (type(md) == "table" and mId ~= "") and md[mId] or nil
+							if mInfo and type(mInfo.Name) == "string" and #mInfo.Name > 0 then
+								st.bossName = mInfo.Name
+							end
+							local hp = tonumber(wbModel:GetAttribute("HP"))
+							if (hp and hp <= 0) or wbModel:GetAttribute("AnimDead") == true then
+								wbDead = true
+							end
+						elseif HUB.IsInWorldBoss then
+							local inWb, arena = HUB.IsInWorldBoss()
+							if inWb and arena and type(arena.name) == "string" and #arena.name > 0 then
+								st.bossName = arena.name
 							end
 						end
 
-						if stormDead then
+						if wbDead then
 							closeWorldBossResultUi()
 							setWbStatus("สถานะ: World Boss ตายแล้ว — รอสรุปผลและออกจากสนาม...")
 							task.wait(0.4)
 						else
-							setWbStatus(string.format("สถานะ: กำลังสู้ %s (Auto Play ทำงานต่อเนื่อง)...", st.bossName or "World Boss"))
+							local _, coatReason, coatItemId, winElem = tryApplyWorldBossElementCoat(wbModel)
+							local coatHint = ""
+							if coatReason == "used" or coatReason == "already_active" then
+								coatHint = winElem and (" · ธาตุ " .. string.upper(winElem)) or ""
+							elseif coatReason == "out_of_stock" and coatItemId then
+								coatHint = " · คัมภีร์หมด"
+							end
+							setWbStatus(string.format("สถานะ: กำลังสู้ %s (Auto Play ทำงานต่อเนื่อง%s)...", st.bossName or "World Boss", coatHint))
 							HUB.UserDisabledAuto = false
 							HUB.BotPausingAuto = false
 							if not (HUB.IsPlayerDeadOrRespawning and HUB.IsPlayerDeadOrRespawning()) and not isHomeWarpActive() and not HUB.IsGameAutoActive() and HUB.EnsureGameAutoActive then
@@ -15029,10 +15365,11 @@ do
 				local dur = tonumber(a2) or 45
 				st.active = true
 				st.phase = "notice"
+				_lastWbCoatUse = 0
 				if type(a1) == "string" and #a1 > 0 then
 					st.bossName = a1
 				else
-					st.bossName = "Stormhorn"
+					st.bossName = "World Boss"
 				end
 				st.noticedAt = os.clock()
 				st.noticeExpiresAt = os.clock() + dur
