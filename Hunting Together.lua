@@ -1,5 +1,5 @@
 -- =========================================================================
--- Hunting Together Hub (v10.27)
+-- Hunting Together Hub (v10.29)
 -- เกม: 🎃 [HALLOWEEN] Hunting Together (Beta Test) · place 117483759937632
 -- Modules: Character Stats Style GUI · Ground-Truth Farm Automation · Settings
 --
@@ -11,7 +11,7 @@
 --         .workbuddy-ai/memory/Hunting Together_CHANGELOG.md
 -- =========================================================================
 
-local VERSION = "10.27"
+local VERSION = "10.29"
 local HUB_KEY = "HuntingTogetherHub"
 local GUI_NAME = "HuntingTogetherHubGui"
 local CFG_FILE = "HuntingTogether_Config.json"
@@ -376,7 +376,7 @@ local HUB = {
 	WorldBossState = {
 		active = false,
 		phase = "idle",
-		bossName = "Stormhorn",
+		bossName = "",
 		noticedAt = 0,
 		noticeExpiresAt = 0,
 		endsAt = 0,
@@ -1169,6 +1169,7 @@ do
 	local FALLBACK_WB_ARENAS = {
 		{ id = "worldboss_stormhorn", name = "Stormhorn", element = "wind", center = Vector3.new(2600, 520, -2400), radius = 72 },
 		{ id = "worldboss_vesperbloom", name = "Vesperbloom", element = "earth", center = Vector3.new(3400, 520, -2400), radius = 72 },
+		{ id = "worldboss_prismveil", name = "Prismveil", element = "water", center = Vector3.new(4200, 520, -2400), radius = 72 },
 	}
 
 	function HUB.GetWorldBossArenas()
@@ -1181,19 +1182,16 @@ do
 			local shared = ReplicatedStorage:FindFirstChild("Shared")
 			local wbMod = shared and shared:FindFirstChild("WorldBossData")
 			local mdMod = shared and shared:FindFirstChild("MonsterData")
-			if wbMod then
+			if wbMod and mdMod then
 				local okWb, wbData = pcall(require, wbMod)
-				local okMd, mdData = false, nil
-				if mdMod then
-					okMd, mdData = pcall(require, mdMod)
-				end
-				if okWb and type(wbData) == "table" and type(wbData.Bosses) == "table" and #wbData.Bosses > 0 then
+				local okMd, mdData = pcall(require, mdMod)
+				if okWb and type(wbData) == "table" and type(wbData.Bosses) == "table" and #wbData.Bosses > 0 and okMd and type(mdData) == "table" then
 					local list = {}
 					local defRadius = tonumber(wbData.ArenaRadius) or 72
 					for _, entry in ipairs(wbData.Bosses) do
 						if type(entry) == "table" and typeof(entry.Center) == "Vector3" then
 							local bId = tostring(entry.Id or "")
-							local mInfo = (okMd and type(mdData) == "table") and mdData[bId] or nil
+							local mInfo = mdData[bId]
 							table.insert(list, {
 								id = bId,
 								name = (mInfo and mInfo.Name) or bId,
@@ -2121,6 +2119,7 @@ do
 		local id = string.lower(resolved.Id or rawGear.Id or "")
 		local isFlask = id:find("flask") or resolved.IsFlask == true or (rawGear and rawGear.IsFlask == true)
 		local isWraps = id:find("wraps") or resolved.IsWraps == true or (rawGear and rawGear.IsWraps == true)
+		local isSabres = id:find("sabre") or resolved.IsSabres == true or (rawGear and rawGear.IsSabres == true)
 		if kind == "weapon" then
 			if id:find("bow") then
 				return "ranged_phys"
@@ -2128,7 +2127,7 @@ do
 				return "flask_magic"
 			elseif isWraps then
 				return "melee_phys"
-			elseif id:find("rod") or id:find("staff") or id:find("skullstaff") or resolved.MATK ~= nil then
+			elseif isSabres or id:find("rod") or id:find("staff") or id:find("skullstaff") or resolved.MATK ~= nil then
 				return "magic_weapon"
 			else
 				return "melee_phys"
@@ -6347,7 +6346,7 @@ do
 			{
 				Id = "WeaponMagic",
 				Name = "🪄 อาวุธเวทย์ (Magic Weapon)",
-				Sub = "กลุ่ม: WeaponMagic · คทา / คัมภีร์เวทย์ / คทากะโหลก (Skull Staff)",
+				Sub = "คทา / คัมภีร์เวทย์ / กะโหลก / ดาบพลังจิต (Sabres)",
 				SampleKey = "Items/rod_t5",
 				FallbackIcon = "rbxassetid://97000273852760",
 				Specials = { "CRIT", "MatkPercent", "AtkMatkPercent", "MPierce", "Cooldown", "CastSpeed", "CritDmg", "SkillSingle", "SkillAoe" },
@@ -9003,7 +9002,7 @@ do
 			infoLbl.Size = UDim2.new(1, -16, 0, 34)
 			infoLbl.Position = UDim2.new(0, 8, 0, 6)
 			infoLbl.BackgroundTransparency = 1
-			infoLbl.Text = "⚡ วาร์ปป๊อปอัป/เข้า Portal หน้าประตู -> ตายพากลับตีต่อจนจบ · 🏰 พักการทำงานอัตโนมัติเมื่ออยู่ในดันเจี้ยน\n🛡️ Auto Dodge ยึดตามสวิตช์หลัก · รองรับ Stormhorn (ธาตุลม) และ Vesperbloom (ธาตุดิน)"
+			infoLbl.Text = "⚡ วาร์ปป๊อปอัป/เข้า Portal หน้าประตู -> ตายพากลับตีต่อจนจบ · 🏰 พักการทำงานอัตโนมัติเมื่ออยู่ในดันเจี้ยน\n🛡️ Auto Dodge ยึดตามสวิตช์หลัก · รองรับ Stormhorn (ลม) · Vesperbloom (ดิน) · Prismveil (น้ำ)"
 			infoLbl.TextColor3 = Color3.fromRGB(205, 220, 240)
 			infoLbl.TextSize = 11
 			infoLbl.TextWrapped = true
@@ -9045,7 +9044,7 @@ do
 			coatSub.Size = UDim2.new(1, -86, 0, 14)
 			coatSub.Position = UDim2.new(0, 10, 0, 23)
 			coatSub.BackgroundTransparency = 1
-			coatSub.Text = "กดใช้คัมภีร์เคลือบอาวุธชนะทางบอสอัตโนมัติ (Stormhorn→ดิน · Vesperbloom→ไฟ)"
+			coatSub.Text = "ชนะทางอัตโนมัติ: Stormhorn→ดิน · Vesperbloom→ไฟ · Prismveil→ลม"
 			coatSub.TextColor3 = Color3.fromRGB(168, 198, 235)
 			coatSub.TextSize = 10
 			coatSub.TextXAlignment = Enum.TextXAlignment.Left
@@ -14045,7 +14044,8 @@ do
 		if string.find(lowerText, "world boss", 1, true)
 			or string.find(lowerText, "worldboss", 1, true)
 			or string.find(lowerText, "stormhorn", 1, true)
-			or string.find(lowerText, "vesperbloom", 1, true) then
+			or string.find(lowerText, "vesperbloom", 1, true)
+			or string.find(lowerText, "prismveil", 1, true) then
 			return true
 		end
 		if HUB.GetWorldBossArenas then
@@ -15203,6 +15203,7 @@ do
 						end
 						if not HUB.IsInWorldBoss() then
 							st.active = false
+							st.bossName = ""
 							break
 						end
 					else
@@ -15238,7 +15239,8 @@ do
 							elseif coatReason == "out_of_stock" and coatItemId then
 								coatHint = " · คัมภีร์หมด"
 							end
-							setWbStatus(string.format("สถานะ: กำลังสู้ %s (Auto Play ทำงานต่อเนื่อง%s)...", st.bossName or "World Boss", coatHint))
+							local displayBossName = (type(st.bossName) == "string" and #st.bossName > 0) and st.bossName or "World Boss"
+							setWbStatus(string.format("สถานะ: กำลังสู้ %s (Auto Play ทำงานต่อเนื่อง%s)...", displayBossName, coatHint))
 							HUB.UserDisabledAuto = false
 							HUB.BotPausingAuto = false
 							if not (HUB.IsPlayerDeadOrRespawning and HUB.IsPlayerDeadOrRespawning()) and not isHomeWarpActive() and not HUB.IsGameAutoActive() and HUB.EnsureGameAutoActive then
@@ -15252,6 +15254,7 @@ do
 					if st.bossDefeatedAt and st.bossDefeatedAt > 0 and (os.clock() - st.bossDefeatedAt >= 1.5) then
 						closeWorldBossResultUi()
 						st.active = false
+						st.bossName = ""
 						break
 					end
 
@@ -15406,6 +15409,7 @@ do
 				if (st.bossDefeatedAt and st.bossDefeatedAt > 0) or endsAt <= workspace:GetServerTimeNow() then
 					st.active = false
 					st.phase = "returning"
+					st.bossName = ""
 				end
 			end
 		end))
@@ -15426,6 +15430,7 @@ do
 			end
 		elseif st.active and not HUB.IsInWorldBoss() and (os.clock() - (st.noticedAt or 0) > 60.0) then
 			st.active = false
+			st.bossName = ""
 		end
 	end))
 
@@ -15772,7 +15777,7 @@ do
 			local myJob = LocalPlayer:GetAttribute("Job") or "Archer"
 			if myJob == "Archer" then
 				atkRange = 34
-			elseif myJob == "Mage" or myJob == "Alchemist" or myJob == "Necromancer" then
+			elseif myJob == "Mage" or myJob == "Alchemist" or myJob == "Necromancer" or myJob == "SwordGod" then
 				atkRange = 30
 			elseif myJob == "Cleric" then
 				atkRange = 24
